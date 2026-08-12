@@ -3,6 +3,8 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
+import ccxt
+
 from src.core.config import (
     FUTURES_RISK_PER_TRADE,
     FUTURES_SYMBOLS,
@@ -20,6 +22,7 @@ from src.data.futures_exchange import (
     get_futures_balance,
     get_futures_client,
     get_futures_market_data_client,
+    get_max_leverage,
     get_position,
     set_leverage,
     set_margin_mode,
@@ -158,29 +161,59 @@ def record_manual_close(client, symbol: str) -> dict | None:
     return closed_entry
 
 
-def initialize(client) -> list[str]:
+def initialize(client) -> dict[str, int]:
     """루프 시작 시 한 번만 호출 — 감시하는 모든 종목의 레버리지/마진모드를 설정한다.
 
     FUTURES_SYMBOLS 중 지금 연결된 거래소 환경(예: 데모 트레이딩)에 아예 없는 심볼은 건너뛴다 —
     SOXL처럼 실거래 선물에는 있지만 데모 트레이딩에는 없는 경우가 실제로 있었음(BadSymbol로
-    initialize() 자체가 죽어서 봇이 아예 못 뜨는 문제였음). 이번 세션에서 실제로 감시 가능한
-    심볼 목록을 반환한다."""
+    initialize() 자체가 죽어서 봇이 아예 못 뜨는 문제였음).
+
+    심볼별로 거래소가 허용하는 최대 레버리지가 다르다(예: TSLA는 5배가 한도라 LEVERAGE=10
+    설정으로 set_leverage를 호출하면 거래소가 거부한다 — 2026-08-12 실전에서 initialize()
+    전체가 죽어 봇이 아예 안 뜨는 사고로 확인됨). `leveraged_position_size`의 리스크 기반
+    수량 계산은 레버리지와 무관하고(포지션 상한으로만 쓰임) 이 전략의 손절폭(1.25%)에서는
+    5배만 돼도 그 상한에 안 걸리므로, 거부당한 심볼은 건너뛰는 대신 거래소가 허용하는 한도까지
+    자동으로 낮춰서 재시도한다 — 대신 그 낮아진 레버리지는 청산가 추정에 정확히 반영해야
+    하므로(레버리지가 낮을수록 청산가가 진입가에서 더 멀어짐) 심볼별 실제 적용 레버리지를
+    맵으로 돌려준다.
+
+    이번 세션에서 실제로 감시 가능한 {심볼: 적용된 레버리지} 맵을 반환한다."""
     client.load_markets()
-    available = []
+    leverage_by_symbol: dict[str, int] = {}
     for symbol in FUTURES_SYMBOLS:
         if symbol not in client.markets:
             logger.warning("symbol %s is not available on this exchange environment — skipping", symbol)
             continue
+        effective_leverage = LEVERAGE
+        try:
+            set_leverage(client, symbol, LEVERAGE)
+        except ccxt.BadRequest:
+            max_leverage = get_max_leverage(client, symbol)
+            if max_leverage <= 0:
+                logger.warning("symbol %s rejected %dx leverage and no usable max-leverage tier was found — skipping",
+                                symbol, LEVERAGE)
+                continue
+            logger.warning("symbol %s does not accept %dx leverage on this exchange — using its max (%dx) instead",
+                            symbol, LEVERAGE, max_leverage)
+            try:
+                set_leverage(client, symbol, max_leverage)
+            except ccxt.BadRequest as exc:
+                logger.warning("symbol %s rejected even its own reported max leverage (%dx) — skipping (%s)",
+                                symbol, max_leverage, exc)
+                continue
+            effective_leverage = max_leverage
         set_margin_mode(client, symbol, MARGIN_MODE)
-        set_leverage(client, symbol, LEVERAGE)
-        available.append(symbol)
-    return available
+        leverage_by_symbol[symbol] = effective_leverage
+    return leverage_by_symbol
 
 
 def _evaluate_symbol(client, symbol: str, position: dict | None, margin_equity: float,
-                      open_position_count: int) -> dict:
+                      open_position_count: int, leverage: int = LEVERAGE) -> dict:
     """종목 하나에 대한 판단. 새 포지션을 열면 result["entered"]=True로 호출자에게 알려서
-    같은 사이클 안에서 MAX_CONCURRENT_POSITIONS 카운트를 즉시 반영할 수 있게 한다."""
+    같은 사이클 안에서 MAX_CONCURRENT_POSITIONS 카운트를 즉시 반영할 수 있게 한다.
+
+    leverage: initialize()가 이 심볼에 실제로 적용한 레버리지(거래소 한도 때문에 설정값보다
+    낮을 수 있음 — 예: TSLA는 5배). 청산가 추정에 실제 레버리지를 써야 정확하다."""
     if position is not None:
         return {"symbol": symbol, "has_position": True, "event": "holding_position",
                 "position": position, "entered": False}
@@ -203,7 +236,7 @@ def _evaluate_symbol(client, symbol: str, position: dict | None, margin_equity: 
     entry_price = float(df["close"].iloc[-1])
     side = "long" if signal == "LONG" else "short"
     stop_loss_price, take_profit_price = compute_bracket_prices(entry_price, side)
-    liquidation_estimate = estimate_liquidation_price(entry_price, LEVERAGE, side)
+    liquidation_estimate = estimate_liquidation_price(entry_price, leverage, side)
     safety = check_stop_before_liquidation(entry_price, stop_loss_price, side, liquidation_estimate)
 
     result.update({
@@ -216,7 +249,7 @@ def _evaluate_symbol(client, symbol: str, position: dict | None, margin_equity: 
         result["reason"] = safety.reason
         return result
 
-    quantity = leveraged_position_size(margin_equity, entry_price, stop_loss_price, LEVERAGE, FUTURES_RISK_PER_TRADE)
+    quantity = leveraged_position_size(margin_equity, entry_price, stop_loss_price, leverage, FUTURES_RISK_PER_TRADE)
     if quantity <= 0:
         result["event"] = "rejected_zero_quantity"
         return result
@@ -229,11 +262,16 @@ def _evaluate_symbol(client, symbol: str, position: dict | None, margin_equity: 
     return result
 
 
-def run_once(client, consecutive_losses: int = None, daily_pnl_pct: float = None, symbols: list[str] = None) -> dict:
+def run_once(client, consecutive_losses: int = None, daily_pnl_pct: float = None, symbols: list[str] = None,
+             leverage_by_symbol: dict[str, int] = None) -> dict:
     """감시 루프 한 사이클. symbols(기본값 FUTURES_SYMBOLS 전체)를 순회하며 판단하되, 동시 보유
     포지션이 MAX_CONCURRENT_POSITIONS에 도달하면 나머지 종목은 신규 진입을 건너뛴다
-    (skipped_max_positions). symbols는 보통 initialize()가 돌려준, 이 거래소 환경에 실제로
-    존재하는 심볼 목록을 그대로 넘겨받는다.
+    (skipped_max_positions). symbols는 보통 initialize()가 돌려준 {심볼: 적용레버리지} 맵의
+    키 목록을 그대로 넘겨받는다.
+
+    leverage_by_symbol: initialize()가 돌려준 {심볼: 적용레버리지} 맵을 그대로 넘기면 심볼별로
+    실제 설정된 레버리지를 청산가 추정/수량 계산에 쓴다. 안 넘기거나 맵에 없는 심볼은 config의
+    기본 LEVERAGE를 쓴다.
 
     consecutive_losses를 호출자가 안 넘기면(None) 저널에서 직접 계산한다 — 예전엔 호출자
     (run_futures_bot.py)가 이 값을 아예 안 넘겨서 항상 0으로 고정되고, 서킷브레이커의 "연속
@@ -241,6 +279,7 @@ def run_once(client, consecutive_losses: int = None, daily_pnl_pct: float = None
     기본값을 0이 아니라 None으로 두고 여기서 자동 계산하게 해서, 앞으로 호출자가 깜빡 잊고
     안 넘겨도 같은 사고가 재발하지 않게 했다."""
     symbols = FUTURES_SYMBOLS if symbols is None else symbols
+    leverage_by_symbol = leverage_by_symbol or {}
     balance = get_futures_balance(client)
     margin_equity = (balance.get("USDT") or {}).get("total") or 0.0
 
@@ -262,7 +301,8 @@ def run_once(client, consecutive_losses: int = None, daily_pnl_pct: float = None
     open_count = sum(1 for p in positions.values() if p is not None)
 
     for symbol in symbols:
-        result = _evaluate_symbol(client, symbol, positions[symbol], margin_equity, open_count)
+        leverage = leverage_by_symbol.get(symbol, LEVERAGE)
+        result = _evaluate_symbol(client, symbol, positions[symbol], margin_equity, open_count, leverage)
         if result["entered"]:
             open_count += 1
         if result["event"] not in _SILENT_EVENTS:

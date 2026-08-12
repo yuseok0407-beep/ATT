@@ -52,6 +52,14 @@ def set_leverage(client: ccxt.binance, symbol: str, leverage: int) -> None:
     client.set_leverage(leverage, symbol)
 
 
+def get_max_leverage(client: ccxt.binance, symbol: str) -> int:
+    """이 심볼에 거래소가 허용하는 최대 레버리지. 심볼마다 다르다(예: BTC 125x, TSLA 5x —
+    2026-08-12 실전 확인, 토큰화 주식형 심볼일수록 낮은 편)."""
+    tiers = client.fetch_leverage_tiers([symbol])
+    symbol_tiers = tiers.get(symbol) or []
+    return int(max((t.get("maxLeverage") or 0) for t in symbol_tiers)) if symbol_tiers else 0
+
+
 _MARGIN_MODE_ALREADY_OK_MESSAGES = (
     "No need to change margin type",  # 이미 같은 마진 모드로 설정된 경우
     "Position side cannot be changed if there exists open orders",  # 이미 포지션/주문이 있어 변경 불가한 경우

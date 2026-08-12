@@ -12,11 +12,13 @@ from src.core.config import (
     MAX_CONCURRENT_POSITIONS,
     RULE_ADX_THRESHOLD,
     RULE_SMA_PERIOD,
+    RULE_TIMEFRAME,
     STOP_LOSS_PCT,
     TAKE_PROFIT_RR,
 )
 from src.core.risk import MAX_CONSECUTIVE_LOSSES, MAX_DAILY_LOSS_PCT
 from src.core.state import compute_consecutive_losses, get_daily_pnl_pct
+from src.data.exchange import fetch_ohlcv_df
 from src.data.futures_exchange import get_futures_balance, get_futures_client, get_position
 from src.execution import bot_process
 from src.execution.futures_orders import close_position
@@ -122,6 +124,23 @@ def api_status():
 def api_performance():
     entries = read_entries(path=JOURNAL_PATH)
     return jsonify(summarize_performance(entries))
+
+
+@app.route("/api/chart/<path:symbol>")
+def api_chart(symbol):
+    """대시보드의 종목 클릭 차트용 — 전략이 실제로 보는 것과 같은 타임프레임(RULE_TIMEFRAME)의
+    최근 캔들을 그대로 돌려준다."""
+    client = _get_client()
+    if symbol not in client.markets:
+        return jsonify({"status": "error", "message": "알 수 없는 심볼입니다."}), 404
+
+    df = fetch_ohlcv_df(client, symbol, timeframe=RULE_TIMEFRAME, limit=100)
+    candles = [
+        {"time": row.timestamp.isoformat(), "open": row.open, "high": row.high,
+         "low": row.low, "close": row.close}
+        for row in df.itertuples()
+    ]
+    return jsonify({"symbol": symbol, "timeframe": RULE_TIMEFRAME, "candles": candles})
 
 
 @app.route("/api/close/<path:symbol>", methods=["POST"])

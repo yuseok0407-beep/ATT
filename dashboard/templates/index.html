@@ -99,6 +99,32 @@
   }
   .notify-btn:hover { background: rgba(96,165,250,.3); }
   .notify-btn.on { background: rgba(52,211,153,.15); color: var(--green); border-color: rgba(52,211,153,.4); }
+  .idle-row { display: flex; flex-wrap: wrap; gap: 8px; }
+  .idle-chip {
+    background: rgba(139,147,167,.10); border: 1px solid var(--border); border-radius: 999px;
+    padding: 5px 12px; font-size: 13px; color: var(--muted); cursor: pointer; font-weight: 600;
+  }
+  .idle-chip:hover { background: rgba(139,147,167,.2); color: var(--text); }
+  .symbol-card .ticker { cursor: pointer; }
+  .symbol-card .ticker:hover { text-decoration: underline; }
+  .chart-overlay {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 50;
+    align-items: center; justify-content: center;
+  }
+  .chart-overlay.open { display: flex; }
+  .chart-panel {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 18px; width: min(720px, 92vw);
+  }
+  .chart-panel .chart-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+  .chart-panel .chart-title { font-size: 15px; font-weight: 700; }
+  .chart-panel .chart-sub { color: var(--muted); font-size: 12px; }
+  .chart-close {
+    background: none; border: none; color: var(--muted); font-size: 20px; cursor: pointer; line-height: 1;
+  }
+  .chart-close:hover { color: var(--text); }
+  .chart-legend { display: flex; gap: 14px; font-size: 12px; color: var(--muted); margin-top: 8px; flex-wrap: wrap; }
+  .chart-legend .dot { width: 8px; height: 8px; border-radius: 2px; }
 </style>
 </head>
 <body>
@@ -123,7 +149,22 @@
   <section>
     <h2>종목별 상태</h2>
     <div class="symbol-grid" id="symbol-grid"></div>
+    <div class="idle-row" id="idle-row" style="margin-top:10px"></div>
   </section>
+
+  <div class="chart-overlay" id="chart-overlay" onclick="if (event.target === this) closeChart()">
+    <div class="chart-panel">
+      <div class="chart-head">
+        <div>
+          <div class="chart-title" id="chart-title">–</div>
+          <div class="chart-sub" id="chart-sub">–</div>
+        </div>
+        <button class="chart-close" onclick="closeChart()">✕</button>
+      </div>
+      <canvas id="chart-canvas" width="672" height="320" style="width:100%;height:320px"></canvas>
+      <div class="chart-legend" id="chart-legend"></div>
+    </div>
+  </div>
 
   <section>
     <h2>리스크 현황</h2>
@@ -220,6 +261,99 @@ function notifyNewEntry(e) {
       body: `실현손익 ${fmtUsd(e.realized_pnl)}`,
     });
   }
+}
+
+async function openChart(symbol, refPrices) {
+  const overlay = document.getElementById('chart-overlay');
+  const title = document.getElementById('chart-title');
+  const sub = document.getElementById('chart-sub');
+  title.textContent = shortSymbol(symbol);
+  sub.textContent = '불러오는 중…';
+  document.getElementById('chart-legend').innerHTML = '';
+  overlay.className = 'chart-overlay open';
+
+  let data;
+  try {
+    const res = await fetch('/api/chart/' + encodeURIComponent(symbol));
+    data = await res.json();
+    if (!res.ok) throw new Error(data.message || '차트를 불러오지 못했습니다.');
+  } catch (e) {
+    sub.textContent = e.message || '차트를 불러오지 못했습니다.';
+    return;
+  }
+
+  const candles = data.candles || [];
+  if (candles.length === 0) {
+    sub.textContent = '캔들 데이터가 없습니다.';
+    return;
+  }
+  const last = candles[candles.length - 1];
+  sub.textContent = `${data.timeframe} · 최근 ${candles.length}봉 · 현재가 ${fmtPrice(last.close)}`;
+  drawChart(candles, refPrices || {});
+}
+
+function closeChart() {
+  document.getElementById('chart-overlay').className = 'chart-overlay';
+}
+
+function drawChart(candles, refPrices) {
+  const canvas = document.getElementById('chart-canvas');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+
+  const closes = candles.map(c => c.close);
+  const allValues = closes.slice();
+  ['entry_price', 'stop_loss_price', 'take_profit_price'].forEach(k => {
+    if (refPrices[k] !== null && refPrices[k] !== undefined) allValues.push(refPrices[k]);
+  });
+  const min = Math.min(...allValues), max = Math.max(...allValues);
+  const pad = (max - min) * 0.08 || 1;
+  const lo = min - pad, hi = max + pad;
+
+  const marginL = 64, marginR = 12, marginT = 12, marginB = 12;
+  const plotW = W - marginL - marginR, plotH = H - marginT - marginB;
+  const xAt = i => marginL + (closes.length === 1 ? 0 : (i / (closes.length - 1)) * plotW);
+  const yAt = v => marginT + plotH - ((v - lo) / (hi - lo)) * plotH;
+
+  ctx.fillStyle = '#8b93a7';
+  ctx.font = '11px sans-serif';
+  ctx.textAlign = 'right';
+  ctx.fillText(fmtPrice(hi), marginL - 8, marginT + 10);
+  ctx.fillText(fmtPrice(lo), marginL - 8, marginT + plotH);
+
+  function refLine(price, color) {
+    if (price === null || price === undefined) return;
+    const py = yAt(price);
+    ctx.strokeStyle = color;
+    ctx.setLineDash([4, 4]);
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(marginL, py);
+    ctx.lineTo(W - marginR, py);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  refLine(refPrices.entry_price, '#8b93a7');
+  refLine(refPrices.stop_loss_price, '#f87171');
+  refLine(refPrices.take_profit_price, '#34d399');
+
+  ctx.strokeStyle = '#60a5fa';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  closes.forEach((c, i) => {
+    const px = xAt(i), py = yAt(c);
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  });
+  ctx.stroke();
+
+  const legendItems = [];
+  if (refPrices.entry_price != null) legendItems.push(['#8b93a7', `진입 ${fmtPrice(refPrices.entry_price)}`]);
+  if (refPrices.stop_loss_price != null) legendItems.push(['#f87171', `손절 ${fmtPrice(refPrices.stop_loss_price)}`]);
+  if (refPrices.take_profit_price != null) legendItems.push(['#34d399', `익절 ${fmtPrice(refPrices.take_profit_price)}`]);
+  document.getElementById('chart-legend').innerHTML = legendItems.map(
+    ([color, label]) => `<span><span class="dot" style="display:inline-block;background:${color}"></span> ${label}</span>`
+  ).join('');
 }
 
 async function closePosition(symbol) {
@@ -410,29 +544,35 @@ async function refresh() {
     `;
   }
 
+  const allSymbols = Object.entries(data.symbols);
+  const active = allSymbols.filter(([, s]) => s.has_position && s.position);
+  const idle = allSymbols.filter(([, s]) => !(s.has_position && s.position));
+
   const grid = document.getElementById('symbol-grid');
-  grid.innerHTML = Object.entries(data.symbols).map(([symbol, s]) => {
-    if (s.has_position && s.position) {
-      const p = s.position;
-      const pnlClass = p.unrealizedPnl >= 0 ? 'green' : 'red';
-      return `<div class="symbol-card">
-        <div class="header"><span class="ticker"><span class="dot on"></span>${shortSymbol(symbol)}</span>
-        <span style="font-size:12px;color:var(--muted)">${p.side === 'long' ? '롱' : '숏'}</span></div>
-        <div class="row"><span class="k">진입가</span><span class="v">${fmtPrice(p.entryPrice)}</span></div>
-        <div class="row"><span class="k">현재가</span><span class="v">${fmtPrice(p.markPrice)}</span></div>
-        <div class="row"><span class="k">미실현손익</span><span class="v ${pnlClass}">${fmtUsd(p.unrealizedPnl)}</span></div>
-        <div class="row"><span class="k">청산가</span><span class="v" style="color:var(--amber)">${fmtPrice(p.liquidationPrice)}</span></div>
-        <div class="row"><span class="k">손절가</span><span class="v" style="color:var(--red)">${fmtPrice(s.stop_loss_price)}</span></div>
-        <div class="row"><span class="k">익절가</span><span class="v" style="color:var(--green)">${fmtPrice(s.take_profit_price)}</span></div>
-        <button class="close-btn" id="close-btn-${shortSymbol(symbol)}" style="width:100%;margin-top:10px"
-          onclick="closePosition('${symbol}')">긴급 청산</button>
-      </div>`;
-    }
+  grid.innerHTML = active.map(([symbol, s]) => {
+    const p = s.position;
+    const pnlClass = p.unrealizedPnl >= 0 ? 'green' : 'red';
+    const refPrices = JSON.stringify({
+      entry_price: p.entryPrice, stop_loss_price: s.stop_loss_price, take_profit_price: s.take_profit_price,
+    }).replace(/"/g, '&quot;');
     return `<div class="symbol-card">
-      <div class="header"><span class="ticker"><span class="dot off"></span>${shortSymbol(symbol)}</span>
-      <span style="font-size:12px;color:var(--muted)">대기 중</span></div>
+      <div class="header"><span class="ticker" onclick='openChart(${JSON.stringify(symbol)}, ${refPrices})'>
+        <span class="dot on"></span>${shortSymbol(symbol)}</span>
+      <span style="font-size:12px;color:var(--muted)">${p.side === 'long' ? '롱' : '숏'}</span></div>
+      <div class="row"><span class="k">진입가</span><span class="v">${fmtPrice(p.entryPrice)}</span></div>
+      <div class="row"><span class="k">현재가</span><span class="v">${fmtPrice(p.markPrice)}</span></div>
+      <div class="row"><span class="k">미실현손익</span><span class="v ${pnlClass}">${fmtUsd(p.unrealizedPnl)}</span></div>
+      <div class="row"><span class="k">청산가</span><span class="v" style="color:var(--amber)">${fmtPrice(p.liquidationPrice)}</span></div>
+      <div class="row"><span class="k">손절가</span><span class="v" style="color:var(--red)">${fmtPrice(s.stop_loss_price)}</span></div>
+      <div class="row"><span class="k">익절가</span><span class="v" style="color:var(--green)">${fmtPrice(s.take_profit_price)}</span></div>
+      <button class="close-btn" id="close-btn-${shortSymbol(symbol)}" style="width:100%;margin-top:10px"
+        onclick="closePosition('${symbol}')">긴급 청산</button>
     </div>`;
-  }).join('');
+  }).join('') || '<div class="empty">보유 중인 포지션이 없습니다.</div>';
+
+  document.getElementById('idle-row').innerHTML = idle.map(([symbol]) =>
+    `<span class="idle-chip" onclick='openChart(${JSON.stringify(symbol)}, {})'>${shortSymbol(symbol)}</span>`
+  ).join('');
 
   const entries = data.recent_entries || [];
 

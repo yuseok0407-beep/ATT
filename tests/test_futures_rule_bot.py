@@ -1,6 +1,7 @@
 from datetime import datetime
 from unittest.mock import MagicMock, patch
 
+import ccxt
 import numpy as np
 import pandas as pd
 import pytest
@@ -186,29 +187,83 @@ def test_run_once_uses_explicit_symbols_list_over_config_default():
 
 class TestInitialize:
     """실전에서 발견된 문제: SOXL이 실거래 선물엔 있지만 바이낸스 데모 트레이딩 환경엔 없어서
-    initialize()가 BadSymbol로 죽어 봇 자체가 못 뜨던 것을 고친 부분."""
+    initialize()가 BadSymbol로 죽어 봇 자체가 못 뜨던 것, 그리고 TSLA처럼 거래소 레버리지 한도가
+    설정값(10배)보다 낮은 심볼에서 set_leverage가 거부돼 똑같이 죽던 것을 고친 부분. 이제
+    {심볼: 실제 적용된 레버리지} 맵을 반환한다."""
 
-    def test_skips_symbol_not_in_client_markets_and_returns_available_list(self):
+    def test_skips_symbol_not_in_client_markets_and_returns_leverage_map(self):
         client = MagicMock()
         client.markets = {s: {} for s in SYMBOLS if s != "SOL/USDT:USDT"}  # SOL만 이 거래소에 없다고 가정
 
         with patch("src.futures_rule_bot.set_margin_mode") as mock_margin, \
              patch("src.futures_rule_bot.set_leverage") as mock_leverage:
-            available = bot.initialize(client)
+            result = bot.initialize(client)
 
-        assert available == ["BTC/USDT:USDT", "ETH/USDT:USDT", "XRP/USDT:USDT"]
+        assert result == {"BTC/USDT:USDT": 10, "ETH/USDT:USDT": 10, "XRP/USDT:USDT": 10}
         client.load_markets.assert_called_once()
         assert mock_margin.call_count == 3
         assert mock_leverage.call_count == 3
 
-    def test_all_symbols_available_returns_full_list(self):
+    def test_all_symbols_available_returns_full_map(self):
         client = MagicMock()
         client.markets = {s: {} for s in SYMBOLS}
 
         with patch("src.futures_rule_bot.set_margin_mode"), patch("src.futures_rule_bot.set_leverage"):
-            available = bot.initialize(client)
+            result = bot.initialize(client)
 
-        assert available == SYMBOLS
+        assert result == {s: 10 for s in SYMBOLS}
+
+    def test_retries_with_exchange_max_leverage_when_configured_leverage_is_rejected(self):
+        """실전 버그 재현: TSLA는 거래소 레버리지 한도가 5배라 LEVERAGE=10으로 set_leverage를
+        호출하면 거래소가 거부한다. 리스크 기반 수량 계산은 레버리지와 무관하므로(포지션 상한
+        으로만 쓰임) 건너뛰는 대신 거래소가 허용하는 한도로 자동 재시도해야 한다."""
+        client = MagicMock()
+        client.markets = {s: {} for s in SYMBOLS}
+
+        def _reject_configured_leverage(client, symbol, leverage):
+            if symbol == "ETH/USDT:USDT" and leverage == 10:
+                raise ccxt.BadRequest('binance {"code":-4028,"msg":"Leverage 10 is not valid"}')
+
+        with patch("src.futures_rule_bot.set_margin_mode") as mock_margin, \
+             patch("src.futures_rule_bot.set_leverage", side_effect=_reject_configured_leverage), \
+             patch("src.futures_rule_bot.get_max_leverage", return_value=5) as mock_max_leverage:
+            result = bot.initialize(client)
+
+        assert result == {"BTC/USDT:USDT": 10, "ETH/USDT:USDT": 5, "SOL/USDT:USDT": 10, "XRP/USDT:USDT": 10}
+        mock_max_leverage.assert_called_once_with(client, "ETH/USDT:USDT")
+        assert mock_margin.call_count == 4  # 재시도로 성공한 종목도 정상적으로 마진모드까지 설정됨
+
+    def test_skips_symbol_when_it_rejects_even_its_own_reported_max_leverage(self):
+        client = MagicMock()
+        client.markets = {s: {} for s in SYMBOLS}
+
+        def _always_reject(client, symbol, leverage):
+            if symbol == "ETH/USDT:USDT":
+                raise ccxt.BadRequest('binance {"code":-4028,"msg":"Leverage is not valid"}')
+
+        with patch("src.futures_rule_bot.set_margin_mode") as mock_margin, \
+             patch("src.futures_rule_bot.set_leverage", side_effect=_always_reject), \
+             patch("src.futures_rule_bot.get_max_leverage", return_value=5):
+            result = bot.initialize(client)
+
+        assert "ETH/USDT:USDT" not in result
+        assert set(result) == {"BTC/USDT:USDT", "SOL/USDT:USDT", "XRP/USDT:USDT"}
+        assert mock_margin.call_count == 3
+
+    def test_skips_symbol_when_no_max_leverage_tier_is_found(self):
+        client = MagicMock()
+        client.markets = {s: {} for s in SYMBOLS}
+
+        def _reject_configured_leverage(client, symbol, leverage):
+            if symbol == "ETH/USDT:USDT":
+                raise ccxt.BadRequest('binance {"code":-4028,"msg":"Leverage 10 is not valid"}')
+
+        with patch("src.futures_rule_bot.set_margin_mode"), \
+             patch("src.futures_rule_bot.set_leverage", side_effect=_reject_configured_leverage), \
+             patch("src.futures_rule_bot.get_max_leverage", return_value=0):
+            result = bot.initialize(client)
+
+        assert "ETH/USDT:USDT" not in result
 
 
 class TestCheckAndLogClosedTrade:

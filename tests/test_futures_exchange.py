@@ -3,7 +3,7 @@ from unittest.mock import MagicMock
 import ccxt
 import pytest
 
-from src.data.futures_exchange import set_margin_mode
+from src.data.futures_exchange import get_max_leverage, set_margin_mode
 
 
 def test_set_margin_mode_calls_through_on_success():
@@ -33,3 +33,20 @@ def test_set_margin_mode_reraises_unrelated_errors():
     mock_client.set_margin_mode.side_effect = ccxt.ExchangeError("some unrelated failure")
     with pytest.raises(ccxt.ExchangeError):
         set_margin_mode(mock_client, "BTC/USDT:USDT", "isolated")
+
+
+def test_get_max_leverage_returns_highest_tier():
+    mock_client = MagicMock()
+    mock_client.fetch_leverage_tiers.return_value = {
+        "TSLA/USDT:USDT": [
+            {"maxLeverage": 5.0}, {"maxLeverage": 3.0}, {"maxLeverage": 1.0},
+        ],
+    }
+    assert get_max_leverage(mock_client, "TSLA/USDT:USDT") == 5
+    mock_client.fetch_leverage_tiers.assert_called_once_with(["TSLA/USDT:USDT"])
+
+
+def test_get_max_leverage_returns_zero_when_symbol_missing():
+    mock_client = MagicMock()
+    mock_client.fetch_leverage_tiers.return_value = {}
+    assert get_max_leverage(mock_client, "TSLA/USDT:USDT") == 0

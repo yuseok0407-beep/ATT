@@ -39,7 +39,15 @@ POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "30"))  # 감시 
 
 # 다종목 감시 — 여러 심볼을 동시에 감시하되, 거래당 리스크(FUTURES_RISK_PER_TRADE)는 종목별로 그대로
 # 두고 대신 "동시에 열 수 있는 포지션 개수"를 제한해 총 노출을 억제한다.
+#
+# 2026-08-12 스크리닝(scripts/run_symbol_screen_backtest.py, 36종목·1h·365일)+아웃오브샘플 검증
+# (scripts/run_symbol_oos_backtest.py, 전반/후반 둘 다 총R 양수인 것만 PASS) 결과로 구성:
+#   - BTC/ETH: OOS는 FAIL(후반 구간 마이너스)이지만 이미 실거래 중이라 사용자 판단으로 유지
+#   - SOL/XRP: 스크리닝 최상위 + OOS PASS (엣지 가장 강함)
+#   - CRCL/TSLA/BNB: 신규 추가, OOS PASS. SOXL은 데모 트레이딩 계좌에 아예 없어서(상장 자체가
+#     안 됨, initialize()가 매번 건너뜀) 자리만 차지하던 걸 이걸로 교체
 FUTURES_SYMBOLS = [s.strip() for s in os.getenv(
-    "FUTURES_SYMBOLS", "BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT,XRP/USDT:USDT,SOXL/USDT:USDT",
+    "FUTURES_SYMBOLS",
+    "BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT,XRP/USDT:USDT,CRCL/USDT:USDT,TSLA/USDT:USDT,BNB/USDT:USDT",
 ).split(",") if s.strip()]
 MAX_CONCURRENT_POSITIONS = int(os.getenv("MAX_CONCURRENT_POSITIONS", "2"))

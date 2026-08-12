@@ -32,11 +32,14 @@ if __name__ == "__main__":
                 ", ".join(FUTURES_SYMBOLS), MAX_CONCURRENT_POSITIONS, POLL_INTERVAL_SECONDS)
 
     client = get_futures_client()
-    symbols = initialize(client)
+    leverage_by_symbol = initialize(client)
+    symbols = list(leverage_by_symbol)
     skipped = [s for s in FUTURES_SYMBOLS if s not in symbols]
     if skipped:
-        logger.warning("skipped (not available on this exchange environment): %s", ", ".join(skipped))
-    logger.info("leverage/margin mode set for %s — entering monitoring loop. Ctrl+C to stop.", ", ".join(symbols))
+        logger.warning("skipped (not available on this exchange, or leverage rejected with no usable tier): %s",
+                        ", ".join(skipped))
+    logger.info("leverage/margin mode set — entering monitoring loop. Ctrl+C to stop. %s",
+                ", ".join(f"{s}={lev}x" for s, lev in leverage_by_symbol.items()))
 
     # 신호가 없으면 로그를 안 남기는 게 기본 동작이라, "봇이 조용한 것"과 "봇이 멈춘 것"을
     # 로그만 보고는 구분할 수 없었다 — 주기적 하트비트로 생존 여부를 항상 확인 가능하게 한다.
@@ -46,7 +49,7 @@ if __name__ == "__main__":
     while True:
         cycle_count += 1
         try:
-            cycle = run_once(client, symbols=symbols)
+            cycle = run_once(client, symbols=symbols, leverage_by_symbol=leverage_by_symbol)
             write_heartbeat(cycle_count, cycle.get("open_position_count", 0), cycle["margin_equity"])
 
             if cycle.get("event") == "circuit_breaker_blocked":
