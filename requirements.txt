@@ -1,0 +1,8 @@
+ccxt
+anthropic
+python-dotenv
+pandas
+numpy
+apscheduler
+flask
+psutil

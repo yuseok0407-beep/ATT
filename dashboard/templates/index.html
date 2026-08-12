@@ -1,0 +1,483 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>auto2 선물 봇 대시보드</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --border: #262b36; --text: #e6e8ee;
+    --muted: #8b93a7; --green: #34d399; --red: #f87171; --blue: #60a5fa; --amber: #fbbf24;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--text); margin: 0; padding: 24px;
+    font-family: -apple-system, "Segoe UI", Pretendard, sans-serif;
+  }
+  h1 { font-size: 18px; font-weight: 600; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 20px; }
+  .symbol-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+  }
+  .card .label { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+  .card .value { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .value.green { color: var(--green); }
+  .value.red { color: var(--red); }
+  .value.amber { color: var(--amber); }
+  .value.blue { color: var(--blue); }
+  section { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  section h2 { font-size: 14px; margin: 0 0 12px; color: var(--muted); font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; }
+  td.reason { white-space: normal; color: var(--muted); max-width: 380px; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .badge.entered { background: rgba(52,211,153,.15); color: var(--green); }
+  .badge.closed { background: rgba(96,165,250,.15); color: var(--blue); }
+  .badge.no_signal { background: rgba(139,147,167,.15); color: var(--muted); }
+  .badge.holding_position { background: rgba(96,165,250,.15); color: var(--blue); }
+  .badge.skipped_max_positions { background: rgba(251,191,36,.15); color: var(--amber); }
+  .badge.circuit_breaker_blocked, .badge.rejected_unsafe_stop, .badge.rejected_zero_quantity { background: rgba(248,113,113,.15); color: var(--red); }
+  .close-btn {
+    background: rgba(248,113,113,.15); color: var(--red); border: 1px solid rgba(248,113,113,.4);
+    border-radius: 6px; padding: 4px 10px; font-size: 12px; font-weight: 600; cursor: pointer;
+  }
+  .close-btn:hover { background: rgba(248,113,113,.3); }
+  .close-btn:disabled { opacity: .5; cursor: not-allowed; }
+  .start-btn {
+    background: rgba(52,211,153,.15); color: var(--green); border: 1px solid rgba(52,211,153,.4);
+    border-radius: 6px; padding: 6px 14px; font-size: 13px; font-weight: 600; cursor: pointer;
+  }
+  .start-btn:hover { background: rgba(52,211,153,.3); }
+  .start-btn:disabled, .stop-btn:disabled { opacity: .5; cursor: not-allowed; }
+  .stop-btn {
+    background: rgba(248,113,113,.15); color: var(--red); border: 1px solid rgba(248,113,113,.4);
+    border-radius: 6px; padding: 6px 14px; font-size: 13px; font-weight: 600; cursor: pointer;
+  }
+  .stop-btn:hover { background: rgba(248,113,113,.3); }
+  .bot-controls { display: flex; gap: 8px; margin-top: 10px; }
+  .empty { color: var(--muted); font-size: 13px; padding: 16px 0; text-align: center; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+  .dot.on { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .dot.off { background: var(--muted); }
+  .symbol-card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+  .symbol-card .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+  .symbol-card .ticker { font-weight: 700; font-size: 14px; }
+  .symbol-card .row { display: flex; justify-content: space-between; font-size: 13px; padding: 3px 0; }
+  .symbol-card .row .k { color: var(--muted); }
+  .symbol-card .row .v { font-variant-numeric: tabular-nums; }
+  .stat-row { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+  .stat { flex: 1; min-width: 120px; }
+  .stat .label { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+  .stat .value { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .subtable { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 6px; }
+  .subtable th, .subtable td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  .subtable th { color: var(--muted); font-weight: 500; }
+  .reason-chips { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+  .reason-chip {
+    background: rgba(139,147,167,.12); border: 1px solid var(--border); border-radius: 999px;
+    padding: 3px 10px; font-size: 12px; color: var(--muted);
+  }
+  .reason-chip b { color: var(--text); }
+  .gauge-track {
+    background: rgba(139,147,167,.15); border-radius: 999px; height: 10px; overflow: hidden; margin: 6px 0 4px;
+  }
+  .gauge-fill { height: 100%; border-radius: 999px; transition: width .3s ease; background: var(--green); }
+  .gauge-fill.amber { background: var(--amber); }
+  .gauge-fill.red { background: var(--red); }
+  .gauge-caption { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); }
+  .config-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-top: 12px; }
+  .config-item { background: rgba(139,147,167,.08); border-radius: 8px; padding: 8px 12px; }
+  .config-item .k { color: var(--muted); font-size: 12px; }
+  .config-item .v { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; margin-top: 2px; }
+  .heartbeat-line { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .heartbeat-line.stale { color: var(--amber); }
+  .notify-btn {
+    background: rgba(96,165,250,.15); color: var(--blue); border: 1px solid rgba(96,165,250,.4);
+    border-radius: 6px; padding: 4px 10px; font-size: 12px; font-weight: 600; cursor: pointer; margin-top: 8px;
+  }
+  .notify-btn:hover { background: rgba(96,165,250,.3); }
+  .notify-btn.on { background: rgba(52,211,153,.15); color: var(--green); border-color: rgba(52,211,153,.4); }
+</style>
+</head>
+<body>
+  <h1>auto2 선물 감시 봇</h1>
+  <div class="sub">{{ symbols|join(', ') }} · {{ leverage }}x · 최대 동시 {{ max_concurrent }}포지션 · <span id="last-updated">불러오는 중…</span></div>
+
+  <div class="grid">
+    <div class="card"><div class="label">마진 자산</div><div class="value" id="margin-equity">–</div></div>
+    <div class="card"><div class="label">보유 포지션</div><div class="value" id="open-count">–</div></div>
+    <div class="card">
+      <div class="label">감시 봇</div>
+      <div class="value" style="font-size:15px"><span class="dot off" id="bot-status-dot"></span><span id="bot-status-text">확인 중…</span></div>
+      <div class="bot-controls">
+        <button class="start-btn" id="bot-start-btn" onclick="startBot()" disabled>시작</button>
+        <button class="stop-btn" id="bot-stop-btn" onclick="stopBot()" disabled>중지</button>
+      </div>
+      <div class="heartbeat-line" id="heartbeat-line"></div>
+      <button class="notify-btn" id="notify-btn" onclick="toggleNotify()">🔔 알림 켜기</button>
+    </div>
+  </div>
+
+  <section>
+    <h2>종목별 상태</h2>
+    <div class="symbol-grid" id="symbol-grid"></div>
+  </section>
+
+  <section>
+    <h2>리스크 현황</h2>
+    <div>
+      <div class="gauge-caption"><span>일일 손익</span><span id="daily-pnl-text">–</span></div>
+      <div class="gauge-track"><div class="gauge-fill" id="daily-pnl-gauge" style="width:0%"></div></div>
+      <div class="gauge-caption"><span>0%</span><span id="daily-loss-limit-text">일일 손실 한도 -–%</span></div>
+    </div>
+    <div class="config-grid" id="config-grid"></div>
+  </section>
+
+  <section>
+    <h2>성과 요약</h2>
+    <div class="stat-row">
+      <div class="stat"><div class="label">총 거래 수</div><div class="value" id="perf-trades">–</div></div>
+      <div class="stat"><div class="label">승률</div><div class="value" id="perf-winrate">–</div></div>
+      <div class="stat"><div class="label">총 실현손익</div><div class="value" id="perf-total-pnl">–</div></div>
+      <div class="stat"><div class="label">평균 손익/거래</div><div class="value" id="perf-avg-pnl">–</div></div>
+    </div>
+    <div class="reason-chips" id="perf-reasons"></div>
+    <table class="subtable" id="perf-symbol-table" style="display:none">
+      <thead><tr><th>종목</th><th>거래수</th><th>승률</th><th>총손익</th></tr></thead>
+      <tbody id="perf-symbol-body"></tbody>
+    </table>
+    <div class="empty" id="perf-empty">아직 청산된 거래가 없습니다.</div>
+  </section>
+
+  <section>
+    <h2>최근 판단/거래 내역</h2>
+    <div id="entries-wrap">
+      <table id="entries-table" style="display:none">
+        <thead><tr><th>시각</th><th>종목</th><th>결과</th><th>신호</th><th>진입가</th><th>청산가</th><th>손절가</th><th>익절가</th><th>실현손익</th><th>사유</th></tr></thead>
+        <tbody id="entries-body"></tbody>
+      </table>
+      <div class="empty" id="entries-empty">아직 기록이 없습니다.</div>
+    </div>
+  </section>
+
+<script>
+function fmtUsd(n) {
+  if (n === null || n === undefined) return '–';
+  return '$' + Number(n).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+}
+function fmtPrice(n) {
+  if (n === null || n === undefined) return '–';
+  return Number(n).toLocaleString('en-US', {minimumFractionDigits: 1, maximumFractionDigits: 1});
+}
+function fmtPct(n, digits) {
+  if (n === null || n === undefined) return '–';
+  return (n * 100).toFixed(digits === undefined ? 1 : digits) + '%';
+}
+function shortSymbol(s) { return s.split('/')[0]; }
+
+const REASON_LABELS = {
+  stop_loss: '손절', take_profit: '익절', manual: '수동청산', breakeven_stop: '손익분기청산', unknown: '기타',
+};
+
+let notifyEnabled = localStorage.getItem('notifyEnabled') === 'true';
+let notifyInitialized = false;
+const seenEntryKeys = new Set();
+
+function updateNotifyBtn() {
+  const btn = document.getElementById('notify-btn');
+  if (notifyEnabled && Notification.permission === 'granted') {
+    btn.textContent = '🔔 알림 켜짐';
+    btn.className = 'notify-btn on';
+  } else {
+    btn.textContent = '🔔 알림 켜기';
+    btn.className = 'notify-btn';
+  }
+}
+
+async function toggleNotify() {
+  if (!('Notification' in window)) { alert('이 브라우저는 알림을 지원하지 않습니다.'); return; }
+  if (!notifyEnabled) {
+    const perm = await Notification.requestPermission();
+    if (perm !== 'granted') { alert('알림 권한이 거부되었습니다.'); return; }
+    notifyEnabled = true;
+  } else {
+    notifyEnabled = false;
+  }
+  localStorage.setItem('notifyEnabled', notifyEnabled);
+  updateNotifyBtn();
+}
+
+function notifyNewEntry(e) {
+  if (!notifyEnabled || Notification.permission !== 'granted') return;
+  const symbol = e.symbol ? shortSymbol(e.symbol) : '';
+  if (e.event === 'entered') {
+    new Notification(`${symbol} 진입`, { body: `${e.signal || ''} @ ${fmtPrice(e.entry_price)}` });
+  } else if (e.event === 'closed') {
+    new Notification(`${symbol} 청산 (${REASON_LABELS[e.reason] || e.reason || ''})`, {
+      body: `실현손익 ${fmtUsd(e.realized_pnl)}`,
+    });
+  }
+}
+
+async function closePosition(symbol) {
+  if (!confirm(shortSymbol(symbol) + ' 포지션을 지금 즉시 시장가로 청산할까요?')) return;
+  const btn = document.getElementById('close-btn-' + shortSymbol(symbol));
+  if (btn) { btn.disabled = true; btn.textContent = '청산 중…'; }
+  try {
+    const res = await fetch('/api/close/' + encodeURIComponent(symbol), { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok || data.status === 'error') {
+      alert('청산 실패: ' + (data.message || '알 수 없는 오류'));
+    }
+  } catch (e) {
+    alert('청산 요청 중 네트워크 오류가 발생했습니다.');
+  }
+  refresh();
+}
+
+function formatUptime(seconds) {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  return h > 0 ? `${h}시간 ${m}분` : `${m}분`;
+}
+
+function formatAge(seconds) {
+  if (seconds < 60) return `${Math.floor(seconds)}초 전`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}분 전`;
+  return `${Math.floor(seconds / 3600)}시간 전`;
+}
+
+async function fetchPerformance() {
+  let data;
+  try {
+    const res = await fetch('/api/performance');
+    data = await res.json();
+  } catch (e) {
+    return;
+  }
+
+  document.getElementById('perf-trades').textContent = data.num_trades;
+  document.getElementById('perf-winrate').textContent = fmtPct(data.win_rate);
+  const totalPnlEl = document.getElementById('perf-total-pnl');
+  totalPnlEl.textContent = fmtUsd(data.total_realized_pnl);
+  totalPnlEl.className = 'value ' + (data.total_realized_pnl >= 0 ? 'green' : 'red');
+  document.getElementById('perf-avg-pnl').textContent = fmtUsd(data.avg_realized_pnl);
+
+  document.getElementById('perf-reasons').innerHTML = Object.entries(data.reason_counts || {}).map(
+    ([reason, count]) => `<span class="reason-chip">${REASON_LABELS[reason] || reason} <b>${count}</b></span>`
+  ).join('');
+
+  const table = document.getElementById('perf-symbol-table');
+  const body = document.getElementById('perf-symbol-body');
+  const emptyEl = document.getElementById('perf-empty');
+  const perSymbol = Object.entries(data.per_symbol || {});
+
+  if (perSymbol.length === 0) {
+    table.style.display = 'none';
+    emptyEl.style.display = 'block';
+  } else {
+    table.style.display = 'table';
+    emptyEl.style.display = 'none';
+    body.innerHTML = perSymbol.map(([symbol, s]) => {
+      const winRate = s.trades ? s.wins / s.trades : null;
+      const pnlColor = s.total_pnl >= 0 ? 'green' : 'red';
+      return `<tr>
+        <td>${shortSymbol(symbol)}</td>
+        <td>${s.trades}</td>
+        <td>${fmtPct(winRate)}</td>
+        <td><span style="color:var(--${pnlColor})">${fmtUsd(s.total_pnl)}</span></td>
+      </tr>`;
+    }).join('');
+  }
+}
+
+async function startBot() {
+  const btn = document.getElementById('bot-start-btn');
+  btn.disabled = true;
+  btn.textContent = '시작 중…';
+  try {
+    const res = await fetch('/api/bot/start', { method: 'POST' });
+    if (!res.ok) alert('봇 시작에 실패했습니다.');
+  } catch (e) {
+    alert('봇 시작 요청 중 네트워크 오류가 발생했습니다.');
+  }
+  btn.textContent = '시작';
+  refreshBotStatus();
+}
+
+async function stopBot() {
+  if (!confirm('감시 봇을 중지할까요? 이미 걸려 있는 포지션/주문(SL·TP)은 그대로 유지됩니다.')) return;
+  const btn = document.getElementById('bot-stop-btn');
+  btn.disabled = true;
+  btn.textContent = '중지 중… (최대 15초)';
+  try {
+    const res = await fetch('/api/bot/stop', { method: 'POST' });
+    if (!res.ok) alert('봇 중지에 실패했습니다.');
+  } catch (e) {
+    alert('봇 중지 요청 중 네트워크 오류가 발생했습니다.');
+  }
+  btn.textContent = '중지';
+  refreshBotStatus();
+}
+
+async function refreshBotStatus() {
+  let data;
+  try {
+    const res = await fetch('/api/bot/status');
+    data = await res.json();
+  } catch (e) {
+    return;
+  }
+
+  const dot = document.getElementById('bot-status-dot');
+  const text = document.getElementById('bot-status-text');
+  const startBtn = document.getElementById('bot-start-btn');
+  const stopBtn = document.getElementById('bot-stop-btn');
+  const heartbeatLine = document.getElementById('heartbeat-line');
+
+  if (data.running) {
+    dot.className = 'dot on';
+    const uptime = data.started_at ? Math.max(0, Math.floor(Date.now() / 1000 - data.started_at)) : null;
+    text.textContent = '실행 중' + (uptime !== null ? ` (가동 ${formatUptime(uptime)})` : '');
+    startBtn.disabled = true;
+    stopBtn.disabled = false;
+
+    const hb = data.heartbeat;
+    if (hb) {
+      const stale = hb.age_seconds > 180;  // 30초 주기 폴링 기준 3분 이상 조용하면 정체 의심
+      heartbeatLine.className = 'heartbeat-line' + (stale ? ' stale' : '');
+      heartbeatLine.textContent = (stale ? '⚠ 마지막 사이클 ' : '마지막 사이클 ') + formatAge(hb.age_seconds)
+        + ` · 사이클 #${hb.cycle_count}`;
+    } else {
+      heartbeatLine.className = 'heartbeat-line stale';
+      heartbeatLine.textContent = '⚠ 사이클 기록 없음 (재시작된 봇이라면 잠시 후 갱신됩니다)';
+    }
+  } else {
+    dot.className = 'dot off';
+    text.textContent = '중지됨';
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
+    heartbeatLine.textContent = '';
+  }
+}
+
+async function refresh() {
+  let data;
+  try {
+    const res = await fetch('/api/status');
+    data = await res.json();
+  } catch (e) {
+    document.getElementById('last-updated').textContent = '연결 실패 — 재시도 중…';
+    return;
+  }
+
+  document.getElementById('last-updated').textContent = '마지막 갱신: ' + new Date().toLocaleTimeString('ko-KR');
+  document.getElementById('margin-equity').textContent = fmtUsd(data.margin_equity);
+  document.getElementById('open-count').textContent = data.open_position_count + ' / ' + data.max_concurrent;
+
+  if (data.risk_limits) {
+    const pnlPct = data.daily_pnl_pct || 0;
+    const limitPct = data.risk_limits.max_daily_loss_pct;
+    const usedRatio = limitPct ? Math.min(1, Math.abs(Math.min(0, pnlPct)) / limitPct) : 0;
+    const gauge = document.getElementById('daily-pnl-gauge');
+    gauge.style.width = (usedRatio * 100) + '%';
+    gauge.className = 'gauge-fill' + (usedRatio > 0.8 ? ' red' : usedRatio > 0.5 ? ' amber' : '');
+    const pnlText = document.getElementById('daily-pnl-text');
+    pnlText.textContent = fmtPct(pnlPct);
+    pnlText.style.color = pnlPct >= 0 ? 'var(--green)' : 'var(--red)';
+    document.getElementById('daily-loss-limit-text').textContent = `일일 손실 한도 -${fmtPct(limitPct)}`;
+  }
+
+  if (data.config) {
+    const c = data.config;
+    document.getElementById('config-grid').innerHTML = `
+      <div class="config-item"><div class="k">ADX 임계값</div><div class="v">${c.adx_threshold}</div></div>
+      <div class="config-item"><div class="k">SMA 기간</div><div class="v">${c.sma_period}</div></div>
+      <div class="config-item"><div class="k">손절폭</div><div class="v">${fmtPct(c.stop_loss_pct)}</div></div>
+      <div class="config-item"><div class="k">손익비(RR)</div><div class="v">${c.take_profit_rr}</div></div>
+      <div class="config-item"><div class="k">레버리지</div><div class="v">${data.leverage}x</div></div>
+      <div class="config-item"><div class="k">최대 동시 포지션</div><div class="v">${data.max_concurrent}</div></div>
+    `;
+  }
+
+  const grid = document.getElementById('symbol-grid');
+  grid.innerHTML = Object.entries(data.symbols).map(([symbol, s]) => {
+    if (s.has_position && s.position) {
+      const p = s.position;
+      const pnlClass = p.unrealizedPnl >= 0 ? 'green' : 'red';
+      return `<div class="symbol-card">
+        <div class="header"><span class="ticker"><span class="dot on"></span>${shortSymbol(symbol)}</span>
+        <span style="font-size:12px;color:var(--muted)">${p.side === 'long' ? '롱' : '숏'}</span></div>
+        <div class="row"><span class="k">진입가</span><span class="v">${fmtPrice(p.entryPrice)}</span></div>
+        <div class="row"><span class="k">현재가</span><span class="v">${fmtPrice(p.markPrice)}</span></div>
+        <div class="row"><span class="k">미실현손익</span><span class="v ${pnlClass}">${fmtUsd(p.unrealizedPnl)}</span></div>
+        <div class="row"><span class="k">청산가</span><span class="v" style="color:var(--amber)">${fmtPrice(p.liquidationPrice)}</span></div>
+        <div class="row"><span class="k">손절가</span><span class="v" style="color:var(--red)">${fmtPrice(s.stop_loss_price)}</span></div>
+        <div class="row"><span class="k">익절가</span><span class="v" style="color:var(--green)">${fmtPrice(s.take_profit_price)}</span></div>
+        <button class="close-btn" id="close-btn-${shortSymbol(symbol)}" style="width:100%;margin-top:10px"
+          onclick="closePosition('${symbol}')">긴급 청산</button>
+      </div>`;
+    }
+    return `<div class="symbol-card">
+      <div class="header"><span class="ticker"><span class="dot off"></span>${shortSymbol(symbol)}</span>
+      <span style="font-size:12px;color:var(--muted)">대기 중</span></div>
+    </div>`;
+  }).join('');
+
+  const entries = data.recent_entries || [];
+
+  for (const e of entries) {
+    const key = `${e.timestamp}|${e.symbol}|${e.event}`;
+    if (!seenEntryKeys.has(key)) {
+      seenEntryKeys.add(key);
+      if (notifyInitialized) notifyNewEntry(e);
+    }
+  }
+  notifyInitialized = true;
+
+  const table = document.getElementById('entries-table');
+  const body = document.getElementById('entries-body');
+  const emptyEl = document.getElementById('entries-empty');
+
+  if (entries.length === 0) {
+    table.style.display = 'none';
+    emptyEl.style.display = 'block';
+  } else {
+    table.style.display = 'table';
+    emptyEl.style.display = 'none';
+    body.innerHTML = entries.map(e => {
+      const ts = e.timestamp ? new Date(e.timestamp).toLocaleString('ko-KR') : '–';
+      const badge = e.event || (e.execution ? 'entered' : 'no_signal');
+      const isClosed = e.event === 'closed';
+      const pnlClass = isClosed ? (e.realized_pnl >= 0 ? 'green' : 'red') : '';
+      const pnlCell = isClosed
+        ? `<span style="color:var(--${e.realized_pnl >= 0 ? 'green' : 'red'})">${fmtUsd(e.realized_pnl)}</span>`
+        : '–';
+      return `<tr>
+        <td>${ts}</td>
+        <td>${e.symbol ? shortSymbol(e.symbol) : '–'}</td>
+        <td><span class="badge ${badge}">${badge}</span></td>
+        <td>${e.signal || '–'}</td>
+        <td>${fmtPrice(e.entry_price)}</td>
+        <td>${isClosed ? fmtPrice(e.exit_price) : '–'}</td>
+        <td>${fmtPrice(e.stop_loss_price)}</td>
+        <td>${fmtPrice(e.take_profit_price)}</td>
+        <td>${pnlCell}</td>
+        <td class="reason">${e.reason || ''}</td>
+      </tr>`;
+    }).join('');
+  }
+}
+
+updateNotifyBtn();
+refresh();
+refreshBotStatus();
+fetchPerformance();
+setInterval(refresh, 5000);
+setInterval(refreshBotStatus, 5000);
+setInterval(fetchPerformance, 15000);
+</script>
+</body>
+</html>
