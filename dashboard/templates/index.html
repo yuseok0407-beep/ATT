@@ -133,6 +133,7 @@
       <div class="gauge-caption"><span>0%</span><span id="daily-loss-limit-text">일일 손실 한도 -–%</span></div>
     </div>
     <div class="config-grid" id="config-grid"></div>
+    <div class="config-grid" id="consecutive-loss-grid"></div>
   </section>
 
   <section>
@@ -388,6 +389,13 @@ async function refresh() {
     pnlText.textContent = fmtPct(pnlPct);
     pnlText.style.color = pnlPct >= 0 ? 'var(--green)' : 'var(--red)';
     document.getElementById('daily-loss-limit-text').textContent = `일일 손실 한도 -${fmtPct(limitPct)}`;
+
+    const streak = data.risk_limits.consecutive_losses || 0;
+    const streakLimit = data.risk_limits.max_consecutive_losses;
+    const streakColor = streak >= streakLimit ? 'var(--red)' : streak >= streakLimit - 1 ? 'orange' : 'inherit';
+    document.getElementById('consecutive-loss-grid').innerHTML = `
+      <div class="config-item"><div class="k">연속 손실</div><div class="v" style="color:${streakColor}">${streak} / ${streakLimit}</div></div>
+    `;
   }
 
   if (data.config) {

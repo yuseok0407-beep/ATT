@@ -55,6 +55,39 @@ def test_run_once_blocked_by_circuit_breaker():
         _stop(patches)
 
 
+def test_run_once_computes_consecutive_losses_from_journal_when_not_passed():
+    """실전 버그 재현: run_futures_bot.py가 consecutive_losses를 안 넘겨서 서킷브레이커가
+    죽어있던 걸 고침 — 이제 안 넘기면(None) 저널에서 직접 계산해야 한다."""
+    patches = _base_patches()
+    _start(patches)
+    try:
+        losing_streak = [
+            {"event": "closed", "realized_pnl": -1.0},
+            {"event": "closed", "realized_pnl": -2.0},
+            {"event": "closed", "realized_pnl": -3.0},
+        ]
+        with patch("src.futures_rule_bot.read_entries", return_value=losing_streak):
+            cycle = bot.run_once(MagicMock(), daily_pnl_pct=0.0)
+        assert cycle["event"] == "circuit_breaker_blocked"
+    finally:
+        _stop(patches)
+
+
+def test_run_once_does_not_block_when_journal_losing_streak_is_below_threshold():
+    patches = _base_patches()
+    _start(patches)
+    try:
+        losing_streak = [
+            {"event": "closed", "realized_pnl": -1.0},
+            {"event": "closed", "realized_pnl": -2.0},
+        ]
+        with patch("src.futures_rule_bot.read_entries", return_value=losing_streak):
+            cycle = bot.run_once(MagicMock(), daily_pnl_pct=0.0)
+        assert cycle.get("event") != "circuit_breaker_blocked"
+    finally:
+        _stop(patches)
+
+
 def test_run_once_checks_every_symbol_independently():
     patches = _base_patches()
     _start(patches)

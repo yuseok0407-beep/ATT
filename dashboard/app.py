@@ -16,7 +16,7 @@ from src.core.config import (
     TAKE_PROFIT_RR,
 )
 from src.core.risk import MAX_CONSECUTIVE_LOSSES, MAX_DAILY_LOSS_PCT
-from src.core.state import get_daily_pnl_pct
+from src.core.state import compute_consecutive_losses, get_daily_pnl_pct
 from src.data.futures_exchange import get_futures_balance, get_futures_client, get_position
 from src.execution import bot_process
 from src.execution.futures_orders import close_position
@@ -91,8 +91,10 @@ def api_status():
             "take_profit_price": take_profit_price,
         }
 
-    entries = list(reversed(read_entries(path=JOURNAL_PATH)))[:30]
+    all_entries = read_entries(path=JOURNAL_PATH)
+    entries = list(reversed(all_entries))[:30]
     daily_pnl_pct = get_daily_pnl_pct(margin_equity, path=STATE_PATH)
+    consecutive_losses = compute_consecutive_losses(all_entries)
 
     return jsonify({
         "symbols": symbols,
@@ -105,6 +107,7 @@ def api_status():
         "risk_limits": {
             "max_daily_loss_pct": MAX_DAILY_LOSS_PCT,
             "max_consecutive_losses": MAX_CONSECUTIVE_LOSSES,
+            "consecutive_losses": consecutive_losses,
         },
         "config": {
             "adx_threshold": RULE_ADX_THRESHOLD,

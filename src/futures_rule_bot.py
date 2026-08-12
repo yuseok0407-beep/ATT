@@ -14,7 +14,7 @@ from src.core.config import (
 from src.core.futures_risk import check_stop_before_liquidation, estimate_liquidation_price, leveraged_position_size
 from src.core.futures_strategy import compute_bracket_prices, detect_signal
 from src.core.risk import check_circuit_breaker
-from src.core.state import get_daily_pnl_pct
+from src.core.state import compute_consecutive_losses, get_daily_pnl_pct
 from src.data.exchange import fetch_ohlcv_df
 from src.data.futures_exchange import (
     get_futures_balance,
@@ -229,17 +229,25 @@ def _evaluate_symbol(client, symbol: str, position: dict | None, margin_equity: 
     return result
 
 
-def run_once(client, consecutive_losses: int = 0, daily_pnl_pct: float = None, symbols: list[str] = None) -> dict:
+def run_once(client, consecutive_losses: int = None, daily_pnl_pct: float = None, symbols: list[str] = None) -> dict:
     """감시 루프 한 사이클. symbols(기본값 FUTURES_SYMBOLS 전체)를 순회하며 판단하되, 동시 보유
     포지션이 MAX_CONCURRENT_POSITIONS에 도달하면 나머지 종목은 신규 진입을 건너뛴다
     (skipped_max_positions). symbols는 보통 initialize()가 돌려준, 이 거래소 환경에 실제로
-    존재하는 심볼 목록을 그대로 넘겨받는다."""
+    존재하는 심볼 목록을 그대로 넘겨받는다.
+
+    consecutive_losses를 호출자가 안 넘기면(None) 저널에서 직접 계산한다 — 예전엔 호출자
+    (run_futures_bot.py)가 이 값을 아예 안 넘겨서 항상 0으로 고정되고, 서킷브레이커의 "연속
+    3연패 시 중단" 조건이 실전에서 계속 죽어있던 사고가 있었다(2026-08-12, UPDATE_LOG.md 참고).
+    기본값을 0이 아니라 None으로 두고 여기서 자동 계산하게 해서, 앞으로 호출자가 깜빡 잊고
+    안 넘겨도 같은 사고가 재발하지 않게 했다."""
     symbols = FUTURES_SYMBOLS if symbols is None else symbols
     balance = get_futures_balance(client)
     margin_equity = (balance.get("USDT") or {}).get("total") or 0.0
 
     if daily_pnl_pct is None:
         daily_pnl_pct = get_daily_pnl_pct(margin_equity, path=STATE_PATH)
+    if consecutive_losses is None:
+        consecutive_losses = compute_consecutive_losses(read_entries(path=JOURNAL_PATH))
 
     cycle = {"margin_equity": margin_equity, "daily_pnl_pct": daily_pnl_pct, "symbols": {}}
 
