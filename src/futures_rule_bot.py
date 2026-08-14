@@ -27,7 +27,7 @@ from src.data.futures_exchange import (
     set_leverage,
     set_margin_mode,
 )
-from src.execution.futures_orders import cleanup_stale_orders, open_position_with_bracket
+from src.execution.futures_orders import cleanup_stale_orders, get_bracket_prices, open_position_with_bracket
 from src.execution.journal import append_entry, read_entries
 
 JOURNAL_PATH = "journal/futures_rule_trades.jsonl"
@@ -62,18 +62,73 @@ def _find_last_entry_journal(symbol: str, journal_path: str = JOURNAL_PATH) -> d
     return None
 
 
+def _find_last_symbol_event(symbol: str, journal_path: str = JOURNAL_PATH) -> str | None:
+    for entry in reversed(read_entries(path=journal_path)):
+        if entry.get("symbol") == symbol:
+            return entry.get("event")
+    return None
+
+
+def check_and_log_untracked_position(client, symbol: str, position: dict) -> dict | None:
+    """이 심볼에 지금 포지션이 있는데 저널의 마지막 기록이 "entered"가 아니면(즉 이 봇이 이
+    포지션의 존재를 전혀 모르고 있으면) 대시보드 거래 내역에도 보이도록 진입 기록을 남긴다.
+    대시보드에서 종목별 상태(거래소 직접 조회)엔 바로 보이는데 거래 내역(저널 기반)엔 안
+    보이는 걸 사용자가 실제로 겪었음(2026-08-14) — 대시보드/봇을 거치지 않고 사용자가 직접
+    주문을 넣은 경우가 대표적. 매 사이클 호출돼도, 이미 알고 있는 포지션이면(마지막 기록이
+    "entered") 중복 기록하지 않는다."""
+    if _find_last_symbol_event(symbol, journal_path=JOURNAL_PATH) == "entered":
+        return None
+
+    stop_loss_price, take_profit_price = get_bracket_prices(client, symbol)
+    entry = {
+        "symbol": symbol, "event": "entered", "entered": True, "signal": None,
+        "entry_price": position.get("entryPrice"),
+        "stop_loss_price": stop_loss_price, "take_profit_price": take_profit_price,
+        "reason": "manual_position_detected",
+    }
+    append_entry(entry, path=JOURNAL_PATH)
+    return entry
+
+
+def _aggregate_closing_trades(client, symbol: str, entry_info: dict) -> tuple[list, float | None, float | None]:
+    """entry_info(마지막 "entered" 저널 기록) 이후에 일어난 체결들 중 진입 체결 자체를 제외한
+    나머지(=청산 체결들)를 모아 수량가중평균 체결가와 합산 실현손익을 계산한다. 청산 체결을
+    못 찾으면 ([], None, None).
+
+    fetch_my_trades를 since 없이 limit만 주면 "최신 N개"가 아니라 "가장 오래된 N개"가 돌아오는
+    거래소 동작 때문에(실전 확인, UPDATE_LOG.md 2026-08-12) 진입 시각을 since로 앵커링해야
+    한다. STOP_MARKET/TAKE_PROFIT_MARKET/수동청산 체결이 여러 번의 부분 체결로 쪼개질 수 있어
+    단일 체결이 아니라 전부 합산한다."""
+    since_ms = int(datetime.fromisoformat(entry_info["timestamp"]).timestamp() * 1000) - 60_000
+    trades = client.fetch_my_trades(symbol, since=since_ms, limit=50)
+    if not trades:
+        return [], None, None
+
+    entry_order_id = ((entry_info.get("execution") or {}).get("entry_order") or {}).get("id")
+    if entry_order_id is not None:
+        closing_trades = [t for t in trades if str((t.get("info") or {}).get("orderId")) != str(entry_order_id)]
+    else:
+        # 옛 저널 기록 등 진입 주문ID가 없는 경우의 대비책 — 체결가가 진입가와 정확히 같은 것만
+        # 진입 체결로 간주한다(슬리피지가 있으면 완벽하지 않지만 없는 것보다 낫다).
+        entry_price = entry_info.get("entry_price")
+        closing_trades = [t for t in trades if t.get("price") != entry_price]
+
+    if not closing_trades:
+        return [], None, None
+
+    total_qty = sum(float(t.get("amount") or 0) for t in closing_trades)
+    if total_qty > 0:
+        exit_price = sum(float(t.get("price") or 0) * float(t.get("amount") or 0) for t in closing_trades) / total_qty
+    else:
+        exit_price = closing_trades[-1].get("price")
+    realized_pnl = sum(float((t.get("info") or {}).get("realizedPnl", 0) or 0) for t in closing_trades)
+    return closing_trades, exit_price, realized_pnl
+
+
 def check_and_log_closed_trade(client, symbol: str) -> dict | None:
     """지금 포지션이 없는(flat) 종목에 대해, 직전 체결이 아직 저널에 안 남은 청산인지 확인하고
     있으면 실현손익과 함께 기록한다. 손절/익절 중 어느 쪽이었는지는 진입 시 기록해둔 손절가/익절가와
-    체결가를 비교해 추정한다(정확한 체결가는 트리거 가격과 보통 일치하거나 매우 가깝다).
-
-    fetch_my_trades를 since 없이 limit만 주고 부르면 "최신 N개"가 아니라 계좌에 쌓인 체결 중
-    "가장 오래된 N개"가 돌아온다(실전에서 BTC 포지션으로 확인된 동작). 그 심볼의 누적 체결 수가
-    limit을 넘으면 이 함수는 그 뒤로 영원히 옛날 체결(대표적으로 진입 체결 그 자체)에 멈춰서,
-    실제 청산(예: 익절)을 다른 걸로 오인해 손실 0으로 잘못 기록하는 사고가 실제로 있었다. 그래서
-    진입 시각을 since로 앵커링해 그 이후 체결만 본다. 또한 STOP_MARKET/TAKE_PROFIT_MARKET
-    체결이 여러 번의 부분 체결로 쪼개질 수 있어(실전 확인됨) 단일 체결이 아니라 진입 이후의
-    모든 체결을 합산한다."""
+    체결가를 비교해 추정한다(정확한 체결가는 트리거 가격과 보통 일치하거나 매우 가깝다)."""
     entry_info = _find_last_entry_journal(symbol, journal_path=JOURNAL_PATH)
     if entry_info is None:
         # 이 기능이 생기기 전에 체결된 거래 등 대조할 진입 기록이 없으면, 잘못된 추정을 기록하지
@@ -86,36 +141,16 @@ def check_and_log_closed_trade(client, symbol: str) -> dict | None:
             _save_last_trade_id(symbol, trades[-1].get("id"), path=LAST_TRADE_STATE_PATH)
         return None
 
-    since_ms = int(datetime.fromisoformat(entry_info["timestamp"]).timestamp() * 1000) - 60_000
     try:
-        trades = client.fetch_my_trades(symbol, since=since_ms, limit=50)
+        closing_trades, exit_price, realized_pnl = _aggregate_closing_trades(client, symbol, entry_info)
     except Exception:
         return None
-    if not trades:
-        return None
-
-    entry_order_id = ((entry_info.get("execution") or {}).get("entry_order") or {}).get("id")
-    if entry_order_id is not None:
-        closing_trades = [t for t in trades if str((t.get("info") or {}).get("orderId")) != str(entry_order_id)]
-    else:
-        # 옛 저널 기록 등 진입 주문ID가 없는 경우의 대비책 — 체결가가 진입가와 정확히 같은 것만
-        # 진입 체결로 간주한다(슬리피지가 있으면 완벽하지 않지만 없는 것보다 낫다).
-        entry_price = entry_info.get("entry_price")
-        closing_trades = [t for t in trades if t.get("price") != entry_price]
-
     if not closing_trades:
         return None
 
     last_trade_id = closing_trades[-1].get("id")
     if last_trade_id is None or _load_last_trade_ids(path=LAST_TRADE_STATE_PATH).get(symbol) == last_trade_id:
         return None
-
-    total_qty = sum(float(t.get("amount") or 0) for t in closing_trades)
-    if total_qty > 0:
-        exit_price = sum(float(t.get("price") or 0) * float(t.get("amount") or 0) for t in closing_trades) / total_qty
-    else:
-        exit_price = closing_trades[-1].get("price")
-    realized_pnl = sum(float((t.get("info") or {}).get("realizedPnl", 0) or 0) for t in closing_trades)
 
     stop_loss_price = entry_info.get("stop_loss_price")
     take_profit_price = entry_info.get("take_profit_price")
@@ -136,7 +171,32 @@ def check_and_log_closed_trade(client, symbol: str) -> dict | None:
 def record_manual_close(client, symbol: str) -> dict | None:
     """대시보드의 긴급 청산 버튼 등으로 수동 청산한 직후 호출한다. 방금 체결을 조회해서
     reason="manual"로 저널에 남기고, 감시 루프가 같은 체결을 또 손절/익절로 오인해 중복
-    기록하지 않도록 마지막 거래ID 상태도 함께 갱신한다."""
+    기록하지 않도록 마지막 거래ID 상태도 함께 갱신한다.
+
+    check_and_log_closed_trade와 똑같은 since-앵커링/부분체결 합산 버그가 있었다(2026-08-14
+    실전 확인 — 진입 체결 자체를 청산으로 오인해 손익 0으로 기록, 그 직후 다음 사이클의
+    check_and_log_closed_trade가 진짜 청산을 또 감지해서 같은 포지션이 두 번 기록되는 사고로
+    이어짐). 진입 기록이 있으면 _aggregate_closing_trades로 정확히 집계하고, 그게 없거나
+    실패할 때만(드문 경우) 마지막 체결 하나를 그대로 쓰는 예전 방식으로 대체한다."""
+    entry_info = _find_last_entry_journal(symbol, journal_path=JOURNAL_PATH)
+
+    if entry_info is not None:
+        try:
+            closing_trades, exit_price, realized_pnl = _aggregate_closing_trades(client, symbol, entry_info)
+        except Exception:
+            closing_trades = []
+        if closing_trades:
+            closed_entry = {
+                "symbol": symbol, "event": "closed", "reason": "manual",
+                "entry_price": entry_info.get("entry_price"), "exit_price": exit_price,
+                "realized_pnl": realized_pnl,
+            }
+            append_entry(closed_entry, path=JOURNAL_PATH)
+            last_trade_id = closing_trades[-1].get("id")
+            if last_trade_id is not None:
+                _save_last_trade_id(symbol, last_trade_id, path=LAST_TRADE_STATE_PATH)
+            return closed_entry
+
     try:
         trades = client.fetch_my_trades(symbol, limit=5)
     except Exception:
@@ -148,7 +208,6 @@ def record_manual_close(client, symbol: str) -> dict | None:
     trade_id = last_trade.get("id")
     exit_price = last_trade.get("price")
     realized_pnl = float((last_trade.get("info") or {}).get("realizedPnl", 0) or 0)
-    entry_info = _find_last_entry_journal(symbol, journal_path=JOURNAL_PATH)
 
     closed_entry = {
         "symbol": symbol, "event": "closed", "reason": "manual",
@@ -215,6 +274,7 @@ def _evaluate_symbol(client, symbol: str, position: dict | None, margin_equity: 
     leverage: initialize()가 이 심볼에 실제로 적용한 레버리지(거래소 한도 때문에 설정값보다
     낮을 수 있음 — 예: TSLA는 5배). 청산가 추정에 실제 레버리지를 써야 정확하다."""
     if position is not None:
+        check_and_log_untracked_position(client, symbol, position)
         return {"symbol": symbol, "has_position": True, "event": "holding_position",
                 "position": position, "entered": False}
 
@@ -302,7 +362,16 @@ def run_once(client, consecutive_losses: int = None, daily_pnl_pct: float = None
 
     for symbol in symbols:
         leverage = leverage_by_symbol.get(symbol, LEVERAGE)
-        result = _evaluate_symbol(client, symbol, positions[symbol], margin_equity, open_count, leverage)
+        try:
+            result = _evaluate_symbol(client, symbol, positions[symbol], margin_equity, open_count, leverage)
+        except Exception as exc:
+            # 한 심볼의 거래소 쪽 오류(예: TSLA/CRCL 같은 토큰화 주식형 심볼이 계정에서 아직
+            # TradFi-Perps 약관에 동의가 안 돼 주문이 거부되는 경우, 2026-08-14 실전 확인)로
+            # 사이클 전체가 죽어서 이후 순서의 다른 심볼들(예: 목록 맨 끝의 BNB)이 그 사이클에서
+            # 아예 평가조차 안 되는 사고가 있었다. 심볼 하나의 실패가 나머지를 막지 않도록 격리한다.
+            logger.exception("symbol %s raised an error during evaluation — skipping this cycle", symbol)
+            result = {"symbol": symbol, "has_position": False, "entered": False,
+                      "event": "rejected_exchange_error", "reason": str(exc)}
         if result["entered"]:
             open_count += 1
         if result["event"] not in _SILENT_EVENTS:

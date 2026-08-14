@@ -21,7 +21,7 @@ from src.core.state import compute_consecutive_losses, get_daily_pnl_pct
 from src.data.exchange import fetch_ohlcv_df
 from src.data.futures_exchange import get_futures_balance, get_futures_client, get_position
 from src.execution import bot_process
-from src.execution.futures_orders import close_position
+from src.execution.futures_orders import close_position, get_bracket_prices
 from src.execution.heartbeat import read_heartbeat
 from src.execution.journal import read_entries
 from src.execution.performance import summarize_performance
@@ -46,24 +46,6 @@ def _available_symbols(client):
     return [s for s in FUTURES_SYMBOLS if s in client.markets]
 
 
-def _extract_bracket_prices(client, symbol):
-    """현재 걸려있는 손절/익절(algo) 주문에서 각각의 트리거 가격을 찾는다. 없으면 None."""
-    try:
-        orders = client.fetch_open_orders(symbol, params={"trigger": True})
-    except Exception:
-        return None, None
-
-    stop_price, take_profit_price = None, None
-    for order in orders:
-        order_type = (order.get("info") or {}).get("orderType", "")
-        trigger = order.get("triggerPrice") or order.get("stopPrice")
-        if order_type == "STOP_MARKET":
-            stop_price = trigger
-        elif order_type == "TAKE_PROFIT_MARKET":
-            take_profit_price = trigger
-    return stop_price, take_profit_price
-
-
 @app.route("/")
 def index():
     client = _get_client()
@@ -85,7 +67,7 @@ def api_status():
         stop_loss_price, take_profit_price = (None, None)
         if position is not None:
             open_count += 1
-            stop_loss_price, take_profit_price = _extract_bracket_prices(client, symbol)
+            stop_loss_price, take_profit_price = get_bracket_prices(client, symbol)
         symbols[symbol] = {
             "has_position": position is not None,
             "position": position,

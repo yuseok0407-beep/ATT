@@ -31,10 +31,18 @@ def compute_consecutive_losses(entries: list[dict]) -> int:
     """저널의 청산 기록(event=="closed")을 최신순으로 훑어 realized_pnl이 음수인 게 몇 번
     연속으로 이어지는지 센다. 손실이 아닌 청산(승리 또는 손익 0)을 만나는 순간 멈춘다 —
     거래당 실현손익이 저널에 남기 시작한 뒤로 실제로 계산 가능해졌다(이전엔 랏 단위 원가
-    추적이 없어 불가능하다고 여겨졌던 부분)."""
+    추적이 없어 불가능하다고 여겨졌던 부분).
+
+    reason=="manual"인 청산(사용자가 대시보드/거래소에서 직접 넣고 직접 닫은 거래, 테스트
+    주문 포함)은 건너뛰고 계속 더 과거를 본다 — 서킷브레이커는 "규칙 기반 신호가 계속
+    틀리고 있다"는 걸 감지하려는 건데, 봇이 판단조차 안 한 수동 거래가 그 카운트에 섞이면
+    안 된다(2026-08-14, 사용자가 테스트 삼아 넣은 주문이 연속손실 카운트를 오염시킨 사고로
+    실제 확인됨)."""
     count = 0
     for entry in reversed(entries):
         if entry.get("event") != "closed":
+            continue
+        if entry.get("reason") == "manual":
             continue
         realized_pnl = entry.get("realized_pnl")
         if realized_pnl is None:

@@ -10,6 +10,25 @@ def _guard_live(confirm_live: bool) -> None:
         )
 
 
+def get_bracket_prices(client, symbol: str) -> tuple[float | None, float | None]:
+    """현재 걸려있는 손절/익절(algo/conditional) 주문에서 각각의 트리거 가격을 찾는다. 없으면 None.
+    대시보드와 futures_rule_bot 양쪽에서 쓰던 걸 여기 하나로 합침(2026-08-14)."""
+    try:
+        orders = client.fetch_open_orders(symbol, params={"trigger": True})
+    except Exception:
+        return None, None
+
+    stop_price, take_profit_price = None, None
+    for order in orders:
+        order_type = (order.get("info") or {}).get("orderType", "")
+        trigger = order.get("triggerPrice") or order.get("stopPrice")
+        if order_type == "STOP_MARKET":
+            stop_price = trigger
+        elif order_type == "TAKE_PROFIT_MARKET":
+            take_profit_price = trigger
+    return stop_price, take_profit_price
+
+
 def cleanup_stale_orders(client, symbol: str) -> None:
     """포지션이 닫혔는데 남아있는 손절/익절(algo/conditional) 주문을 정리한다.
     우리 SL/TP는 stopLossPrice/takeProfitPrice로 넣기 때문에 바이낸스의 algo 주문 계열로 들어가서,

@@ -65,3 +65,15 @@ class TestComputeConsecutiveLosses:
     def test_all_losses_counts_every_one(self):
         entries = [_closed(-1.0), _closed(-2.0), _closed(-3.0)]
         assert compute_consecutive_losses(entries) == 3
+
+    def test_manual_loss_is_skipped_and_does_not_break_the_streak(self):
+        """실전 버그 재현: 사용자가 테스트로 넣은 수동 거래가 손실로 끝나면서 연속손실
+        카운트를 오염시켰다 — reason=manual인 청산은 세지 않고 더 과거를 계속 봐야 한다."""
+        manual_loss = {"event": "closed", "realized_pnl": -1.0, "reason": "manual"}
+        entries = [_closed(-5.0), _closed(-6.0), manual_loss]
+        assert compute_consecutive_losses(entries) == 2
+
+    def test_manual_win_between_real_losses_does_not_reset_streak(self):
+        manual_win = {"event": "closed", "realized_pnl": 100.0, "reason": "manual"}
+        entries = [_closed(-5.0), manual_win, _closed(-6.0)]
+        assert compute_consecutive_losses(entries) == 2

@@ -5,6 +5,7 @@ import pytest
 from src.execution.futures_orders import (
     cleanup_stale_orders,
     close_position,
+    get_bracket_prices,
     open_position,
     open_position_with_bracket,
 )
@@ -151,3 +152,27 @@ def test_open_position_with_bracket_blocks_live_mode_without_confirmation(monkey
     with pytest.raises(RuntimeError):
         open_position_with_bracket(mock_client, "BTC/USDT:USDT", "long", 0.02, 64000, 65500)
     mock_client.create_order.assert_not_called()
+
+
+def test_get_bracket_prices_finds_stop_and_take_profit():
+    mock_client = MagicMock()
+    mock_client.fetch_open_orders.return_value = [
+        {"info": {"orderType": "STOP_MARKET"}, "triggerPrice": 64000},
+        {"info": {"orderType": "TAKE_PROFIT_MARKET"}, "triggerPrice": 66000},
+    ]
+    stop, take_profit = get_bracket_prices(mock_client, "BTC/USDT:USDT")
+    assert stop == 64000
+    assert take_profit == 66000
+    mock_client.fetch_open_orders.assert_called_once_with("BTC/USDT:USDT", params={"trigger": True})
+
+
+def test_get_bracket_prices_no_matching_orders_returns_none_none():
+    mock_client = MagicMock()
+    mock_client.fetch_open_orders.return_value = []
+    assert get_bracket_prices(mock_client, "BTC/USDT:USDT") == (None, None)
+
+
+def test_get_bracket_prices_swallows_fetch_errors():
+    mock_client = MagicMock()
+    mock_client.fetch_open_orders.side_effect = Exception("network error")
+    assert get_bracket_prices(mock_client, "BTC/USDT:USDT") == (None, None)

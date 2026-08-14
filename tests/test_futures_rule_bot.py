@@ -29,6 +29,7 @@ def _base_patches(balance_total=10_000, positions=None):
         patch("src.futures_rule_bot.get_position", side_effect=lambda client, symbol: positions.get(symbol)),
         patch("src.futures_rule_bot.cleanup_stale_orders"),
         patch("src.futures_rule_bot.check_and_log_closed_trade"),
+        patch("src.futures_rule_bot.check_and_log_untracked_position"),
         patch("src.futures_rule_bot.append_entry"),
         patch("src.futures_rule_bot.get_futures_market_data_client"),
         patch("src.futures_rule_bot.fetch_ohlcv_df", return_value=_flat_df()),
@@ -112,6 +113,34 @@ def test_run_once_reports_holding_position_without_touching_it():
         assert cycle["symbols"]["BTC/USDT:USDT"]["event"] == "holding_position"
         assert cycle["symbols"]["ETH/USDT:USDT"]["event"] == "no_signal"
         assert cycle["open_position_count"] == 1
+    finally:
+        _stop(patches)
+
+
+def test_run_once_isolates_one_symbols_exchange_error_from_the_rest():
+    """실전 버그 재현(2026-08-14): TSLA/CRCL 같은 토큰화 주식형 심볼이 계정에서 TradFi-Perps
+    약관 미동의로 주문이 거부되면 예외가 사이클 전체를 죽여서, 그 뒤 순서의 다른 심볼(예: 목록
+    맨 끝의 BNB)이 그 사이클에서 아예 평가조차 안 되고 10분 넘게 반복됐다. 한 심볼의 실패가
+    나머지 심볼 평가를 막지 않아야 한다."""
+    patches = _base_patches()
+    _start(patches)
+    try:
+        def _fail_for_btc(client, symbol, side, quantity, stop_loss_price, take_profit_price):
+            if symbol == "BTC/USDT:USDT":
+                raise Exception('binance {"code":-4411,"msg":"Please sign TradFi-Perps agreement contract fapi."}')
+            return {"status": "opened"}
+
+        with patch("src.futures_rule_bot.detect_signal", return_value="LONG"), \
+             patch("src.futures_rule_bot.open_position_with_bracket", side_effect=_fail_for_btc):
+            cycle = bot.run_once(MagicMock(), consecutive_losses=0, daily_pnl_pct=0.0)
+
+        assert cycle["symbols"]["BTC/USDT:USDT"]["event"] == "rejected_exchange_error"
+        assert "TradFi-Perps" in cycle["symbols"]["BTC/USDT:USDT"]["reason"]
+        # BTC가 실패해도 나머지 심볼은 계속 평가되어야 한다(그 중 2개는 MAX_CONCURRENT_POSITIONS=2
+        # 한도까지 정상 진입).
+        assert cycle["symbols"]["ETH/USDT:USDT"]["event"] == "entered"
+        assert cycle["symbols"]["SOL/USDT:USDT"]["event"] == "entered"
+        assert cycle["symbols"]["XRP/USDT:USDT"]["event"] == "skipped_max_positions"
     finally:
         _stop(patches)
 
@@ -419,3 +448,140 @@ class TestCheckAndLogClosedTrade:
 
         result = bot.check_and_log_closed_trade(client, self.SYMBOL)
         assert result is None
+
+
+class TestRecordManualClose:
+    """실전 버그 재현(2026-08-14): fetch_my_trades를 since 없이 limit=5로만 부르면 진입 체결
+    자체를 청산으로 오인해 손익 0으로 기록하고, 그 직후 다음 사이클의 check_and_log_closed_trade가
+    진짜 청산을 또 감지해서 같은 포지션이 두 번(0원짜리 가짜 + 진짜) 기록되는 사고로 이어졌다."""
+
+    SYMBOL = "BTC/USDT:USDT"
+
+    def _paths(self, tmp_path, monkeypatch):
+        journal_path = str(tmp_path / "journal.jsonl")
+        state_path = str(tmp_path / "last_trade.json")
+        monkeypatch.setattr(bot, "JOURNAL_PATH", journal_path)
+        monkeypatch.setattr(bot, "LAST_TRADE_STATE_PATH", state_path)
+        return journal_path, state_path
+
+    def test_aggregates_partial_fills_since_entry_when_entry_info_exists(self, tmp_path, monkeypatch):
+        journal_path, state_path = self._paths(tmp_path, monkeypatch)
+        bot.append_entry({
+            "symbol": self.SYMBOL, "event": "entered", "entry_price": 62743.1,
+            "execution": {"entry_order": {"id": "28540959760"}},
+        }, path=journal_path)
+
+        client = MagicMock()
+        client.fetch_my_trades.return_value = [
+            {"id": "t-entry", "price": 62743.1, "amount": 0.1156, "info": {"realizedPnl": "0", "orderId": 28540959760}},
+            {"id": "t-close-1", "price": 62817.5, "amount": 0.0815, "info": {"realizedPnl": "-6.0636", "orderId": 99}},
+            {"id": "t-close-2", "price": 62824.5, "amount": 0.0341, "info": {"realizedPnl": "-2.7702", "orderId": 99}},
+        ]
+
+        result = bot.record_manual_close(client, self.SYMBOL)
+
+        assert result["reason"] == "manual"
+        assert result["realized_pnl"] == pytest.approx(-8.8338)
+        assert bot._load_last_trade_ids(path=state_path)[self.SYMBOL] == "t-close-2"
+
+    def test_falls_back_to_last_trade_when_no_entry_info(self, tmp_path, monkeypatch):
+        journal_path, state_path = self._paths(tmp_path, monkeypatch)
+        client = MagicMock()
+        client.fetch_my_trades.return_value = [
+            {"id": "t-close", "price": 62817.5, "info": {"realizedPnl": "-8.83"}},
+        ]
+
+        result = bot.record_manual_close(client, self.SYMBOL)
+
+        assert result["reason"] == "manual"
+        assert result["entry_price"] is None
+        assert result["realized_pnl"] == pytest.approx(-8.83)
+        assert bot._load_last_trade_ids(path=state_path)[self.SYMBOL] == "t-close"
+
+    def test_falls_back_when_aggregation_finds_no_closing_trades(self, tmp_path, monkeypatch):
+        """진입 기록은 있지만(예: 봇 재시작 등으로 since 창 안에 진입 체결만 보이는 경우)
+        청산 체결을 못 찾으면, 마지막 체결 하나를 그대로 쓰는 예전 방식으로 대체해야 한다."""
+        journal_path, state_path = self._paths(tmp_path, monkeypatch)
+        bot.append_entry({
+            "symbol": self.SYMBOL, "event": "entered", "entry_price": 62743.1,
+            "execution": {"entry_order": {"id": "28540959760"}},
+        }, path=journal_path)
+
+        client = MagicMock()
+        client.fetch_my_trades.return_value = [
+            {"id": "t-entry", "price": 62743.1, "amount": 0.1156, "info": {"realizedPnl": "0", "orderId": 28540959760}},
+        ]
+
+        result = bot.record_manual_close(client, self.SYMBOL)
+
+        assert result["reason"] == "manual"
+        assert result["realized_pnl"] == pytest.approx(0.0)
+
+
+class TestCheckAndLogUntrackedPosition:
+    """실전 버그 재현(2026-08-14): 사용자가 대시보드/봇을 거치지 않고 직접 주문을 넣으면 종목별
+    상태(거래소 직접 조회)엔 바로 보이는데 거래 내역(저널 기반)엔 전혀 안 남았다."""
+
+    SYMBOL = "BTC/USDT:USDT"
+
+    def _paths(self, tmp_path, monkeypatch):
+        journal_path = str(tmp_path / "journal.jsonl")
+        monkeypatch.setattr(bot, "JOURNAL_PATH", journal_path)
+        return journal_path
+
+    def test_logs_entry_when_journal_has_no_record_for_this_symbol(self, tmp_path, monkeypatch):
+        journal_path = self._paths(tmp_path, monkeypatch)
+        client = MagicMock()
+        client.fetch_open_orders.return_value = [
+            {"info": {"orderType": "STOP_MARKET"}, "triggerPrice": 61000},
+            {"info": {"orderType": "TAKE_PROFIT_MARKET"}, "triggerPrice": 68000},
+        ]
+        position = {"entryPrice": 63000.0, "side": "short"}
+
+        result = bot.check_and_log_untracked_position(client, self.SYMBOL, position)
+
+        assert result["event"] == "entered"
+        assert result["entry_price"] == 63000.0
+        assert result["stop_loss_price"] == 61000
+        assert result["take_profit_price"] == 68000
+        assert result["reason"] == "manual_position_detected"
+        entries = bot.read_entries(path=journal_path)
+        assert len(entries) == 1 and entries[0]["event"] == "entered"
+
+    def test_logs_entry_when_last_journal_record_for_symbol_is_closed(self, tmp_path, monkeypatch):
+        """봇이 예전에 이 심볼로 거래하고 청산까지 기록했는데, 그 뒤 사용자가 새로 수동 진입한
+        경우 — 마지막 기록이 "entered"가 아니라 "closed"이므로 새 포지션으로 취급해야 한다."""
+        journal_path = self._paths(tmp_path, monkeypatch)
+        bot.append_entry({"symbol": self.SYMBOL, "event": "entered", "entry_price": 60000.0}, path=journal_path)
+        bot.append_entry({"symbol": self.SYMBOL, "event": "closed", "reason": "take_profit"}, path=journal_path)
+
+        client = MagicMock()
+        client.fetch_open_orders.return_value = []
+        position = {"entryPrice": 63000.0, "side": "long"}
+
+        result = bot.check_and_log_untracked_position(client, self.SYMBOL, position)
+
+        assert result is not None
+        assert result["entry_price"] == 63000.0
+
+    def test_does_nothing_when_already_tracked_as_entered(self, tmp_path, monkeypatch):
+        journal_path = self._paths(tmp_path, monkeypatch)
+        bot.append_entry({"symbol": self.SYMBOL, "event": "entered", "entry_price": 63000.0}, path=journal_path)
+
+        client = MagicMock()
+        result = bot.check_and_log_untracked_position(client, self.SYMBOL, {"entryPrice": 63000.0})
+
+        assert result is None
+        client.fetch_open_orders.assert_not_called()
+        entries = bot.read_entries(path=journal_path)
+        assert len(entries) == 1  # 중복 기록 안 됨
+
+    def test_ignores_other_symbols_when_checking_last_event(self, tmp_path, monkeypatch):
+        journal_path = self._paths(tmp_path, monkeypatch)
+        bot.append_entry({"symbol": "ETH/USDT:USDT", "event": "entered", "entry_price": 1900.0}, path=journal_path)
+
+        client = MagicMock()
+        client.fetch_open_orders.return_value = []
+        result = bot.check_and_log_untracked_position(client, self.SYMBOL, {"entryPrice": 63000.0})
+
+        assert result is not None  # BTC엔 기록이 없으니 ETH 기록과 무관하게 새로 남겨야 함
