@@ -1,3 +1,4 @@
+import logging
 import sys
 from pathlib import Path
 
@@ -5,6 +6,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from flask import Flask, jsonify, render_template
+
+logger = logging.getLogger(__name__)
 
 from src.core.config import (
     FUTURES_SYMBOLS,
@@ -55,25 +58,44 @@ def index():
 
 @app.route("/api/status")
 def api_status():
+    """거래소 호출(잔고/포지션/브래킷 가격 조회)은 데모 서버 쪽 일시적 타임아웃(예: ccxt
+    RequestTimeout -1007)으로 언제든 실패할 수 있다 — futures_rule_bot.run_once()가 심볼별로
+    예외를 격리하는 것과 같은 이유로, 여기서도 한 번의 거래소 hiccup이 전체 500으로 번지지
+    않게 격리한다. 잔고 조회가 실패하면 페이지 자체가 의미 없으므로 503으로 명확히 알리고,
+    개별 심볼 조회 실패는 그 심볼만 상태 불명으로 표시하고 나머지는 정상 반환한다."""
     client = _get_client()
 
-    balance = get_futures_balance(client)
-    margin_equity = (balance.get("USDT") or {}).get("total") or 0.0
+    try:
+        balance = get_futures_balance(client)
+        margin_equity = (balance.get("USDT") or {}).get("total") or 0.0
+    except Exception as exc:
+        logger.exception("failed to fetch futures balance")
+        return jsonify({"status": "error", "message": f"거래소 응답 실패: {exc}"}), 503
 
     symbols = {}
     open_count = 0
     for symbol in _available_symbols(client):
-        position = get_position(client, symbol)
-        stop_loss_price, take_profit_price = (None, None)
-        if position is not None:
-            open_count += 1
-            stop_loss_price, take_profit_price = get_bracket_prices(client, symbol)
-        symbols[symbol] = {
-            "has_position": position is not None,
-            "position": position,
-            "stop_loss_price": stop_loss_price,
-            "take_profit_price": take_profit_price,
-        }
+        try:
+            position = get_position(client, symbol)
+            stop_loss_price, take_profit_price = (None, None)
+            if position is not None:
+                open_count += 1
+                stop_loss_price, take_profit_price = get_bracket_prices(client, symbol)
+            symbols[symbol] = {
+                "has_position": position is not None,
+                "position": position,
+                "stop_loss_price": stop_loss_price,
+                "take_profit_price": take_profit_price,
+            }
+        except Exception as exc:
+            logger.exception("symbol %s raised an error while building status — marking unavailable", symbol)
+            symbols[symbol] = {
+                "has_position": False,
+                "position": None,
+                "stop_loss_price": None,
+                "take_profit_price": None,
+                "error": str(exc),
+            }
 
     all_entries = read_entries(path=JOURNAL_PATH)
     entries = list(reversed(all_entries))[:30]

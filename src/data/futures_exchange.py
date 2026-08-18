@@ -60,6 +60,27 @@ def get_max_leverage(client: ccxt.binance, symbol: str) -> int:
     return int(max((t.get("maxLeverage") or 0) for t in symbol_tiers)) if symbol_tiers else 0
 
 
+def get_notional_cap(client: ccxt.binance, symbol: str, leverage: int) -> float | None:
+    """지금 leverage로 이 심볼을 거래할 때 거래소가 허용하는 최대 포지션 명목가치(USDT).
+
+    바이낸스는 레버리지 구간(bracket)마다 별도 notional cap을 둔다 — 구간이 올라갈수록(=명목
+    가치가 커질수록) 허용 레버리지는 단조 감소한다(예: TSLA는 tier1에서만 5배가 허용되고 cap이
+    $5000, 그 이상 명목가치를 쓰려면 레버리지를 4배 이하로 낮춰야 함). `leveraged_position_size`의
+    리스크 기반 수량 계산은 이 상한을 몰라서, 계좌 자산이 커지면(리스크 비율이 고정이라 계좌가
+    크면 명목가치도 커짐) 이 cap을 넘는 주문을 시도해 거래소가 `-2027 Exceeded the maximum
+    allowable position at current leverage`로 거부하는 사고가 실제 있었다(2026-08-18, TSLA).
+
+    leverage 이상을 허용하는 구간들 중 가장 큰 notional cap을 돌려준다 — 구간이 단조 감소이므로
+    이는 "이 leverage를 유지한 채 낼 수 있는 최대 명목가치"와 같다. 해당 구간을 못 찾으면 None
+    (호출자는 이 상한을 무시하고 기존 로직대로 계산해야 한다)."""
+    tiers = client.fetch_leverage_tiers([symbol])
+    symbol_tiers = tiers.get(symbol) or []
+    matching = [t for t in symbol_tiers if (t.get("maxLeverage") or 0) >= leverage]
+    if not matching:
+        return None
+    return max(t["maxNotional"] for t in matching)
+
+
 _MARGIN_MODE_ALREADY_OK_MESSAGES = (
     "No need to change margin type",  # 이미 같은 마진 모드로 설정된 경우
     "Position side cannot be changed if there exists open orders",  # 이미 포지션/주문이 있어 변경 불가한 경우

@@ -23,6 +23,7 @@ from src.data.futures_exchange import (
     get_futures_client,
     get_futures_market_data_client,
     get_max_leverage,
+    get_notional_cap,
     get_position,
     set_leverage,
     set_margin_mode,
@@ -309,7 +310,17 @@ def _evaluate_symbol(client, symbol: str, position: dict | None, margin_equity: 
         result["reason"] = safety.reason
         return result
 
-    quantity = leveraged_position_size(margin_equity, entry_price, stop_loss_price, leverage, FUTURES_RISK_PER_TRADE)
+    try:
+        max_notional = get_notional_cap(client, symbol, leverage)
+    except Exception:
+        # 조회 실패는 흔치 않은 일시적 오류일 뿐 이 상한이 없다고 확정할 근거가 아니다 — 다만
+        # 이 사이클에서 진입 자체를 막느니, 상한 없이(기존 동작대로) 진행하고 거래소가 최종
+        # 검증하게 둔다. -2027로 거부되면 위쪽 run_once의 심볼별 예외 격리가 잡아준다.
+        logger.exception("symbol %s failed to fetch notional cap — proceeding without it", symbol)
+        max_notional = None
+
+    quantity = leveraged_position_size(margin_equity, entry_price, stop_loss_price, leverage,
+                                        FUTURES_RISK_PER_TRADE, max_notional)
     if quantity <= 0:
         result["event"] = "rejected_zero_quantity"
         return result

@@ -21,6 +21,25 @@ def test_leveraged_position_size_capped_by_leverage():
     assert qty == pytest.approx(max_by_leverage)
 
 
+def test_leveraged_position_size_capped_by_notional():
+    """실전 재현: TSLA는 5배 레버리지에서 명목가치 상한이 $5000인데(거래소 티어 규정), 계좌
+    자산이 커지면(리스크 2% / 손절폭 1.25% 조합에서 자산의 1.6배 명목가치가 나옴) 이 상한을
+    넘는 수량을 계산해서 거래소가 -2027(Exceeded the maximum allowable position at current
+    leverage)로 주문을 거부하는 사고가 있었다(2026-08-18). max_notional을 넘지 않아야 한다."""
+    entry, stop = 300.0, 296.25  # 1.25% 손절폭
+    qty = leveraged_position_size(4_946.37, entry_price=entry, stop_loss_price=stop,
+                                   leverage=5, risk_per_trade=0.02, max_notional=5_000.0)
+    assert qty * entry == pytest.approx(5_000.0)
+
+
+def test_leveraged_position_size_none_max_notional_leaves_behavior_unchanged():
+    qty_uncapped = leveraged_position_size(10_000, entry_price=65_000, stop_loss_price=64_350,
+                                            leverage=10, risk_per_trade=0.02)
+    qty_with_none = leveraged_position_size(10_000, entry_price=65_000, stop_loss_price=64_350,
+                                             leverage=10, risk_per_trade=0.02, max_notional=None)
+    assert qty_with_none == pytest.approx(qty_uncapped)
+
+
 def test_leveraged_position_size_zero_for_zero_margin():
     qty = leveraged_position_size(0, entry_price=65_000, stop_loss_price=64_000, leverage=10, risk_per_trade=0.02)
     assert qty == 0.0

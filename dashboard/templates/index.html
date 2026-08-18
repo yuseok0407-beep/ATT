@@ -503,6 +503,11 @@ async function refresh() {
   try {
     const res = await fetch('/api/status');
     data = await res.json();
+    if (!res.ok) {
+      document.getElementById('last-updated').textContent =
+        (data && data.message ? data.message : '거래소 응답 실패') + ' — 재시도 중…';
+      return;
+    }
   } catch (e) {
     document.getElementById('last-updated').textContent = '연결 실패 — 재시도 중…';
     return;

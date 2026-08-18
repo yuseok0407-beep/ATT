@@ -5,10 +5,16 @@ MIN_STOP_TO_LIQUIDATION_BUFFER = 0.20  # 손절가~청산가 거리가 진입가
 
 
 def leveraged_position_size(margin_equity: float, entry_price: float, stop_loss_price: float,
-                             leverage: int, risk_per_trade: float) -> float:
+                             leverage: int, risk_per_trade: float, max_notional: float | None = None) -> float:
     """리스크 기반 수량 계산은 레버리지와 무관하다 — 손절 시 잃을 금액(margin_equity * risk_per_trade)을
     가격 변동폭(entry-stop)으로 나누면 그대로 나온다. 레버리지는 '얼마나 큰 포지션을 열 수 있는가'라는
-    별도의 상한으로만 작용하므로, 그 상한을 넘지 않도록 min()으로 캡을 씌운다."""
+    별도의 상한으로만 작용하므로, 그 상한을 넘지 않도록 min()으로 캡을 씌운다.
+
+    max_notional: 거래소가 이 leverage에서 허용하는 최대 포지션 명목가치(USDT, 심볼별 레버리지
+    구간에 따라 다름 — get_notional_cap 참고). 계좌 자산이 커지면 리스크 기반 수량이 이 상한을
+    넘을 수 있는데(예: TSLA는 5배에서 cap이 $5000뿐이라 계좌가 $5000만 넘어도 걸림), 이걸 몰랐던
+    탓에 거래소가 -2027으로 주문을 거부하는 사고가 있었다(2026-08-18). None이면 이 상한은
+    적용하지 않는다(예: 호출자가 조회에 실패한 경우)."""
     if margin_equity <= 0 or entry_price <= 0:
         return 0.0
     per_unit_risk = abs(entry_price - stop_loss_price)
@@ -17,7 +23,10 @@ def leveraged_position_size(margin_equity: float, entry_price: float, stop_loss_
 
     risk_based_quantity = (margin_equity * risk_per_trade) / per_unit_risk
     max_quantity_by_leverage = (margin_equity * leverage) / entry_price
-    return max(0.0, min(risk_based_quantity, max_quantity_by_leverage))
+    quantity = min(risk_based_quantity, max_quantity_by_leverage)
+    if max_notional is not None:
+        quantity = min(quantity, max_notional / entry_price)
+    return max(0.0, quantity)
 
 
 def required_margin(quantity: float, entry_price: float, leverage: int) -> float:

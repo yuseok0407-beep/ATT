@@ -186,6 +186,47 @@ def test_run_once_respects_existing_positions_when_capping():
         _stop(patches)
 
 
+def test_run_once_caps_quantity_by_the_symbols_notional_cap():
+    """실전 재현(2026-08-18): TSLA는 5배에서 명목가치 상한이 $5000인데, 리스크 기반 수량
+    계산이 이를 몰라서 상한을 넘는 주문을 시도해 거래소가 -2027로 거부했다. run_once가 이
+    상한을 실제로 open_position_with_bracket에 넘길 수량에 반영하는지 확인한다."""
+    patches = _base_patches(balance_total=10_000)
+    _start(patches)
+    try:
+        with patch("src.futures_rule_bot.detect_signal", return_value="LONG"), \
+             patch("src.futures_rule_bot.get_notional_cap", return_value=500.0), \
+             patch("src.futures_rule_bot.open_position_with_bracket",
+                   return_value={"status": "opened"}) as mock_open:
+            bot.run_once(MagicMock(), consecutive_losses=0, daily_pnl_pct=0.0, symbols=["BTC/USDT:USDT"])
+
+        assert mock_open.call_count == 1
+        _, _, _, quantity, _, _ = mock_open.call_args.args
+        entry_price = 100.0  # _flat_df()의 종가
+        assert quantity * entry_price == pytest.approx(500.0)
+    finally:
+        _stop(patches)
+
+
+def test_run_once_proceeds_without_cap_when_notional_lookup_fails():
+    """명목가치 상한 조회 자체가 실패해도(일시적 거래소 오류 등) 진입을 막지 않아야 한다 —
+    상한 없이 기존 로직대로 진행하고, 정말 초과하면 거래소가 최종 거부하며 그건 심볼별
+    예외 격리(rejected_exchange_error)가 잡아준다."""
+    patches = _base_patches(balance_total=10_000)
+    _start(patches)
+    try:
+        with patch("src.futures_rule_bot.detect_signal", return_value="LONG"), \
+             patch("src.futures_rule_bot.get_notional_cap", side_effect=Exception("timeout")), \
+             patch("src.futures_rule_bot.open_position_with_bracket",
+                   return_value={"status": "opened"}) as mock_open:
+            cycle = bot.run_once(MagicMock(), consecutive_losses=0, daily_pnl_pct=0.0,
+                                  symbols=["BTC/USDT:USDT"])
+
+        assert cycle["symbols"]["BTC/USDT:USDT"]["event"] == "entered"
+        mock_open.assert_called_once()
+    finally:
+        _stop(patches)
+
+
 def test_run_once_rejects_unsafe_stop_for_one_symbol():
     patches = _base_patches()
     _start(patches)

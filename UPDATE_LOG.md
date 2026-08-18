@@ -4,6 +4,57 @@
 
 ---
 
+## 2026-08-18 — TSLA `-2027 Exceeded the maximum allowable position` 진짜 원인 수정
+
+사용자가 저널에서 `TSLA rejected_exchange_error binance {"code":-2027,"msg":"Exceeded the
+maximum allowable position at current leverage."}`를 보고 문의. 봇은 죽지 않았다 —
+`run_once`의 심볼별 예외 격리(2026-08-14 수정)가 정상 동작해서 그 사이클만 TSLA를 건너뛰고
+넘어갔다. 하지만 근본 원인은 남아있어서 매번 재발할 상황이었다.
+
+- **원인**: `leveraged_position_size`는 리스크 기반 수량을 레버리지 상한(`margin_equity *
+  leverage`)으로만 캡하는데, 바이낸스는 이와 별개로 **레버리지 구간(bracket)마다 명목가치
+  상한**을 둔다. TSLA는 5배 레버리지에서 tier1 cap이 $5000뿐(`fetch_leverage_tiers`로 확인).
+  계좌 자산이 늘어나며(현재 $4946) 리스크 2% / 손절폭 1.25% 조합의 수량 계산이 명목가치
+  $7914(=자산×1.6)를 요청하게 됐고, 이게 $5000 상한을 넘어 거래소가 거부한 것. 레버리지
+  캡(margin_equity × leverage = $24,730)보다 훨씬 작은데도 걸린 이유가 바로 이 별개의
+  구간별 상한 때문 — 코드가 이 존재 자체를 몰랐다.
+- **수정**: `src/data/futures_exchange.py`에 `get_notional_cap(client, symbol, leverage)`
+  추가 — 해당 레버리지를 허용하는 구간들 중 가장 큰 notional cap을 반환(구간이 단조감소라
+  이게 "이 레버리지를 유지한 채 낼 수 있는 최대 명목가치"와 같음). `leveraged_position_size`가
+  `max_notional` 파라미터를 받아 세 번째 캡으로 적용. `futures_rule_bot._evaluate_symbol`이
+  신호가 실제로 났을 때만(매 사이클 아님) 이 상한을 조회해서 넘기고, 조회 자체가 실패하면
+  캡 없이 기존 로직대로 진행(진입을 막지 않고, 정말 초과하면 여전히 심볼별 예외 격리가 잡음).
+  BTC/ETH 등 캡이 계좌 자산 대비 훨씬 큰 종목은 사실상 영향 없음.
+- 실제 데모 계좌 잔고($4946.37)로 재현/검증: 수정 전 계산 결과 명목가치 $7914(상한 초과,
+  -2027 재발 확정) → 수정 후 정확히 $5000으로 클램프.
+- 테스트 8개 추가(`test_futures_risk.py`, `test_futures_exchange.py`, `test_futures_rule_bot.py`).
+  전체 216개 통과.
+- **사용자 조치 필요**: 봇 재시작 필요(반영을 위해).
+
+---
+
+## 2026-08-18 — 거래소 타임아웃 시 대시보드 `/api/status`가 통째로 500 나던 문제 수정
+
+터미널에 `ccxt.base.errors.RequestTimeout: binance {"code":-1007,"msg":"Timeout waiting for
+response from backend server..."}`가 두 번 찍히며 `/api/status`가 500을 반환. 원인은 바이낸스
+데모(`demo-fapi.binance.com`) 백엔드의 일시적 응답 지연(거래소 쪽 문제, 우리 코드 버그 아님) —
+봇 사이클(`run_futures_bot.py`)은 이미 백오프 후 재시도하도록 되어 있어 자동 복구됐지만,
+대시보드의 `dashboard/app.py:api_status`는 잔고/포지션/브래킷 가격 중 어느 하나라도 예외가 나면
+전체가 Flask 기본 500 HTML 에러 페이지로 죽었다. 이전에 `futures_rule_bot.run_once()`에
+심볼별 예외 격리를 넣었던 것과 같은 종류의 구멍이 대시보드 쪽엔 없었던 것.
+
+- **수정**: `api_status`에서 잔고 조회 실패는 503 + 명확한 JSON 에러 메시지로 반환(페이지 전체가
+  의미 없어지므로), 심볼별 포지션/브래킷 가격 조회 실패는 그 심볼만 `"error"` 필드와 함께
+  "상태 불명"으로 표시하고 나머지 심볼/응답은 정상 반환하도록 심볼 루프에 try/except 격리 추가.
+- 프론트엔드(`dashboard/templates/index.html`)의 `refresh()`도 `res.ok`를 확인해서 503 응답의
+  메시지를 그대로 보여주도록 수정(이전엔 네트워크 단절과 구분 없이 "연결 실패"로만 표시).
+- `tests/test_dashboard_app.py` 신규 — 잔고 조회 실패 시 503, 한 심볼만 실패해도 나머지는
+  정상 응답하는지 검증. 전체 208개 테스트 통과.
+- **사용자 조치 불필요**: 이번 타임아웃 자체는 봇이 이미 스스로 복구했음. 대시보드만 재시작하면
+  이 수정이 반영됨(급하지 않음 — 동일 상황이 다시 나도 이제 500 대신 명확한 메시지만 보임).
+
+---
+
 ## 2026-08-12 — 종목 확장 후 봇 기동 실패 수정 + 데모 거래 표본 확보용 설정 변경
 
 방금 늘린 종목 목록(CRCL/TSLA/BNB 추가)으로 봇을 재시작하니 `initialize()`에서
