@@ -70,6 +70,13 @@ def _find_last_symbol_event(symbol: str, journal_path: str = JOURNAL_PATH) -> st
     return None
 
 
+def _find_last_symbol_entry(symbol: str, journal_path: str = JOURNAL_PATH) -> dict | None:
+    for entry in reversed(read_entries(path=journal_path)):
+        if entry.get("symbol") == symbol:
+            return entry
+    return None
+
+
 def check_and_log_untracked_position(client, symbol: str, position: dict) -> dict | None:
     """이 심볼에 지금 포지션이 있는데 저널의 마지막 기록이 "entered"가 아니면(즉 이 봇이 이
     포지션의 존재를 전혀 모르고 있으면) 대시보드 거래 내역에도 보이도록 진입 기록을 남긴다.
@@ -99,7 +106,14 @@ def _aggregate_closing_trades(client, symbol: str, entry_info: dict) -> tuple[li
     fetch_my_trades를 since 없이 limit만 주면 "최신 N개"가 아니라 "가장 오래된 N개"가 돌아오는
     거래소 동작 때문에(실전 확인, UPDATE_LOG.md 2026-08-12) 진입 시각을 since로 앵커링해야
     한다. STOP_MARKET/TAKE_PROFIT_MARKET/수동청산 체결이 여러 번의 부분 체결로 쪼개질 수 있어
-    단일 체결이 아니라 전부 합산한다."""
+    단일 체결이 아니라 전부 합산한다.
+
+    since에는 60초 버퍼를 두는데(주문 생성/체결 타임스탬프 오차 대비), 직전 포지션이 청산된 지
+    60초 안에 새 포지션이 재진입되면 이 버퍼가 "직전 포지션의 이미 처리된 청산 체결"까지 다시
+    끌어와 현재 포지션의 실현손익에 합산해버리는 사고가 실제로 있었다(2026-08-20, SOL 실전
+    확인 — 직전 포지션의 +63.6659 이익이 현재 포지션의 -16.401 손실에 섞여 최종 pnl이
+    +47.2649로, 손절인데 수익이 난 것처럼 저널에 기록됨). 이미 처리되어 LAST_TRADE_STATE_PATH에
+    저장된 last_trade_id 이하의 체결은 항상 "이전 포지션 몫"이므로 제외해야 한다."""
     since_ms = int(datetime.fromisoformat(entry_info["timestamp"]).timestamp() * 1000) - 60_000
     trades = client.fetch_my_trades(symbol, since=since_ms, limit=50)
     if not trades:
@@ -113,6 +127,15 @@ def _aggregate_closing_trades(client, symbol: str, entry_info: dict) -> tuple[li
         # 진입 체결로 간주한다(슬리피지가 있으면 완벽하지 않지만 없는 것보다 낫다).
         entry_price = entry_info.get("entry_price")
         closing_trades = [t for t in trades if t.get("price") != entry_price]
+
+    last_processed_id = _load_last_trade_ids(path=LAST_TRADE_STATE_PATH).get(symbol)
+    if last_processed_id is not None:
+        try:
+            last_processed_id = int(last_processed_id)
+            closing_trades = [t for t in closing_trades
+                               if t.get("id") is not None and int(t["id"]) > last_processed_id]
+        except (TypeError, ValueError):
+            pass  # 거래ID가 숫자가 아닌 형식이면(구버전 등) 이 필터는 건너뛴다 — 없는 것보다는 필터 없이 진행이 낫다.
 
     if not closing_trades:
         return [], None, None
@@ -157,7 +180,19 @@ def check_and_log_closed_trade(client, symbol: str) -> dict | None:
     take_profit_price = entry_info.get("take_profit_price")
     reason = "unknown"
     if stop_loss_price is not None and take_profit_price is not None:
-        reason = "stop_loss" if abs(exit_price - stop_loss_price) < abs(exit_price - take_profit_price) else "take_profit"
+        guessed_reason = ("stop_loss" if abs(exit_price - stop_loss_price) < abs(exit_price - take_profit_price)
+                           else "take_profit")
+        # 손절은 항상 손실(이거나 최악이라도 0에 가까움)이고 익절은 항상 이익이어야 한다 — 체결가
+        # 거리로 추정한 reason이 실제 손익 부호와 모순되면(예: "stop_loss"인데 realized_pnl이 +),
+        # 추정 자체가 틀렸다는 뜻이니 unknown으로 남긴다. 위 since-앵커링 버그로 오염된 pnl이
+        # "손절인데 흑자"처럼 겉보기에도 말이 안 되는 기록을 실제로 남긴 적이 있다(2026-08-20).
+        if realized_pnl is not None and (
+            (guessed_reason == "stop_loss" and realized_pnl > 0)
+            or (guessed_reason == "take_profit" and realized_pnl < 0)
+        ):
+            reason = "unknown"
+        else:
+            reason = guessed_reason
 
     closed_entry = {
         "symbol": symbol, "event": "closed", "reason": reason,
@@ -385,7 +420,20 @@ def run_once(client, consecutive_losses: int = None, daily_pnl_pct: float = None
                       "event": "rejected_exchange_error", "reason": str(exc)}
         if result["entered"]:
             open_count += 1
-        if result["event"] not in _SILENT_EVENTS:
+        should_log = result["event"] not in _SILENT_EVENTS
+        if should_log and result["event"] == "rejected_exchange_error":
+            # TSLA/CRCL처럼 계정 설정 문제(약관 미동의 등)로 매 사이클 계속 거부되는 심볼은
+            # 고칠 때까지 똑같은 오류가 몇 시간이고 반복된다 — 매번 저널에 남기면(2026-08-14
+            # 실전에서 TSLA 하나로 60줄 넘게 쌓인 적 있음) 대시보드 "최근 거래 내역"의 고정
+            # 표시 개수(last 30) 안에서 실제 체결 기록이 밀려나 안 보이는 사고로 이어진다
+            # (2026-08-20 실전 확인 — 손절 4건 중 2건이 이 노이즈에 밀려 화면에 안 보였음).
+            # 같은 심볼에서 바로 직전 기록과 이벤트+사유가 완전히 같으면(=상태 변화 없음) 또
+            # 남기지 않는다 — 최초 발생/사유가 바뀐 경우는 여전히 남긴다.
+            last = _find_last_symbol_entry(symbol, journal_path=JOURNAL_PATH)
+            if (last is not None and last.get("event") == "rejected_exchange_error"
+                    and last.get("reason") == result.get("reason")):
+                should_log = False
+        if should_log:
             append_entry({k: v for k, v in result.items() if k != "position"}, path=JOURNAL_PATH)
         cycle["symbols"][symbol] = result
 

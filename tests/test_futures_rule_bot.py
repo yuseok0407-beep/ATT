@@ -31,6 +31,10 @@ def _base_patches(balance_total=10_000, positions=None):
         patch("src.futures_rule_bot.check_and_log_closed_trade"),
         patch("src.futures_rule_bot.check_and_log_untracked_position"),
         patch("src.futures_rule_bot.append_entry"),
+        # rejected_exchange_error 중복 억제 로직(run_once)이 심볼별 마지막 저널 기록을 조회하느라
+        # read_entries를 호출한다 — 기본값을 빈 목록으로 둬서 테스트가 실제 저널 파일을 읽지 않게
+        # 격리한다(각 테스트는 필요하면 이 patch를 안쪽 with로 덮어써서 원하는 이력을 준다).
+        patch("src.futures_rule_bot.read_entries", return_value=[]),
         patch("src.futures_rule_bot.get_futures_market_data_client"),
         patch("src.futures_rule_bot.fetch_ohlcv_df", return_value=_flat_df()),
     ]
@@ -182,6 +186,58 @@ def test_run_once_respects_existing_positions_when_capping():
         assert cycle["symbols"]["XRP/USDT:USDT"]["event"] == "skipped_max_positions"
         mock_open.assert_not_called()
         assert cycle["open_position_count"] == 2
+    finally:
+        _stop(patches)
+
+
+def test_run_once_suppresses_a_repeated_identical_rejected_exchange_error():
+    """실전 재현(2026-08-14, TSLA -2027이 몇 시간이고 그대로 반복): 계정 설정 문제로 매 사이클
+    똑같은 거래소 거부가 반복되면 예전엔 매번 저널에 남아 60줄 넘게 쌓였고, 이 노이즈가 대시보드
+    "최근 거래 내역"(고정 30개)에서 진짜 체결 기록을 밀어내는 사고로 이어졌다(2026-08-20 실전
+    확인). 직전 기록과 이벤트+사유가 완전히 같으면 다시 남기지 않아야 한다."""
+    same_error = 'binance {"code":-2027,"msg":"Exceeded the maximum allowable position at current leverage."}'
+    history = [{"symbol": "BTC/USDT:USDT", "event": "rejected_exchange_error", "reason": same_error}]
+
+    def _fail(client, symbol, side, quantity, stop_loss_price, take_profit_price):
+        raise Exception(same_error)
+
+    patches = _base_patches()
+    _start(patches)
+    try:
+        with patch("src.futures_rule_bot.detect_signal", return_value="LONG"), \
+             patch("src.futures_rule_bot.open_position_with_bracket", side_effect=_fail), \
+             patch("src.futures_rule_bot.read_entries", return_value=history), \
+             patch("src.futures_rule_bot.append_entry") as mock_append:
+            cycle = bot.run_once(MagicMock(), consecutive_losses=0, daily_pnl_pct=0.0)
+
+        assert cycle["symbols"]["BTC/USDT:USDT"]["event"] == "rejected_exchange_error"
+        btc_appends = [c for c in mock_append.call_args_list if c.args[0].get("symbol") == "BTC/USDT:USDT"]
+        assert btc_appends == []
+    finally:
+        _stop(patches)
+
+
+def test_run_once_logs_a_new_rejected_exchange_error_when_it_actually_changes():
+    """반복 억제가 오류를 영영 숨겨버리면 안 된다 — 사유가 바뀌거나(예: 다른 오류 코드) 처음
+    발생한 경우는 정상적으로 저널에 남아야 한다."""
+    history = [{"symbol": "BTC/USDT:USDT", "event": "rejected_exchange_error", "reason": "이전과 다른 옛날 오류"}]
+    new_error = 'binance {"code":-2027,"msg":"Exceeded the maximum allowable position at current leverage."}'
+
+    def _fail(client, symbol, side, quantity, stop_loss_price, take_profit_price):
+        raise Exception(new_error)
+
+    patches = _base_patches()
+    _start(patches)
+    try:
+        with patch("src.futures_rule_bot.detect_signal", return_value="LONG"), \
+             patch("src.futures_rule_bot.open_position_with_bracket", side_effect=_fail), \
+             patch("src.futures_rule_bot.read_entries", return_value=history), \
+             patch("src.futures_rule_bot.append_entry") as mock_append:
+            bot.run_once(MagicMock(), consecutive_losses=0, daily_pnl_pct=0.0)
+
+        btc_appends = [c for c in mock_append.call_args_list if c.args[0].get("symbol") == "BTC/USDT:USDT"]
+        assert len(btc_appends) == 1
+        assert btc_appends[0].args[0]["reason"] == new_error
     finally:
         _stop(patches)
 
@@ -489,6 +545,53 @@ class TestCheckAndLogClosedTrade:
 
         result = bot.check_and_log_closed_trade(client, self.SYMBOL)
         assert result is None
+
+    def test_excludes_a_trade_already_attributed_to_the_previous_position(self, tmp_path, monkeypatch):
+        """실전 버그 재현(2026-08-20, SOL): 직전 포지션 청산 후 60초 안에 새 포지션이 재진입되면
+        since 버퍼(진입시각-60초)가 "이미 처리되어 저널에 기록까지 끝난 직전 포지션의 청산 체결"을
+        다시 끌어와 이번 포지션의 실현손익에 합산해버렸다. 실제로 -16.401 손실이던 포지션이
+        직전 포지션의 +63.6659 이익과 합쳐져 +47.2649 흑자로 기록됐고, reason은 "stop_loss"였다
+        (손절인데 흑자라는 모순된 기록). LAST_TRADE_STATE_PATH에 이미 기록된 거래ID 이하는
+        항상 직전 포지션 몫이므로 제외해야 한다."""
+        journal_path, state_path = self._paths(tmp_path, monkeypatch)
+        bot._save_last_trade_id(self.SYMBOL, "500", path=state_path)  # 직전 포지션의 청산 체결(이미 처리 완료)
+        bot.append_entry({
+            "symbol": self.SYMBOL, "event": "entered", "entry_price": 87.35,
+            "stop_loss_price": 86.26, "take_profit_price": 89.53,
+            "execution": {"entry_order": {"id": "600"}},
+        }, path=journal_path)
+
+        client = MagicMock()
+        client.fetch_my_trades.return_value = [
+            {"id": "500", "price": 87.24, "amount": 106.1, "info": {"realizedPnl": "63.6659", "orderId": 999}},
+            {"id": "600", "price": 87.39, "amount": 109.34, "info": {"realizedPnl": "0", "orderId": 600}},
+            {"id": "700", "price": 87.24, "amount": 109.34, "info": {"realizedPnl": "-16.401", "orderId": 601}},
+        ]
+
+        result = bot.check_and_log_closed_trade(client, self.SYMBOL)
+
+        assert result["realized_pnl"] == pytest.approx(-16.401)
+        assert result["exit_price"] == pytest.approx(87.24)
+        assert bot._load_last_trade_ids(path=state_path)[self.SYMBOL] == "700"
+
+    def test_reason_falls_back_to_unknown_when_pnl_sign_contradicts_the_guess(self, tmp_path, monkeypatch):
+        """체결가 거리만으로 추정한 reason이 실제 손익 부호와 모순되면(예: "stop_loss"로
+        추정했는데 흑자) 그 추정을 믿지 않고 unknown으로 남긴다 — 위 오염 버그가 실제로
+        "손절인데 흑자"라는 모순된 기록을 남겼었다(2026-08-20)."""
+        journal_path, state_path = self._paths(tmp_path, monkeypatch)
+        bot.append_entry({
+            "symbol": self.SYMBOL, "event": "entered", "entry_price": 1900.0,
+            "stop_loss_price": 1876.25, "take_profit_price": 1947.5,
+        }, path=journal_path)
+
+        client = MagicMock()
+        client.fetch_my_trades.return_value = [
+            # exit_price(1880.0)는 손절가(1876.25)에 더 가깝지만 realized_pnl은 흑자 -> 모순
+            {"id": "trade-exit", "price": 1880.0, "amount": 1.0, "info": {"realizedPnl": "50.0"}},
+        ]
+
+        result = bot.check_and_log_closed_trade(client, self.SYMBOL)
+        assert result["reason"] == "unknown"
 
 
 class TestRecordManualClose:
