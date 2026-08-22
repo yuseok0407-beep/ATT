@@ -21,7 +21,7 @@ for _stream in (sys.stdout, sys.stderr):
 from src.backtest.data import fetch_historical_ohlcv
 from src.backtest.engine import run_backtest
 from src.backtest.report import summarize
-from src.core.config import FUTURES_SYMBOLS, RULE_TIMEFRAME, STOP_LOSS_PCT, TAKE_PROFIT_RR
+from src.core.config import FUTURES_SYMBOLS, RULE_ADX_THRESHOLD, RULE_SMA_PERIOD, RULE_TIMEFRAME, STOP_LOSS_PCT, TAKE_PROFIT_RR
 from src.data.futures_exchange import get_futures_market_data_client
 
 BACKTEST_DAYS = 365
@@ -66,6 +66,12 @@ def main():
             trades = run_backtest(
                 df, stop_loss_pct=STOP_LOSS_PCT, take_profit_rr=TAKE_PROFIT_RR,
                 breakeven_at_r=BREAKEVEN_AT_R, max_hold_bars=MAX_HOLD_BARS,
+                adx_threshold=RULE_ADX_THRESHOLD, sma_period=RULE_SMA_PERIOD,
+                # sma_period를 명시하지 않으면 run_backtest()의 하드코딩된 기본값(20)이 조용히
+                # 쓰인다 — 실거래 설정(RULE_SMA_PERIOD=10)과 달라서 "지금 전략이 마이너스"라는
+                # 완전히 잘못된 결과를 낸다(2026-08-11에 한 번 발견됐던 함정에 2026-08-22에
+                # 실제로 다시 걸려서 불필요한 실계좌 중지까지 갔던 사고, UPDATE_LOG.md 참고).
+                # RULE_SMA_PERIOD를 항상 명시해서 이 스크립트가 이 함정에 다시 안 걸리게 함.
                 fee_pct_per_side=FEE_PCT_PER_SIDE, **params,
             )
             stats = summarize(trades)

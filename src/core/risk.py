@@ -2,7 +2,9 @@ from dataclasses import dataclass
 
 MAX_RISK_PER_TRADE = 0.02  # 거래당 포트폴리오의 최대 2%까지만 위험 노출
 MAX_DAILY_LOSS_PCT = 0.05  # 하루 5% 손실 시 그날은 신규 거래 전면 중단
-MAX_CONSECUTIVE_LOSSES = 3  # 연속 3연패 시 중단 (전략/시장 미스매치 신호)
+MAX_CONSECUTIVE_LOSSES = 5  # 연속 5연패 시 중단 (전략/시장 미스매치 신호). 2026-08-11 데모 검증
+# 당시 3으로 설정했다가, 2026-08-22 실계좌에서 3연패(사실상 노이즈성 손실 몰림, UPDATE_LOG 참고)로
+# 너무 쉽게 걸리는 걸 확인 — 데모 22거래 68% 승률 실적을 감안해 사용자 판단으로 5로 상향.
 MAX_SINGLE_ORDER_PCT = 0.5  # 배분 로직 버그가 있어도 포트폴리오의 절반을 넘는 단일 주문은 무조건 차단
 
 

@@ -60,3 +60,23 @@ def test_detect_signal_blocked_by_adx_filter_when_set_high():
     df = _upward_breakout_df()
     assert detect_signal(df, channel_period=20, adx_threshold=None) == "LONG"
     assert detect_signal(df, channel_period=20, adx_threshold=99.0) is None
+
+
+def test_detect_signal_squeeze_filter_allows_breakout_after_flat_history():
+    """돌파 직전까지 계속 평평했던(변동성 낮은) 이력이면 스퀴즈 조건을 만족해 신호가 그대로 나야
+    한다 — 돌파 봉 자체의 큰 변동폭이 아니라 "돌파 직전"의 변동성을 봐야 하므로."""
+    df = _upward_breakout_df()
+    assert detect_signal(df, channel_period=20, squeeze_percentile=0.5) == "LONG"
+
+
+def test_detect_signal_squeeze_filter_blocks_when_not_actually_squeezed():
+    """돌파 바로 직전 봉의 변동폭이 이미 컸다면(스퀴즈 상태가 아니었다면) 돌파처럼 보여도
+    신호를 내면 안 된다. high는 돌파 종가(101.5) 아래로 유지해서 채널 자체는 안 건드리고
+    변동폭(ATR)만 키운다."""
+    df = _upward_breakout_df()
+    volatile_idx = df.index[-2]
+    df.loc[volatile_idx, "high"] = df.loc[volatile_idx, "close"] + 1.4  # 101.4 < 돌파 종가 101.5
+    df.loc[volatile_idx, "low"] = df.loc[volatile_idx, "close"] - 1.4
+
+    assert detect_signal(df, channel_period=20, squeeze_percentile=None) == "LONG"  # 필터 없으면 여전히 신호
+    assert detect_signal(df, channel_period=20, squeeze_percentile=0.5) is None  # 필터 있으면 차단

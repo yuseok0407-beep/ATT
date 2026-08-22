@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 DEFAULT_PATH = "state/futures_rule_heartbeat.json"
+LIVE_DEFAULT_PATH = "state/futures_rule_heartbeat.live.json"  # 실계좌 봇 전용(2026-08-22)
 
 
 def write_heartbeat(cycle_count: int, open_positions: int, margin_equity: float, path: str = DEFAULT_PATH) -> None:

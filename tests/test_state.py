@@ -77,3 +77,15 @@ class TestComputeConsecutiveLosses:
         manual_win = {"event": "closed", "realized_pnl": 100.0, "reason": "manual"}
         entries = [_closed(-5.0), manual_win, _closed(-6.0)]
         assert compute_consecutive_losses(entries) == 2
+
+    def test_reset_event_stops_the_scan_before_older_losses(self):
+        entries = [_closed(-5.0), _closed(-6.0), {"event": "consecutive_loss_reset"}, _closed(-1.0)]
+        assert compute_consecutive_losses(entries) == 1
+
+    def test_reset_event_with_no_losses_after_it_returns_zero(self):
+        entries = [_closed(-5.0), _closed(-6.0), {"event": "consecutive_loss_reset"}]
+        assert compute_consecutive_losses(entries) == 0
+
+    def test_reset_event_with_a_win_immediately_after_still_returns_zero(self):
+        entries = [_closed(-5.0), {"event": "consecutive_loss_reset"}, _closed(3.0)]
+        assert compute_consecutive_losses(entries) == 0

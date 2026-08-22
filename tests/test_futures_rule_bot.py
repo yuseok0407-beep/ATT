@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from src import futures_rule_bot as bot
+from src.core.risk import MAX_CONSECUTIVE_LOSSES
 
 SYMBOLS = ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT", "XRP/USDT:USDT"]
 
@@ -61,17 +62,97 @@ def test_run_once_blocked_by_circuit_breaker():
         _stop(patches)
 
 
+def test_run_once_does_not_relog_circuit_breaker_when_already_last_entry():
+    """실전 버그 재현(2026-08-22): 서킷브레이커가 걸린 동안 run_once가 매 사이클(30초마다)
+    circuit_breaker_blocked를 저널에 계속 새로 남겨서, 텔레그램 봇이 그걸 전부 "새 이벤트"로
+    보고 알림을 반복 전송했다. 직전 저널 기록이 이미 circuit_breaker_blocked면 다시 남기면 안
+    된다."""
+    patches = _base_patches()
+    _start(patches)
+    try:
+        history = [{"event": "circuit_breaker_blocked", "reason": "일일 손실 한도 초과 (-6.4% <= -5%)"}]
+        with patch("src.futures_rule_bot.read_entries", return_value=history), \
+             patch("src.futures_rule_bot.append_entry") as mock_append:
+            cycle = bot.run_once(MagicMock(), consecutive_losses=0, daily_pnl_pct=-0.066)
+
+        assert cycle["event"] == "circuit_breaker_blocked"
+        mock_append.assert_not_called()
+    finally:
+        _stop(patches)
+
+
+def test_run_once_still_reconciles_closed_trades_and_stale_orders_while_circuit_breaker_blocked():
+    """실전 버그 재현(2026-08-22): 서킷브레이커가 걸린 동안 심볼 평가 자체를 건너뛰다 보니
+    청산 감지(check_and_log_closed_trade)/고아 주문 정리(cleanup_stale_orders)/미기록 포지션
+    백필(check_and_log_untracked_position)도 같이 건너뛰어져서, 실계좌에서 실제로 일어난 손절
+    체결이 저널에 30분 가까이 반영이 안 된 사고가 있었다. 이제는 서킷브레이커 여부와 무관하게
+    매 사이클 전 심볼에 대해 돌아야 한다."""
+    positions = {"BTC/USDT:USDT": {"side": "long", "contracts": 0.01}}  # 나머지는 flat
+    patches = _base_patches(positions=positions)
+    _start(patches)
+    try:
+        cycle = bot.run_once(MagicMock(), consecutive_losses=0, daily_pnl_pct=-0.10)
+        assert cycle["event"] == "circuit_breaker_blocked"
+
+        # flat인 3개 심볼(ETH/SOL/XRP)은 청산 감지 + 고아 주문 정리가 호출돼야 한다
+        flat_symbols = {c.args[1] for c in bot.check_and_log_closed_trade.call_args_list}
+        assert flat_symbols == {"ETH/USDT:USDT", "SOL/USDT:USDT", "XRP/USDT:USDT"}
+        assert bot.cleanup_stale_orders.call_count == 3
+
+        # 포지션이 있는 BTC는 미기록 포지션 백필 확인이 호출돼야 한다
+        bot.check_and_log_untracked_position.assert_called_once()
+        assert bot.check_and_log_untracked_position.call_args.args[1] == "BTC/USDT:USDT"
+    finally:
+        _stop(patches)
+
+
+def test_run_once_isolates_one_symbols_reconcile_error_while_circuit_breaker_blocked():
+    """재조정 중 한 심볼에서 예외가 나도(예: 거래소 일시적 오류) 나머지 심볼의 재조정은 계속
+    돼야 하고, 서킷브레이커 판단 자체도 죽으면 안 된다."""
+    patches = _base_patches()
+    _start(patches)
+    try:
+        def _raise_for_eth(client, symbol, journal_path=None, last_trade_path=None):
+            if symbol == "ETH/USDT:USDT":
+                raise Exception("temporary exchange error")
+
+        with patch("src.futures_rule_bot.check_and_log_closed_trade", side_effect=_raise_for_eth):
+            cycle = bot.run_once(MagicMock(), consecutive_losses=0, daily_pnl_pct=-0.10)
+
+        assert cycle["event"] == "circuit_breaker_blocked"
+        assert bot.cleanup_stale_orders.call_count == 3  # ETH만 재조정 실패, 나머지 3개는 정상 진행
+    finally:
+        _stop(patches)
+
+
+def test_run_once_logs_circuit_breaker_on_first_occurrence_and_after_it_clears():
+    patches = _base_patches()
+    _start(patches)
+    try:
+        with patch("src.futures_rule_bot.read_entries", return_value=[]), \
+             patch("src.futures_rule_bot.append_entry") as mock_append:
+            bot.run_once(MagicMock(), consecutive_losses=0, daily_pnl_pct=-0.10)
+        mock_append.assert_called_once()
+        assert mock_append.call_args.args[0]["event"] == "circuit_breaker_blocked"
+
+        # 서킷브레이커가 풀렸다가(직전 기록이 다른 이벤트) 다시 걸리면 새로 남겨야 한다
+        history = [{"event": "closed", "realized_pnl": 5.0}]
+        with patch("src.futures_rule_bot.read_entries", return_value=history), \
+             patch("src.futures_rule_bot.append_entry") as mock_append2:
+            bot.run_once(MagicMock(), consecutive_losses=0, daily_pnl_pct=-0.10)
+        mock_append2.assert_called_once()
+    finally:
+        _stop(patches)
+
+
 def test_run_once_computes_consecutive_losses_from_journal_when_not_passed():
     """실전 버그 재현: run_futures_bot.py가 consecutive_losses를 안 넘겨서 서킷브레이커가
     죽어있던 걸 고침 — 이제 안 넘기면(None) 저널에서 직접 계산해야 한다."""
     patches = _base_patches()
     _start(patches)
     try:
-        losing_streak = [
-            {"event": "closed", "realized_pnl": -1.0},
-            {"event": "closed", "realized_pnl": -2.0},
-            {"event": "closed", "realized_pnl": -3.0},
-        ]
+        losing_streak = [{"event": "closed", "realized_pnl": -float(i + 1)}
+                          for i in range(MAX_CONSECUTIVE_LOSSES)]
         with patch("src.futures_rule_bot.read_entries", return_value=losing_streak):
             cycle = bot.run_once(MagicMock(), daily_pnl_pct=0.0)
         assert cycle["event"] == "circuit_breaker_blocked"
@@ -83,10 +164,8 @@ def test_run_once_does_not_block_when_journal_losing_streak_is_below_threshold()
     patches = _base_patches()
     _start(patches)
     try:
-        losing_streak = [
-            {"event": "closed", "realized_pnl": -1.0},
-            {"event": "closed", "realized_pnl": -2.0},
-        ]
+        losing_streak = [{"event": "closed", "realized_pnl": -float(i + 1)}
+                          for i in range(MAX_CONSECUTIVE_LOSSES - 1)]
         with patch("src.futures_rule_bot.read_entries", return_value=losing_streak):
             cycle = bot.run_once(MagicMock(), daily_pnl_pct=0.0)
         assert cycle.get("event") != "circuit_breaker_blocked"
@@ -121,6 +200,33 @@ def test_run_once_reports_holding_position_without_touching_it():
         _stop(patches)
 
 
+def test_evaluate_symbol_drops_the_still_forming_last_candle_before_signal_detection():
+    """실전 버그 재현(2026-08-22): fetch_ohlcv_df가 돌려주는 마지막 봉은 바이낸스가 아직 마감
+    안 된(진행 중인) 캔들을 실시간 종가로 계속 갱신해서 주는 것이라, 이걸 그대로 신호 계산에
+    쓰면 그 시간 안에 반전될 일시적 스파이크에도 반응해버린다(실계좌 3연패 원인으로 실제 확인,
+    UPDATE_LOG.md 참고). fetch는 limit+1로 받아서 마지막 한 봉을 버리고 확실히 마감된 캔들만
+    신호 계산에 써야 한다."""
+    raw_df = _flat_df(n=61)
+    raw_df.loc[raw_df.index[-1], "close"] = 99999.0  # 마지막(진행중) 봉만 티나게 다른 값
+
+    patches = _base_patches()
+    _start(patches)
+    try:
+        with patch("src.futures_rule_bot.fetch_ohlcv_df", return_value=raw_df) as mock_fetch, \
+             patch("src.futures_rule_bot.detect_signal", return_value=None) as mock_detect:
+            bot.run_once(MagicMock(), consecutive_losses=0, daily_pnl_pct=0.0)
+
+        # 버릴 여유분을 확보하려면 limit=100이 아니라 101로 요청해야 한다
+        assert mock_fetch.call_args.kwargs.get("limit") == 101
+
+        # detect_signal에 넘어간 데이터의 마지막 행은 원본의 "진행중" 스파이크 행이면 안 된다
+        passed_df = mock_detect.call_args.args[0]
+        assert passed_df["close"].iloc[-1] != 99999.0
+        assert len(passed_df) == len(raw_df) - 1
+    finally:
+        _stop(patches)
+
+
 def test_run_once_isolates_one_symbols_exchange_error_from_the_rest():
     """실전 버그 재현(2026-08-14): TSLA/CRCL 같은 토큰화 주식형 심볼이 계정에서 TradFi-Perps
     약관 미동의로 주문이 거부되면 예외가 사이클 전체를 죽여서, 그 뒤 순서의 다른 심볼(예: 목록
@@ -129,7 +235,7 @@ def test_run_once_isolates_one_symbols_exchange_error_from_the_rest():
     patches = _base_patches()
     _start(patches)
     try:
-        def _fail_for_btc(client, symbol, side, quantity, stop_loss_price, take_profit_price):
+        def _fail_for_btc(client, symbol, side, quantity, stop_loss_price, take_profit_price, **kwargs):
             if symbol == "BTC/USDT:USDT":
                 raise Exception('binance {"code":-4411,"msg":"Please sign TradFi-Perps agreement contract fapi."}')
             return {"status": "opened"}
@@ -169,6 +275,61 @@ def test_run_once_enters_on_signal_and_counts_toward_cap():
         _stop(patches)
 
 
+def test_run_once_env_live_passes_confirm_live_to_entries():
+    """실계좌(env="live")에서 자동 진입이 실제로 주문을 낼 수 있으려면 open_position_with_bracket에
+    confirm_live=True가 같이 전달돼야 한다(안 그러면 _guard_live가 막음, 2026-08-22)."""
+    patches = _base_patches()
+    _start(patches)
+    try:
+        with patch("src.futures_rule_bot.detect_signal", return_value="LONG"), \
+             patch("src.futures_rule_bot.open_position_with_bracket", return_value={"status": "opened"}) as mock_open:
+            bot.run_once(MagicMock(), env="live", consecutive_losses=0, daily_pnl_pct=0.0)
+
+        assert mock_open.call_count == 2
+        for c in mock_open.call_args_list:
+            assert c.kwargs["env"] == "live"
+            assert c.kwargs["confirm_live"] is True
+    finally:
+        _stop(patches)
+
+
+def test_run_once_env_demo_does_not_confirm_live():
+    patches = _base_patches()
+    _start(patches)
+    try:
+        with patch("src.futures_rule_bot.detect_signal", return_value="LONG"), \
+             patch("src.futures_rule_bot.open_position_with_bracket", return_value={"status": "opened"}) as mock_open:
+            bot.run_once(MagicMock(), consecutive_losses=0, daily_pnl_pct=0.0)
+
+        for c in mock_open.call_args_list:
+            assert c.kwargs["env"] == "demo"
+            assert c.kwargs["confirm_live"] is False
+    finally:
+        _stop(patches)
+
+
+def test_run_once_uses_live_path_constants_when_env_live_and_paths_not_given():
+    """journal_path/state_path/last_trade_path를 명시하지 않고 env="live"만 넘기면 LIVE_* 상수로
+    자동 해석돼야 한다 — 데모 파일과 완전히 분리(2026-08-22)."""
+    patches = _base_patches()
+    _start(patches)
+    try:
+        with patch("src.futures_rule_bot.get_daily_pnl_pct", return_value=0.0) as mock_pnl, \
+             patch("src.futures_rule_bot.detect_signal", return_value="LONG"), \
+             patch("src.futures_rule_bot.open_position_with_bracket", return_value={"status": "opened"}), \
+             patch("src.futures_rule_bot.append_entry") as mock_append:
+            bot.run_once(MagicMock(), env="live", consecutive_losses=0)
+
+        mock_pnl.assert_called_once_with(10_000, path=bot.LIVE_STATE_PATH)
+        # "entered" 이벤트 2건(MAX_CONCURRENT_POSITIONS=2)이 전부 라이브 저널 경로로 기록됐는지 확인
+        entered_calls = [c for c in mock_append.call_args_list if c.args[0].get("event") == "entered"]
+        assert len(entered_calls) == 2
+        for c in entered_calls:
+            assert c.kwargs["path"] == bot.LIVE_JOURNAL_PATH
+    finally:
+        _stop(patches)
+
+
 def test_run_once_respects_existing_positions_when_capping():
     # 이미 2개(cap) 보유 중이면 나머지 종목은 신호가 나도 전부 스킵돼야 한다
     positions = {
@@ -198,7 +359,7 @@ def test_run_once_suppresses_a_repeated_identical_rejected_exchange_error():
     same_error = 'binance {"code":-2027,"msg":"Exceeded the maximum allowable position at current leverage."}'
     history = [{"symbol": "BTC/USDT:USDT", "event": "rejected_exchange_error", "reason": same_error}]
 
-    def _fail(client, symbol, side, quantity, stop_loss_price, take_profit_price):
+    def _fail(client, symbol, side, quantity, stop_loss_price, take_profit_price, **kwargs):
         raise Exception(same_error)
 
     patches = _base_patches()
@@ -223,7 +384,7 @@ def test_run_once_logs_a_new_rejected_exchange_error_when_it_actually_changes():
     history = [{"symbol": "BTC/USDT:USDT", "event": "rejected_exchange_error", "reason": "이전과 다른 옛날 오류"}]
     new_error = 'binance {"code":-2027,"msg":"Exceeded the maximum allowable position at current leverage."}'
 
-    def _fail(client, symbol, side, quantity, stop_loss_price, take_profit_price):
+    def _fail(client, symbol, side, quantity, stop_loss_price, take_profit_price, **kwargs):
         raise Exception(new_error)
 
     patches = _base_patches()
@@ -660,6 +821,26 @@ class TestRecordManualClose:
 
         assert result["reason"] == "manual"
         assert result["realized_pnl"] == pytest.approx(0.0)
+
+
+class TestResetConsecutiveLosses:
+    def test_appends_reset_event_to_given_journal_path(self, tmp_path):
+        journal_path = str(tmp_path / "journal.jsonl")
+
+        result = bot.reset_consecutive_losses(journal_path=journal_path)
+
+        assert result == {"event": "consecutive_loss_reset"}
+        entries = bot.read_entries(path=journal_path)
+        assert entries[-1]["event"] == "consecutive_loss_reset"
+
+    def test_defaults_to_module_journal_path(self, tmp_path, monkeypatch):
+        journal_path = str(tmp_path / "journal.jsonl")
+        monkeypatch.setattr(bot, "JOURNAL_PATH", journal_path)
+
+        bot.reset_consecutive_losses()
+
+        entries = bot.read_entries(path=journal_path)
+        assert entries[-1]["event"] == "consecutive_loss_reset"
 
 
 class TestCheckAndLogUntrackedPosition:

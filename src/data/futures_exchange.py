@@ -3,26 +3,49 @@ import ccxt
 from src.core.config import (
     BINANCE_FUTURES_API_KEY,
     BINANCE_FUTURES_API_SECRET,
+    BINANCE_FUTURES_LIVE_API_KEY,
+    BINANCE_FUTURES_LIVE_API_SECRET,
     MARGIN_MODE,
-    USE_TESTNET,
 )
 
 
-def get_futures_client() -> ccxt.binance:
+class LiveKeysNotConfiguredError(RuntimeError):
+    """env="live"로 클라이언트를 만들려는데 BINANCE_FUTURES_LIVE_API_KEY/SECRET이 .env에 없을 때.
+
+    데모 키를 실계좌인 척 대신 쓰거나 그 반대로 섞이는 사고를 막기 위해, 라이브 키가 없으면
+    조용히 데모로 폴백하지 않고 명확히 실패한다 — 호출자(대시보드 등)가 이걸 잡아서 400으로
+    안내해야 한다."""
+
+
+def get_futures_client(env: str = "demo") -> ccxt.binance:
     """USDT-M 선물 계좌/주문 전용 클라이언트.
 
-    바이낸스가 예전 독립 테스트넷(testnet.binancefuture.com, GitHub 로그인)을 폐지하고
-    실제 계정으로 로그인해 쓰는 "Demo Trading"(demo.binance.com)으로 통합했다. 그래서
-    현물처럼 set_sandbox_mode()가 아니라 enable_demo_trading()을 써야 한다 — 키는
-    실제 바이낸스 계정으로 로그인 후 demo.binance.com/en/my/settings/api-management 에서
-    발급받은 데모 트레이딩 전용 키(BINANCE_FUTURES_API_KEY/SECRET)."""
+    env="demo"(기본값)면 바이낸스 "Demo Trading"(demo.binance.com)에 붙는다. 바이낸스가 예전
+    독립 테스트넷(testnet.binancefuture.com, GitHub 로그인)을 폐지하고 실제 계정으로 로그인해
+    쓰는 이 방식으로 통합했다 — 그래서 현물처럼 set_sandbox_mode()가 아니라
+    enable_demo_trading()을 써야 한다. 키는 실제 바이낸스 계정으로 로그인 후
+    demo.binance.com/en/my/settings/api-management 에서 발급받은 데모 트레이딩 전용 키
+    (BINANCE_FUTURES_API_KEY/SECRET).
+
+    env="live"면 실제 자금이 오가는 진짜 계정에 붙는다(BINANCE_FUTURES_LIVE_API_KEY/SECRET,
+    binance.com 실제 계정 API 관리에서 발급 — 데모 키와 절대 같은 값이면 안 됨). 데모와 실계좌를
+    대시보드에서 동시에 볼 수 있게 하기 위한 구분(2026-08-22)."""
+    if env == "live":
+        if not BINANCE_FUTURES_LIVE_API_KEY or not BINANCE_FUTURES_LIVE_API_SECRET:
+            raise LiveKeysNotConfiguredError(
+                "BINANCE_FUTURES_LIVE_API_KEY/BINANCE_FUTURES_LIVE_API_SECRET가 .env에 설정되지 않았습니다."
+            )
+        api_key, api_secret = BINANCE_FUTURES_LIVE_API_KEY, BINANCE_FUTURES_LIVE_API_SECRET
+    else:
+        api_key, api_secret = BINANCE_FUTURES_API_KEY, BINANCE_FUTURES_API_SECRET
+
     client = ccxt.binance({
-        "apiKey": BINANCE_FUTURES_API_KEY,
-        "secret": BINANCE_FUTURES_API_SECRET,
+        "apiKey": api_key,
+        "secret": api_secret,
         "enableRateLimit": True,
         "options": {"defaultType": "future"},
     })
-    if USE_TESTNET:
+    if env != "live":
         client.enable_demo_trading(True)
     return client
 

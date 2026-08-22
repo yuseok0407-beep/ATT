@@ -20,8 +20,13 @@ CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", "0.6"))
 
 # 선물(futures) 전용 설정 — 바이낸스 선물 테스트넷(testnet.binancefuture.com)은 현물
 # 테스트넷(testnet.binance.vision)과 별개 사이트라 키도 별도로 발급받아야 한다.
+# 아래 BINANCE_FUTURES_API_KEY/SECRET은 데모 트레이딩(demo.binance.com) 전용 키다.
 BINANCE_FUTURES_API_KEY = os.getenv("BINANCE_FUTURES_API_KEY", "")
 BINANCE_FUTURES_API_SECRET = os.getenv("BINANCE_FUTURES_API_SECRET", "")
+# 실계좌(진짜 자금) 전용 키 — binance.com 실제 계정의 API 관리에서 발급(데모 계정 아님).
+# 데모와 실계좌를 동시에 운영하기 위한 별도 키 쌍(2026-08-22, get_futures_client(env=...) 참고).
+BINANCE_FUTURES_LIVE_API_KEY = os.getenv("BINANCE_FUTURES_LIVE_API_KEY", "")
+BINANCE_FUTURES_LIVE_API_SECRET = os.getenv("BINANCE_FUTURES_LIVE_API_SECRET", "")
 FUTURES_SYMBOL = os.getenv("FUTURES_SYMBOL", "BTC/USDT:USDT")
 LEVERAGE = int(os.getenv("LEVERAGE", "10"))
 MARGIN_MODE = os.getenv("MARGIN_MODE", "isolated")
@@ -46,8 +51,21 @@ POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "30"))  # 감시 
 #   - SOL/XRP: 스크리닝 최상위 + OOS PASS (엣지 가장 강함)
 #   - CRCL/TSLA/BNB: 신규 추가, OOS PASS. SOXL은 데모 트레이딩 계좌에 아예 없어서(상장 자체가
 #     안 됨, initialize()가 매번 건너뜀) 자리만 차지하던 걸 이걸로 교체
+# SOXL/USDT:USDT: 실거래 선물엔 있지만 데모 트레이딩 계좌엔 없는 심볼(initialize()/
+# _available_symbols()가 client.markets 기준으로 자동 필터링하므로 데모에선 조용히 스킵되고
+# 실계좌 연결 시에만 활성화됨 — 2026-08-11 초기 백테스트에서 완만한 양의 결과, 다만 이후 도입된
+# OOS 분할검증 방식으로는 미검증. AAPL/MSFT/SOXS도 실거래 마켓엔 있으나 스크리닝 스크립트가
+# 데모 계좌 기준으로 후보를 걸러 애초에 백테스트된 적이 없어(성과가 나쁜 게 아니라 테스트 자체를
+# 안 함) 이번엔 제외 — 실거래 마켓 기준으로 스크리닝을 다시 돌리는 게 후속 검토 대상.
 FUTURES_SYMBOLS = [s.strip() for s in os.getenv(
     "FUTURES_SYMBOLS",
-    "BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT,XRP/USDT:USDT,CRCL/USDT:USDT,TSLA/USDT:USDT,BNB/USDT:USDT",
+    "BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT,XRP/USDT:USDT,CRCL/USDT:USDT,TSLA/USDT:USDT,"
+    "BNB/USDT:USDT,SOXL/USDT:USDT",
 ).split(",") if s.strip()]
 MAX_CONCURRENT_POSITIONS = int(os.getenv("MAX_CONCURRENT_POSITIONS", "2"))
+
+# 텔레그램 알림/원격 시작·중지 (2026-08-22) — src/telegram_bot.py, scripts/run_telegram_bot.py 참고.
+# 토큰/채팅ID가 비어 있으면 run_telegram_bot.py가 시작 시 바로 종료한다(조용히 무동작하지 않음).
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+TELEGRAM_POLL_INTERVAL_SECONDS = int(os.getenv("TELEGRAM_POLL_INTERVAL_SECONDS", "15"))

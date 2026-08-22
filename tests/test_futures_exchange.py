@@ -1,9 +1,49 @@
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import ccxt
 import pytest
 
-from src.data.futures_exchange import get_max_leverage, get_notional_cap, set_margin_mode
+from src.data.futures_exchange import (
+    LiveKeysNotConfiguredError,
+    get_futures_client,
+    get_max_leverage,
+    get_notional_cap,
+    set_margin_mode,
+)
+
+
+def test_get_futures_client_demo_enables_demo_trading(monkeypatch):
+    monkeypatch.setattr("src.data.futures_exchange.BINANCE_FUTURES_API_KEY", "demo-key")
+    monkeypatch.setattr("src.data.futures_exchange.BINANCE_FUTURES_API_SECRET", "demo-secret")
+    with patch("src.data.futures_exchange.ccxt.binance") as mock_binance_cls:
+        mock_client = MagicMock()
+        mock_binance_cls.return_value = mock_client
+        client = get_futures_client("demo")
+
+    assert mock_binance_cls.call_args.args[0]["apiKey"] == "demo-key"
+    mock_client.enable_demo_trading.assert_called_once_with(True)
+    assert client is mock_client
+
+
+def test_get_futures_client_live_does_not_enable_demo_trading(monkeypatch):
+    monkeypatch.setattr("src.data.futures_exchange.BINANCE_FUTURES_LIVE_API_KEY", "live-key")
+    monkeypatch.setattr("src.data.futures_exchange.BINANCE_FUTURES_LIVE_API_SECRET", "live-secret")
+    with patch("src.data.futures_exchange.ccxt.binance") as mock_binance_cls:
+        mock_client = MagicMock()
+        mock_binance_cls.return_value = mock_client
+        get_futures_client("live")
+
+    assert mock_binance_cls.call_args.args[0]["apiKey"] == "live-key"
+    mock_client.enable_demo_trading.assert_not_called()
+
+
+def test_get_futures_client_live_without_keys_raises(monkeypatch):
+    # 실제 .env에 라이브 키가 설정돼 있어도(운영 환경) 이 테스트는 "키가 없는 경우"를 검증해야
+    # 하므로 값을 명시적으로 비운다 — 암묵적으로 .env 상태에 의존하면 안 됨.
+    monkeypatch.setattr("src.data.futures_exchange.BINANCE_FUTURES_LIVE_API_KEY", "")
+    monkeypatch.setattr("src.data.futures_exchange.BINANCE_FUTURES_LIVE_API_SECRET", "")
+    with pytest.raises(LiveKeysNotConfiguredError):
+        get_futures_client("live")
 
 
 def test_set_margin_mode_calls_through_on_success():

@@ -37,9 +37,16 @@ def compute_consecutive_losses(entries: list[dict]) -> int:
     주문 포함)은 건너뛰고 계속 더 과거를 본다 — 서킷브레이커는 "규칙 기반 신호가 계속
     틀리고 있다"는 걸 감지하려는 건데, 봇이 판단조차 안 한 수동 거래가 그 카운트에 섞이면
     안 된다(2026-08-14, 사용자가 테스트 삼아 넣은 주문이 연속손실 카운트를 오염시킨 사고로
-    실제 확인됨)."""
+    실제 확인됨).
+
+    event=="consecutive_loss_reset" 기록을 만나면 그 즉시 멈춘다(과거 손실은 더 이상 안 셈) —
+    이 이벤트는 별도 상태 파일 없이 저널 자체에 "여기부터 다시 센다"는 경계선만 남기는 용도다
+    (2026-08-23, `futures_rule_bot.reset_consecutive_losses` 참고). 실현손익 기록을 건드리는
+    게 아니라서 승률/총손익 같은 다른 통계에는 영향이 없다."""
     count = 0
     for entry in reversed(entries):
+        if entry.get("event") == "consecutive_loss_reset":
+            break
         if entry.get("event") != "closed":
             continue
         if entry.get("reason") == "manual":

@@ -35,6 +35,13 @@ JOURNAL_PATH = "journal/futures_rule_trades.jsonl"
 STATE_PATH = "state/futures_rule_daily_equity.json"
 LAST_TRADE_STATE_PATH = "state/futures_rule_last_trade.json"
 
+# 실계좌(진짜 자금) 전용 — 데모 파일은 절대 안 건드리고 완전히 분리된 저널/상태로 기록한다
+# (2026-08-22, 데모/실계좌 동시 운영). run_once(env="live", ...)가 명시적으로 안 넘기면
+# 이 상수들이 기본값으로 쓰인다.
+LIVE_JOURNAL_PATH = "journal/futures_rule_trades.live.jsonl"
+LIVE_STATE_PATH = "state/futures_rule_daily_equity.live.json"
+LIVE_LAST_TRADE_STATE_PATH = "state/futures_rule_last_trade.live.json"
+
 logger = logging.getLogger(__name__)
 
 # 저널에 남기지 않는(스팸 방지) 이벤트 — 매 사이클 반복돼도 상태 변화가 없는 것들
@@ -77,14 +84,16 @@ def _find_last_symbol_entry(symbol: str, journal_path: str = JOURNAL_PATH) -> di
     return None
 
 
-def check_and_log_untracked_position(client, symbol: str, position: dict) -> dict | None:
+def check_and_log_untracked_position(client, symbol: str, position: dict,
+                                      journal_path: str = None) -> dict | None:
     """이 심볼에 지금 포지션이 있는데 저널의 마지막 기록이 "entered"가 아니면(즉 이 봇이 이
     포지션의 존재를 전혀 모르고 있으면) 대시보드 거래 내역에도 보이도록 진입 기록을 남긴다.
     대시보드에서 종목별 상태(거래소 직접 조회)엔 바로 보이는데 거래 내역(저널 기반)엔 안
     보이는 걸 사용자가 실제로 겪었음(2026-08-14) — 대시보드/봇을 거치지 않고 사용자가 직접
     주문을 넣은 경우가 대표적. 매 사이클 호출돼도, 이미 알고 있는 포지션이면(마지막 기록이
     "entered") 중복 기록하지 않는다."""
-    if _find_last_symbol_event(symbol, journal_path=JOURNAL_PATH) == "entered":
+    journal_path = journal_path or JOURNAL_PATH
+    if _find_last_symbol_event(symbol, journal_path=journal_path) == "entered":
         return None
 
     stop_loss_price, take_profit_price = get_bracket_prices(client, symbol)
@@ -94,11 +103,12 @@ def check_and_log_untracked_position(client, symbol: str, position: dict) -> dic
         "stop_loss_price": stop_loss_price, "take_profit_price": take_profit_price,
         "reason": "manual_position_detected",
     }
-    append_entry(entry, path=JOURNAL_PATH)
+    append_entry(entry, path=journal_path)
     return entry
 
 
-def _aggregate_closing_trades(client, symbol: str, entry_info: dict) -> tuple[list, float | None, float | None]:
+def _aggregate_closing_trades(client, symbol: str, entry_info: dict,
+                               last_trade_path: str = None) -> tuple[list, float | None, float | None]:
     """entry_info(마지막 "entered" 저널 기록) 이후에 일어난 체결들 중 진입 체결 자체를 제외한
     나머지(=청산 체결들)를 모아 수량가중평균 체결가와 합산 실현손익을 계산한다. 청산 체결을
     못 찾으면 ([], None, None).
@@ -114,6 +124,7 @@ def _aggregate_closing_trades(client, symbol: str, entry_info: dict) -> tuple[li
     확인 — 직전 포지션의 +63.6659 이익이 현재 포지션의 -16.401 손실에 섞여 최종 pnl이
     +47.2649로, 손절인데 수익이 난 것처럼 저널에 기록됨). 이미 처리되어 LAST_TRADE_STATE_PATH에
     저장된 last_trade_id 이하의 체결은 항상 "이전 포지션 몫"이므로 제외해야 한다."""
+    last_trade_path = last_trade_path or LAST_TRADE_STATE_PATH
     since_ms = int(datetime.fromisoformat(entry_info["timestamp"]).timestamp() * 1000) - 60_000
     trades = client.fetch_my_trades(symbol, since=since_ms, limit=50)
     if not trades:
@@ -128,7 +139,7 @@ def _aggregate_closing_trades(client, symbol: str, entry_info: dict) -> tuple[li
         entry_price = entry_info.get("entry_price")
         closing_trades = [t for t in trades if t.get("price") != entry_price]
 
-    last_processed_id = _load_last_trade_ids(path=LAST_TRADE_STATE_PATH).get(symbol)
+    last_processed_id = _load_last_trade_ids(path=last_trade_path).get(symbol)
     if last_processed_id is not None:
         try:
             last_processed_id = int(last_processed_id)
@@ -149,11 +160,14 @@ def _aggregate_closing_trades(client, symbol: str, entry_info: dict) -> tuple[li
     return closing_trades, exit_price, realized_pnl
 
 
-def check_and_log_closed_trade(client, symbol: str) -> dict | None:
+def check_and_log_closed_trade(client, symbol: str, journal_path: str = None,
+                                last_trade_path: str = None) -> dict | None:
     """지금 포지션이 없는(flat) 종목에 대해, 직전 체결이 아직 저널에 안 남은 청산인지 확인하고
     있으면 실현손익과 함께 기록한다. 손절/익절 중 어느 쪽이었는지는 진입 시 기록해둔 손절가/익절가와
     체결가를 비교해 추정한다(정확한 체결가는 트리거 가격과 보통 일치하거나 매우 가깝다)."""
-    entry_info = _find_last_entry_journal(symbol, journal_path=JOURNAL_PATH)
+    journal_path = journal_path or JOURNAL_PATH
+    last_trade_path = last_trade_path or LAST_TRADE_STATE_PATH
+    entry_info = _find_last_entry_journal(symbol, journal_path=journal_path)
     if entry_info is None:
         # 이 기능이 생기기 전에 체결된 거래 등 대조할 진입 기록이 없으면, 잘못된 추정을 기록하지
         # 않도록 그냥 마지막 거래ID만 기억해두고 넘어간다.
@@ -162,18 +176,19 @@ def check_and_log_closed_trade(client, symbol: str) -> dict | None:
         except Exception:
             return None
         if trades:
-            _save_last_trade_id(symbol, trades[-1].get("id"), path=LAST_TRADE_STATE_PATH)
+            _save_last_trade_id(symbol, trades[-1].get("id"), path=last_trade_path)
         return None
 
     try:
-        closing_trades, exit_price, realized_pnl = _aggregate_closing_trades(client, symbol, entry_info)
+        closing_trades, exit_price, realized_pnl = _aggregate_closing_trades(
+            client, symbol, entry_info, last_trade_path=last_trade_path)
     except Exception:
         return None
     if not closing_trades:
         return None
 
     last_trade_id = closing_trades[-1].get("id")
-    if last_trade_id is None or _load_last_trade_ids(path=LAST_TRADE_STATE_PATH).get(symbol) == last_trade_id:
+    if last_trade_id is None or _load_last_trade_ids(path=last_trade_path).get(symbol) == last_trade_id:
         return None
 
     stop_loss_price = entry_info.get("stop_loss_price")
@@ -199,12 +214,13 @@ def check_and_log_closed_trade(client, symbol: str) -> dict | None:
         "entry_price": entry_info.get("entry_price"), "exit_price": exit_price,
         "realized_pnl": realized_pnl,
     }
-    append_entry(closed_entry, path=JOURNAL_PATH)
-    _save_last_trade_id(symbol, last_trade_id, path=LAST_TRADE_STATE_PATH)
+    append_entry(closed_entry, path=journal_path)
+    _save_last_trade_id(symbol, last_trade_id, path=last_trade_path)
     return closed_entry
 
 
-def record_manual_close(client, symbol: str) -> dict | None:
+def record_manual_close(client, symbol: str, journal_path: str = None,
+                         last_trade_path: str = None) -> dict | None:
     """대시보드의 긴급 청산 버튼 등으로 수동 청산한 직후 호출한다. 방금 체결을 조회해서
     reason="manual"로 저널에 남기고, 감시 루프가 같은 체결을 또 손절/익절로 오인해 중복
     기록하지 않도록 마지막 거래ID 상태도 함께 갱신한다.
@@ -214,11 +230,14 @@ def record_manual_close(client, symbol: str) -> dict | None:
     check_and_log_closed_trade가 진짜 청산을 또 감지해서 같은 포지션이 두 번 기록되는 사고로
     이어짐). 진입 기록이 있으면 _aggregate_closing_trades로 정확히 집계하고, 그게 없거나
     실패할 때만(드문 경우) 마지막 체결 하나를 그대로 쓰는 예전 방식으로 대체한다."""
-    entry_info = _find_last_entry_journal(symbol, journal_path=JOURNAL_PATH)
+    journal_path = journal_path or JOURNAL_PATH
+    last_trade_path = last_trade_path or LAST_TRADE_STATE_PATH
+    entry_info = _find_last_entry_journal(symbol, journal_path=journal_path)
 
     if entry_info is not None:
         try:
-            closing_trades, exit_price, realized_pnl = _aggregate_closing_trades(client, symbol, entry_info)
+            closing_trades, exit_price, realized_pnl = _aggregate_closing_trades(
+                client, symbol, entry_info, last_trade_path=last_trade_path)
         except Exception:
             closing_trades = []
         if closing_trades:
@@ -227,10 +246,10 @@ def record_manual_close(client, symbol: str) -> dict | None:
                 "entry_price": entry_info.get("entry_price"), "exit_price": exit_price,
                 "realized_pnl": realized_pnl,
             }
-            append_entry(closed_entry, path=JOURNAL_PATH)
+            append_entry(closed_entry, path=journal_path)
             last_trade_id = closing_trades[-1].get("id")
             if last_trade_id is not None:
-                _save_last_trade_id(symbol, last_trade_id, path=LAST_TRADE_STATE_PATH)
+                _save_last_trade_id(symbol, last_trade_id, path=last_trade_path)
             return closed_entry
 
     try:
@@ -250,10 +269,26 @@ def record_manual_close(client, symbol: str) -> dict | None:
         "entry_price": entry_info.get("entry_price") if entry_info else None,
         "exit_price": exit_price, "realized_pnl": realized_pnl,
     }
-    append_entry(closed_entry, path=JOURNAL_PATH)
+    append_entry(closed_entry, path=journal_path)
     if trade_id is not None:
-        _save_last_trade_id(symbol, trade_id, path=LAST_TRADE_STATE_PATH)
+        _save_last_trade_id(symbol, trade_id, path=last_trade_path)
     return closed_entry
+
+
+def reset_consecutive_losses(journal_path: str = None) -> dict:
+    """연속손실 카운트를 0으로 되돌린다. 별도 상태 파일을 새로 안 만들고, 저널에
+    event="consecutive_loss_reset" 기록 하나만 남긴다 — compute_consecutive_losses가 이
+    이벤트를 만나면 그 이전 손실은 더 이상 세지 않는다(src/core/state.py 참고). 실현손익/승률
+    같은 다른 통계는 이 저널 기록을 걸러내지 않으므로 영향 없다.
+
+    일일 손실 한도(`state/futures_rule_daily_equity*.json`의 시작 자산)와 달리 연속손실은 애초에
+    상태 파일이 없고 저널만으로 매번 다시 계산되는 구조라, "리셋"도 같은 방식(저널에 경계선
+    이벤트 기록)으로 자연스럽게 구현된다 — 대시보드/텔레그램의 "연속손실 리셋" 버튼이 이 함수를
+    호출한다(2026-08-23, 사용자가 3연패 상태에서 임계치까지 여유가 얼마 안 남은 걸 보고 요청)."""
+    journal_path = journal_path or JOURNAL_PATH
+    entry = {"event": "consecutive_loss_reset"}
+    append_entry(entry, path=journal_path)
+    return entry
 
 
 def initialize(client) -> dict[str, int]:
@@ -302,26 +337,59 @@ def initialize(client) -> dict[str, int]:
     return leverage_by_symbol
 
 
+def _reconcile_symbol(client, symbol: str, position: dict | None, journal_path: str = None,
+                       last_trade_path: str = None) -> None:
+    """신규 진입 판단과 별개로, 거래소의 실제 상태(포지션 유무)와 우리 저널/주문을 항상
+    동기화한다 — 서킷브레이커 발동 여부와 무관하게 매 사이클 돌아야 한다.
+
+    예전엔 이 로직이 _evaluate_symbol 안에 있어서 run_once가 서킷브레이커로 막힐 때 심볼 평가
+    자체를 건너뛰면 이것도 같이 건너뛰어졌다 — 그 결과 서킷브레이커가 걸려있는 동안 실제로 일어난
+    청산(손절/익절 체결)을 봇이 전혀 모른 채 방치하는 사고가 있었다(2026-08-22 실전 확인 — 실계좌
+    ETH/SOL이 진입 직후 손절됐는데 서킷브레이커가 그 뒤로도 계속 걸려있어서 저널에 "청산"으로
+    기록되기까지 30분 가까이 걸림, 그동안 고아 주문 정리도 텔레그램 알림도 전부 지연됨). 이제는
+    run_once가 서킷브레이커 통과 여부와 무관하게 매 사이클 모든 심볼에 대해 이 함수를 먼저 호출."""
+    if position is not None:
+        check_and_log_untracked_position(client, symbol, position, journal_path=journal_path)
+    else:
+        check_and_log_closed_trade(client, symbol, journal_path=journal_path, last_trade_path=last_trade_path)
+        cleanup_stale_orders(client, symbol)
+
+
 def _evaluate_symbol(client, symbol: str, position: dict | None, margin_equity: float,
-                      open_position_count: int, leverage: int = LEVERAGE) -> dict:
-    """종목 하나에 대한 판단. 새 포지션을 열면 result["entered"]=True로 호출자에게 알려서
-    같은 사이클 안에서 MAX_CONCURRENT_POSITIONS 카운트를 즉시 반영할 수 있게 한다.
+                      open_position_count: int, leverage: int = LEVERAGE, env: str = "demo",
+                      journal_path: str = None, last_trade_path: str = None) -> dict:
+    """종목 하나에 대한 신규 진입 판단. 새 포지션을 열면 result["entered"]=True로 호출자에게
+    알려서 같은 사이클 안에서 MAX_CONCURRENT_POSITIONS 카운트를 즉시 반영할 수 있게 한다.
+    청산 감지/고아 주문 정리/미기록 포지션 백필은 run_once가 이 함수를 부르기 전에
+    _reconcile_symbol로 먼저 처리한다(서킷브레이커 여부와 무관하게 항상 돌아야 해서 분리함,
+    2026-08-22).
 
     leverage: initialize()가 이 심볼에 실제로 적용한 레버리지(거래소 한도 때문에 설정값보다
-    낮을 수 있음 — 예: TSLA는 5배). 청산가 추정에 실제 레버리지를 써야 정확하다."""
+    낮을 수 있음 — 예: TSLA는 5배). 청산가 추정에 실제 레버리지를 써야 정확하다.
+
+    env="live"면 open_position_with_bracket에 confirm_live=True를 같이 넘긴다 — 이 프로세스가
+    애초에 실계좌 client(get_futures_client(env="live"))로 호출되고 있다는 것 자체가 명시적
+    의도이므로(2026-08-22), 매 진입마다 다시 물어볼 필요는 없다. env="demo"는 그대로 확인 없이도
+    허용된다(_guard_live가 env="live"일 때만 막음)."""
     if position is not None:
-        check_and_log_untracked_position(client, symbol, position)
         return {"symbol": symbol, "has_position": True, "event": "holding_position",
                 "position": position, "entered": False}
-
-    check_and_log_closed_trade(client, symbol)
-    cleanup_stale_orders(client, symbol)
 
     if open_position_count >= MAX_CONCURRENT_POSITIONS:
         return {"symbol": symbol, "has_position": False, "event": "skipped_max_positions", "entered": False}
 
     market_client = get_futures_market_data_client()
-    df = fetch_ohlcv_df(market_client, symbol, timeframe=RULE_TIMEFRAME, limit=100)
+    # limit+1을 받아서 마지막 한 봉(아직 마감 안 된, 진행 중인 캔들)을 버린다 — 바이낸스
+    # fetch_ohlcv는 이번 시간봉이 끝나기 전까지도 그 봉을 계속 갱신되는 종가로 포함시켜서 돌려주는데
+    # (실전 확인: 마감까지 24분 남은 봉도 이미 종가값이 들어있고 계속 바뀜), POLL_INTERVAL_SECONDS
+    # (30초)마다 이 값으로 신호를 계산하면 그 시간 안에 반전될 일시적 스파이크에도 SMA 돌파처럼
+    # 반응해버린다. 반면 백테스트(run_backtest)는 항상 이미 마감된 과거 캔들만 순회하므로 이
+    # 노이즈를 원천적으로 볼 수 없다 — 실제로 2026-08-22 실계좌 3연패 전부, 그 시간봉이 실제
+    # 마감됐을 때의 종가로 다시 계산하면 신호 자체가 안 떴어야 했던 것으로 확인됨(UPDATE_LOG.md
+    # 참고). 마지막 봉을 버려서 항상 "확실히 마감된" 캔들만 쓰게 하면 백테스트가 실제로 검증한
+    # 조건과 정확히 같아진다 — 대신 신호 확정이 최대 한 시간봉만큼 늦어진다.
+    df = fetch_ohlcv_df(market_client, symbol, timeframe=RULE_TIMEFRAME, limit=101)
+    df = df.iloc[:-1]
     signal = detect_signal(df)
 
     result = {"symbol": symbol, "has_position": False, "entered": False}
@@ -362,14 +430,16 @@ def _evaluate_symbol(client, symbol: str, position: dict | None, margin_equity: 
 
     result["execution"] = open_position_with_bracket(
         client, symbol, side, quantity, stop_loss_price, take_profit_price,
+        env=env, confirm_live=(env == "live"),
     )
     result["event"] = "entered"
     result["entered"] = True
     return result
 
 
-def run_once(client, consecutive_losses: int = None, daily_pnl_pct: float = None, symbols: list[str] = None,
-             leverage_by_symbol: dict[str, int] = None) -> dict:
+def run_once(client, env: str = "demo", consecutive_losses: int = None, daily_pnl_pct: float = None,
+             symbols: list[str] = None, leverage_by_symbol: dict[str, int] = None,
+             journal_path: str = None, state_path: str = None, last_trade_path: str = None) -> dict:
     """감시 루프 한 사이클. symbols(기본값 FUTURES_SYMBOLS 전체)를 순회하며 판단하되, 동시 보유
     포지션이 MAX_CONCURRENT_POSITIONS에 도달하면 나머지 종목은 신규 진입을 건너뛴다
     (skipped_max_positions). symbols는 보통 initialize()가 돌려준 {심볼: 적용레버리지} 맵의
@@ -383,33 +453,66 @@ def run_once(client, consecutive_losses: int = None, daily_pnl_pct: float = None
     (run_futures_bot.py)가 이 값을 아예 안 넘겨서 항상 0으로 고정되고, 서킷브레이커의 "연속
     3연패 시 중단" 조건이 실전에서 계속 죽어있던 사고가 있었다(2026-08-12, UPDATE_LOG.md 참고).
     기본값을 0이 아니라 None으로 두고 여기서 자동 계산하게 해서, 앞으로 호출자가 깜빡 잊고
-    안 넘겨도 같은 사고가 재발하지 않게 했다."""
+    안 넘겨도 같은 사고가 재발하지 않게 했다.
+
+    env="live"면 실계좌 client로 호출되고 있다는 뜻이며(2026-08-22, 데모/실계좌 동시 운영),
+    자동 진입 시 confirm_live=True가 같이 전달되고(_evaluate_symbol 참고) journal_path/state_path/
+    last_trade_path도 안 넘기면 이 env에 맞는 LIVE_* 상수로 자동 해석된다 — 데모 저널/상태
+    파일은 절대 안 건드린다."""
     symbols = FUTURES_SYMBOLS if symbols is None else symbols
     leverage_by_symbol = leverage_by_symbol or {}
+    if journal_path is None:
+        journal_path = LIVE_JOURNAL_PATH if env == "live" else JOURNAL_PATH
+    if state_path is None:
+        state_path = LIVE_STATE_PATH if env == "live" else STATE_PATH
+    if last_trade_path is None:
+        last_trade_path = LIVE_LAST_TRADE_STATE_PATH if env == "live" else LAST_TRADE_STATE_PATH
+
     balance = get_futures_balance(client)
     margin_equity = (balance.get("USDT") or {}).get("total") or 0.0
 
     if daily_pnl_pct is None:
-        daily_pnl_pct = get_daily_pnl_pct(margin_equity, path=STATE_PATH)
+        daily_pnl_pct = get_daily_pnl_pct(margin_equity, path=state_path)
     if consecutive_losses is None:
-        consecutive_losses = compute_consecutive_losses(read_entries(path=JOURNAL_PATH))
+        consecutive_losses = compute_consecutive_losses(read_entries(path=journal_path))
 
     cycle = {"margin_equity": margin_equity, "daily_pnl_pct": daily_pnl_pct, "symbols": {}}
-
-    circuit_breaker = check_circuit_breaker(daily_pnl_pct, consecutive_losses)
-    if not circuit_breaker.allowed:
-        entry = {"event": "circuit_breaker_blocked", "reason": circuit_breaker.reason}
-        append_entry(entry, path=JOURNAL_PATH)
-        cycle["event"] = entry["event"]
-        return cycle
 
     positions = {symbol: get_position(client, symbol) for symbol in symbols}
     open_count = sum(1 for p in positions.values() if p is not None)
 
+    # 청산 감지/고아 주문 정리/미기록 포지션 백필은 서킷브레이커 통과 여부와 무관하게 항상
+    # 수행한다 — 아래 신규 진입 평가 루프와 달리 "지금 거래소 상태가 실제로 어떤지"를 우리 저널과
+    # 맞추는 작업이라, 진입을 막는 것과는 별개로 매 사이클 돌아야 한다(2026-08-22 실전 확인 —
+    # 서킷브레이커가 걸린 동안 실제 손절 체결이 30분 가까이 저널에 반영 안 됐던 사고, 상세 사유는
+    # _reconcile_symbol 참고).
+    for symbol in symbols:
+        try:
+            _reconcile_symbol(client, symbol, positions[symbol], journal_path=journal_path,
+                               last_trade_path=last_trade_path)
+        except Exception:
+            logger.exception("symbol %s failed to reconcile against exchange state — continuing", symbol)
+
+    circuit_breaker = check_circuit_breaker(daily_pnl_pct, consecutive_losses)
+    if not circuit_breaker.allowed:
+        # 서킷브레이커가 걸린 동안은(위 재조정은 끝냈지만) 신규 진입 평가 없이 매 사이클 바로
+        # 여기서 return하므로, 직전 기록과 무조건 비교만으로 충분하다(그 사이 다른 이벤트가 끼어들
+        # 수 없음). reason은 손실률(daily_pnl_pct)이 미실현손익 변동으로 사이클마다 값이 미세하게
+        # 달라져 문자열까지 비교하면 사실상 항상 "다른 사유"로 오인되므로 event만 비교한다 — 안
+        # 그러면 서킷브레이커가 걸려있는 내내 30초(POLL_INTERVAL_SECONDS)마다 저널에 새로 쌓이고,
+        # 텔레그램 봇이 그걸 전부 "새 이벤트"로 보고 알림을 계속 쏘는 사고로 이어진다(2026-08-22
+        # 실전 확인 — 실계좌가 일일 손실 한도 초과로 30초마다 반복 알림).
+        existing_entries = read_entries(path=journal_path)
+        if not existing_entries or existing_entries[-1].get("event") != "circuit_breaker_blocked":
+            append_entry({"event": "circuit_breaker_blocked", "reason": circuit_breaker.reason}, path=journal_path)
+        cycle["event"] = "circuit_breaker_blocked"
+        return cycle
+
     for symbol in symbols:
         leverage = leverage_by_symbol.get(symbol, LEVERAGE)
         try:
-            result = _evaluate_symbol(client, symbol, positions[symbol], margin_equity, open_count, leverage)
+            result = _evaluate_symbol(client, symbol, positions[symbol], margin_equity, open_count, leverage,
+                                       env=env, journal_path=journal_path, last_trade_path=last_trade_path)
         except Exception as exc:
             # 한 심볼의 거래소 쪽 오류(예: TSLA/CRCL 같은 토큰화 주식형 심볼이 계정에서 아직
             # TradFi-Perps 약관에 동의가 안 돼 주문이 거부되는 경우, 2026-08-14 실전 확인)로
@@ -429,12 +532,12 @@ def run_once(client, consecutive_losses: int = None, daily_pnl_pct: float = None
             # (2026-08-20 실전 확인 — 손절 4건 중 2건이 이 노이즈에 밀려 화면에 안 보였음).
             # 같은 심볼에서 바로 직전 기록과 이벤트+사유가 완전히 같으면(=상태 변화 없음) 또
             # 남기지 않는다 — 최초 발생/사유가 바뀐 경우는 여전히 남긴다.
-            last = _find_last_symbol_entry(symbol, journal_path=JOURNAL_PATH)
+            last = _find_last_symbol_entry(symbol, journal_path=journal_path)
             if (last is not None and last.get("event") == "rejected_exchange_error"
                     and last.get("reason") == result.get("reason")):
                 should_log = False
         if should_log:
-            append_entry({k: v for k, v in result.items() if k != "position"}, path=JOURNAL_PATH)
+            append_entry({k: v for k, v in result.items() if k != "position"}, path=journal_path)
         cycle["symbols"][symbol] = result
 
     cycle["open_position_count"] = open_count

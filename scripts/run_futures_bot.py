@@ -1,3 +1,4 @@
+import argparse
 import logging
 import sys
 import time
@@ -10,7 +11,14 @@ for _stream in (sys.stdout, sys.stderr):
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-LOG_PATH = PROJECT_ROOT / "logs" / "futures_rule_bot.log"
+# --env는 로깅 설정(로그 파일 경로가 env별로 갈라짐)보다 먼저 파싱돼야 한다. 프로세스 식별에도
+# 이 값이 argv에 그대로 남아있어야 한다(bot_process._is_our_bot_process가 cmdline에서
+# "--env {env}"를 찾아 데모/실계좌 프로세스를 구분하므로, 2026-08-22).
+_parser = argparse.ArgumentParser()
+_parser.add_argument("--env", choices=["demo", "live"], default="demo")
+_ENV = _parser.parse_args().env
+
+LOG_PATH = PROJECT_ROOT / "logs" / ("futures_rule_bot.log" if _ENV == "demo" else "futures_rule_bot.live.log")
 LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(
@@ -25,13 +33,29 @@ _SILENT_EVENTS = ("no_signal", "holding_position", "skipped_max_positions")
 if __name__ == "__main__":
     from src.core.config import FUTURES_SYMBOLS, MAX_CONCURRENT_POSITIONS, POLL_INTERVAL_SECONDS
     from src.data.futures_exchange import get_futures_client
-    from src.execution.heartbeat import write_heartbeat
-    from src.futures_rule_bot import initialize, run_once
+    from src.execution.heartbeat import LIVE_DEFAULT_PATH as HEARTBEAT_LIVE_PATH, write_heartbeat
+    from src.execution.heartbeat import DEFAULT_PATH as HEARTBEAT_DEMO_PATH
+    from src.futures_rule_bot import (
+        LIVE_JOURNAL_PATH,
+        LIVE_LAST_TRADE_STATE_PATH,
+        LIVE_STATE_PATH,
+        initialize,
+        run_once,
+    )
+    from src.futures_rule_bot import JOURNAL_PATH as DEMO_JOURNAL_PATH
+    from src.futures_rule_bot import LAST_TRADE_STATE_PATH as DEMO_LAST_TRADE_PATH
+    from src.futures_rule_bot import STATE_PATH as DEMO_STATE_PATH
 
-    logger.info("futures rule bot starting — watching %s (max %d concurrent, poll every %ss)",
-                ", ".join(FUTURES_SYMBOLS), MAX_CONCURRENT_POSITIONS, POLL_INTERVAL_SECONDS)
+    env = _ENV
+    journal_path = LIVE_JOURNAL_PATH if env == "live" else DEMO_JOURNAL_PATH
+    state_path = LIVE_STATE_PATH if env == "live" else DEMO_STATE_PATH
+    last_trade_path = LIVE_LAST_TRADE_STATE_PATH if env == "live" else DEMO_LAST_TRADE_PATH
+    heartbeat_path = HEARTBEAT_LIVE_PATH if env == "live" else HEARTBEAT_DEMO_PATH
 
-    client = get_futures_client()
+    logger.info("futures rule bot starting env=%s — watching %s (max %d concurrent, poll every %ss)",
+                env, ", ".join(FUTURES_SYMBOLS), MAX_CONCURRENT_POSITIONS, POLL_INTERVAL_SECONDS)
+
+    client = get_futures_client(env)
     leverage_by_symbol = initialize(client)
     symbols = list(leverage_by_symbol)
     skipped = [s for s in FUTURES_SYMBOLS if s not in symbols]
@@ -49,8 +73,10 @@ if __name__ == "__main__":
     while True:
         cycle_count += 1
         try:
-            cycle = run_once(client, symbols=symbols, leverage_by_symbol=leverage_by_symbol)
-            write_heartbeat(cycle_count, cycle.get("open_position_count", 0), cycle["margin_equity"])
+            cycle = run_once(client, env=env, symbols=symbols, leverage_by_symbol=leverage_by_symbol,
+                              journal_path=journal_path, state_path=state_path, last_trade_path=last_trade_path)
+            write_heartbeat(cycle_count, cycle.get("open_position_count", 0), cycle["margin_equity"],
+                             path=heartbeat_path)
 
             if cycle.get("event") == "circuit_breaker_blocked":
                 logger.info("circuit_breaker_blocked margin_equity=%.2f", cycle["margin_equity"])
