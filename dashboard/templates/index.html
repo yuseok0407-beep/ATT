@@ -45,6 +45,11 @@
   }
   .close-btn:hover { background: rgba(248,113,113,.3); }
   .close-btn:disabled { opacity: .5; cursor: not-allowed; }
+  .reset-streak-btn {
+    background: rgba(96,165,250,.15); color: var(--blue); border: 1px solid rgba(96,165,250,.4);
+    border-radius: 6px; padding: 2px 8px; font-size: 11px; font-weight: 600; cursor: pointer; margin-left: 8px;
+  }
+  .reset-streak-btn:hover { background: rgba(96,165,250,.3); }
   .start-btn {
     background: rgba(52,211,153,.15); color: var(--green); border: 1px solid rgba(52,211,153,.4);
     border-radius: 6px; padding: 6px 14px; font-size: 13px; font-weight: 600; cursor: pointer;
@@ -125,10 +130,45 @@
   .chart-close:hover { color: var(--text); }
   .chart-legend { display: flex; gap: 14px; font-size: 12px; color: var(--muted); margin-top: 8px; flex-wrap: wrap; }
   .chart-legend .dot { width: 8px; height: 8px; border-radius: 2px; }
+
+  /* 데모/실계좌 전환 — 실계좌 화면은 어딜 봐도 절대 헷갈릴 수 없게 확실히 다르게 보여야 한다 */
+  .env-toggle { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; margin-bottom: 14px; }
+  .env-toggle button {
+    background: var(--panel); color: var(--muted); border: none; padding: 6px 16px;
+    font-size: 13px; font-weight: 700; cursor: pointer; letter-spacing: .03em;
+  }
+  .env-toggle button.active[data-env="demo"] { background: rgba(96,165,250,.18); color: var(--blue); }
+  .env-toggle button.active[data-env="live"] { background: rgba(248,113,113,.22); color: var(--red); }
+  .env-banner {
+    display: none; background: rgba(248,113,113,.12); border: 1px solid var(--red); color: var(--red);
+    border-radius: 8px; padding: 10px 14px; font-size: 13px; font-weight: 600; margin-bottom: 14px;
+  }
+  .env-banner .ip-line {
+    margin-top: 6px; font-size: 12px; font-weight: 500; color: rgba(248,113,113,.85);
+    font-variant-numeric: tabular-nums;
+  }
+  .env-banner .ip-line #public-ip { font-weight: 700; color: var(--red); }
+  .env-banner .ip-line a { color: var(--red); text-decoration: underline; margin: 0 2px; }
+  body.env-live .env-banner { display: block; }
+  body.env-live .card, body.env-live section, body.env-live .symbol-card {
+    border-color: rgba(248,113,113,.5);
+  }
 </style>
 </head>
 <body>
   <h1>auto2 선물 감시 봇</h1>
+  <div class="env-toggle" id="env-toggle">
+    <button data-env="demo" class="active" onclick="switchEnv('demo')">DEMO</button>
+    <button data-env="live" onclick="switchEnv('live')">LIVE</button>
+  </div>
+  <div class="env-banner">
+    ⚠ LIVE — 실거래 계정입니다. 아래 시작/중지/긴급 청산은 전부 실제 자금에 영향을 줍니다.
+    <div class="ip-line">
+      현재 공인 IP: <span id="public-ip">확인 중…</span>
+      <a href="#" onclick="fetchPublicIp(); return false;">새로고침</a>
+      — 바이낸스 API 키의 IP 화이트리스트와 다르면 연결이 -2015 오류로 실패합니다.
+    </div>
+  </div>
   <div class="sub">{{ symbols|join(', ') }} · {{ leverage }}x · 최대 동시 {{ max_concurrent }}포지션 · <span id="last-updated">불러오는 중…</span></div>
 
   <div class="grid">
@@ -143,6 +183,14 @@
       </div>
       <div class="heartbeat-line" id="heartbeat-line"></div>
       <button class="notify-btn" id="notify-btn" onclick="toggleNotify()">🔔 알림 켜기</button>
+    </div>
+    <div class="card">
+      <div class="label">텔레그램 봇 (알림·원격 시작/중지)</div>
+      <div class="value" style="font-size:15px"><span class="dot off" id="telegram-status-dot"></span><span id="telegram-status-text">확인 중…</span></div>
+      <div class="bot-controls">
+        <button class="start-btn" id="telegram-start-btn" onclick="startTelegram()" disabled>시작</button>
+        <button class="stop-btn" id="telegram-stop-btn" onclick="stopTelegram()" disabled>중지</button>
+      </div>
     </div>
   </div>
 
@@ -211,7 +259,17 @@ function fmtUsd(n) {
 }
 function fmtPrice(n) {
   if (n === null || n === undefined) return '–';
-  return Number(n).toLocaleString('en-US', {minimumFractionDigits: 1, maximumFractionDigits: 1});
+  n = Number(n);
+  // 가격대가 종목마다 크게 다르다(BTC 수만 달러 vs XRP 1달러 미만) — 소수점 자리를 고정하면
+  // 저가 종목은 손절/익절가가 진입가와 구분 안 될 정도로 뭉개진다. 자릿수를 가격대에 맞게 조정.
+  const abs = Math.abs(n);
+  let digits;
+  if (abs >= 1000) digits = 1;
+  else if (abs >= 100) digits = 2;
+  else if (abs >= 1) digits = 4;
+  else if (abs >= 0.01) digits = 6;
+  else digits = 8;
+  return n.toLocaleString('en-US', {minimumFractionDigits: digits, maximumFractionDigits: digits});
 }
 function fmtPct(n, digits) {
   if (n === null || n === undefined) return '–';
@@ -226,6 +284,51 @@ const REASON_LABELS = {
 let notifyEnabled = localStorage.getItem('notifyEnabled') === 'true';
 let notifyInitialized = false;
 const seenEntryKeys = new Set();
+
+// 새로고침/새로 열 때는 항상 DEMO로 시작한다 — localStorage 등에 저장하지 않는다(의도적).
+// 실계좌 화면을 마지막으로 보고 있었더라도 다시 열면 데모부터 보여줘서, 계좌를 착각한 채로
+// 긴급청산 등을 누르는 사고를 막는다.
+let currentEnv = 'demo';
+
+function showStatusUnavailable(message) {
+  // 계좌 전환 직후나 조회 실패 시 화면에 "이전 계좌의 숫자"가 그대로 남아있으면 지금 보고 있는
+  // 계좌인 것처럼 오인할 수 있다(실전에서 실제로 겪음 — LIVE로 전환했는데 연결이 실패하자
+  // 직전 DEMO 숫자가 LIVE 배너 아래 그대로 남아있었음, 2026-08-22). 그런 사고를 막기 위해
+  // 실패/전환 시점엔 숫자를 전부 지우고 명확한 상태만 보여준다.
+  document.getElementById('last-updated').textContent = message;
+  document.getElementById('margin-equity').textContent = '–';
+  document.getElementById('open-count').textContent = '–';
+  document.getElementById('symbol-grid').innerHTML = `<div class="empty">${message}</div>`;
+  document.getElementById('idle-row').innerHTML = '';
+}
+
+async function fetchPublicIp() {
+  const el = document.getElementById('public-ip');
+  if (!el) return;
+  el.textContent = '확인 중…';
+  try {
+    const res = await fetch('/api/public-ip');
+    const data = await res.json();
+    el.textContent = data.ip || '확인 불가';
+  } catch (e) {
+    el.textContent = '확인 불가';
+  }
+}
+
+function switchEnv(env) {
+  if (env === currentEnv) return;
+  currentEnv = env;
+  document.querySelectorAll('#env-toggle button').forEach(b => b.classList.toggle('active', b.dataset.env === env));
+  document.body.classList.toggle('env-live', env === 'live');
+  // 계좌가 바뀌면 이전 계좌의 과거 기록을 "새로 발생한 이벤트"로 오인해 알림을 쏘지 않도록 리셋
+  seenEntryKeys.clear();
+  notifyInitialized = false;
+  showStatusUnavailable('불러오는 중…');
+  refresh();
+  refreshBotStatus();
+  fetchPerformance();
+  if (env === 'live') fetchPublicIp();  // 바이낸스 IP 화이트리스트와 비교할 수 있게 매번 전환 시 갱신
+}
 
 function updateNotifyBtn() {
   const btn = document.getElementById('notify-btn');
@@ -274,7 +377,7 @@ async function openChart(symbol, refPrices) {
 
   let data;
   try {
-    const res = await fetch('/api/chart/' + encodeURIComponent(symbol));
+    const res = await fetch('/api/chart/' + encodeURIComponent(symbol) + '?env=' + currentEnv);
     data = await res.json();
     if (!res.ok) throw new Error(data.message || '차트를 불러오지 못했습니다.');
   } catch (e) {
@@ -357,17 +460,31 @@ function drawChart(candles, refPrices) {
 }
 
 async function closePosition(symbol) {
-  if (!confirm(shortSymbol(symbol) + ' 포지션을 지금 즉시 시장가로 청산할까요?')) return;
+  if (!confirm(shortSymbol(symbol) + ` 포지션을 지금 즉시 시장가로 청산할까요? (${currentEnv.toUpperCase()})`)) return;
   const btn = document.getElementById('close-btn-' + shortSymbol(symbol));
   if (btn) { btn.disabled = true; btn.textContent = '청산 중…'; }
   try {
-    const res = await fetch('/api/close/' + encodeURIComponent(symbol), { method: 'POST' });
+    const res = await fetch('/api/close/' + encodeURIComponent(symbol) + '?env=' + currentEnv, { method: 'POST' });
     const data = await res.json();
     if (!res.ok || data.status === 'error') {
       alert('청산 실패: ' + (data.message || '알 수 없는 오류'));
     }
   } catch (e) {
     alert('청산 요청 중 네트워크 오류가 발생했습니다.');
+  }
+  refresh();
+}
+
+async function resetStreak() {
+  if (!confirm(`연속 손실 카운트를 0으로 리셋할까요? (${currentEnv.toUpperCase()}) 서킷브레이커 임계치 자체는 그대로 유지됩니다.`)) return;
+  try {
+    const res = await fetch('/api/risk/reset-streak?env=' + currentEnv, { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok || data.status === 'error') {
+      alert('리셋 실패: ' + (data.message || '알 수 없는 오류'));
+    }
+  } catch (e) {
+    alert('리셋 요청 중 네트워크 오류가 발생했습니다.');
   }
   refresh();
 }
@@ -387,7 +504,7 @@ function formatAge(seconds) {
 async function fetchPerformance() {
   let data;
   try {
-    const res = await fetch('/api/performance');
+    const res = await fetch('/api/performance?env=' + currentEnv);
     data = await res.json();
   } catch (e) {
     return;
@@ -433,8 +550,9 @@ async function startBot() {
   btn.disabled = true;
   btn.textContent = '시작 중…';
   try {
-    const res = await fetch('/api/bot/start', { method: 'POST' });
-    if (!res.ok) alert('봇 시작에 실패했습니다.');
+    const res = await fetch('/api/bot/start?env=' + currentEnv, { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) alert('봇 시작에 실패했습니다: ' + (data.message || ''));
   } catch (e) {
     alert('봇 시작 요청 중 네트워크 오류가 발생했습니다.');
   }
@@ -443,12 +561,12 @@ async function startBot() {
 }
 
 async function stopBot() {
-  if (!confirm('감시 봇을 중지할까요? 이미 걸려 있는 포지션/주문(SL·TP)은 그대로 유지됩니다.')) return;
+  if (!confirm(`감시 봇을 중지할까요? (${currentEnv.toUpperCase()}) 이미 걸려 있는 포지션/주문(SL·TP)은 그대로 유지됩니다.`)) return;
   const btn = document.getElementById('bot-stop-btn');
   btn.disabled = true;
   btn.textContent = '중지 중… (최대 15초)';
   try {
-    const res = await fetch('/api/bot/stop', { method: 'POST' });
+    const res = await fetch('/api/bot/stop?env=' + currentEnv, { method: 'POST' });
     if (!res.ok) alert('봇 중지에 실패했습니다.');
   } catch (e) {
     alert('봇 중지 요청 중 네트워크 오류가 발생했습니다.');
@@ -460,7 +578,7 @@ async function stopBot() {
 async function refreshBotStatus() {
   let data;
   try {
-    const res = await fetch('/api/bot/status');
+    const res = await fetch('/api/bot/status?env=' + currentEnv);
     data = await res.json();
   } catch (e) {
     return;
@@ -498,20 +616,83 @@ async function refreshBotStatus() {
   }
 }
 
-async function refresh() {
+async function startTelegram() {
+  const btn = document.getElementById('telegram-start-btn');
+  btn.disabled = true;
+  btn.textContent = '시작 중…';
+  try {
+    const res = await fetch('/api/telegram/start', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) alert('텔레그램 봇 시작에 실패했습니다: ' + (data.message || ''));
+  } catch (e) {
+    alert('텔레그램 봇 시작 요청 중 네트워크 오류가 발생했습니다.');
+  }
+  btn.textContent = '시작';
+  refreshTelegramStatus();
+}
+
+async function stopTelegram() {
+  const btn = document.getElementById('telegram-stop-btn');
+  btn.disabled = true;
+  btn.textContent = '중지 중… (최대 15초)';
+  try {
+    const res = await fetch('/api/telegram/stop', { method: 'POST' });
+    if (!res.ok) alert('텔레그램 봇 중지에 실패했습니다.');
+  } catch (e) {
+    alert('텔레그램 봇 중지 요청 중 네트워크 오류가 발생했습니다.');
+  }
+  btn.textContent = '중지';
+  refreshTelegramStatus();
+}
+
+async function refreshTelegramStatus() {
   let data;
   try {
-    const res = await fetch('/api/status');
+    const res = await fetch('/api/telegram/status');
+    data = await res.json();
+  } catch (e) {
+    return;
+  }
+
+  const dot = document.getElementById('telegram-status-dot');
+  const text = document.getElementById('telegram-status-text');
+  const startBtn = document.getElementById('telegram-start-btn');
+  const stopBtn = document.getElementById('telegram-stop-btn');
+
+  if (data.running) {
+    dot.className = 'dot on';
+    const uptime = data.started_at ? Math.max(0, Math.floor(Date.now() / 1000 - data.started_at)) : null;
+    text.textContent = '실행 중' + (uptime !== null ? ` (가동 ${formatUptime(uptime)})` : '');
+    startBtn.disabled = true;
+    stopBtn.disabled = false;
+  } else {
+    dot.className = 'dot off';
+    text.textContent = '중지됨';
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
+  }
+}
+
+async function refresh() {
+  const requestedEnv = currentEnv;
+  let data;
+  try {
+    const res = await fetch('/api/status?env=' + requestedEnv);
     data = await res.json();
     if (!res.ok) {
-      document.getElementById('last-updated').textContent =
-        (data && data.message ? data.message : '거래소 응답 실패') + ' — 재시도 중…';
+      if (requestedEnv !== currentEnv) return;  // 그 사이 다른 탭으로 전환됨 — 이 오류는 이제 무의미
+      showStatusUnavailable((data && data.message ? data.message : '거래소 응답 실패') + ' — 재시도 중…');
       return;
     }
   } catch (e) {
-    document.getElementById('last-updated').textContent = '연결 실패 — 재시도 중…';
+    if (requestedEnv !== currentEnv) return;
+    showStatusUnavailable('연결 실패 — 재시도 중…');
     return;
   }
+
+  // 빠르게 DEMO<->LIVE를 오가면 두 요청이 겹칠 수 있다 — 응답이 지금 보고 있는 탭과 다른 계좌면
+  // 화면을 절대 갱신하지 않는다(다른 계좌의 숫자가 잠깐이라도 잘못 표시되는 걸 막기 위함).
+  if (data.env && data.env !== currentEnv) return;
 
   document.getElementById('last-updated').textContent = '마지막 갱신: ' + new Date().toLocaleTimeString('ko-KR');
   document.getElementById('margin-equity').textContent = fmtUsd(data.margin_equity);
@@ -533,7 +714,13 @@ async function refresh() {
     const streakLimit = data.risk_limits.max_consecutive_losses;
     const streakColor = streak >= streakLimit ? 'var(--red)' : streak >= streakLimit - 1 ? 'orange' : 'inherit';
     document.getElementById('consecutive-loss-grid').innerHTML = `
-      <div class="config-item"><div class="k">연속 손실</div><div class="v" style="color:${streakColor}">${streak} / ${streakLimit}</div></div>
+      <div class="config-item">
+        <div class="k">연속 손실</div>
+        <div class="v" style="color:${streakColor}">
+          ${streak} / ${streakLimit}
+          ${streak > 0 ? `<button class="reset-streak-btn" onclick="resetStreak()">리셋</button>` : ''}
+        </div>
+      </div>
     `;
   }
 
@@ -563,7 +750,7 @@ async function refresh() {
     return `<div class="symbol-card">
       <div class="header"><span class="ticker" onclick='openChart(${JSON.stringify(symbol)}, ${refPrices})'>
         <span class="dot on"></span>${shortSymbol(symbol)}</span>
-      <span style="font-size:12px;color:var(--muted)">${p.side === 'long' ? '롱' : '숏'}</span></div>
+      <span style="font-size:12px;color:var(--muted)">${p.side === 'long' ? '롱' : '숏'}${s.leverage ? ' · ' + s.leverage + 'x' : ''}</span></div>
       <div class="row"><span class="k">진입가</span><span class="v">${fmtPrice(p.entryPrice)}</span></div>
       <div class="row"><span class="k">현재가</span><span class="v">${fmtPrice(p.markPrice)}</span></div>
       <div class="row"><span class="k">미실현손익</span><span class="v ${pnlClass}">${fmtUsd(p.unrealizedPnl)}</span></div>
@@ -627,9 +814,11 @@ async function refresh() {
 updateNotifyBtn();
 refresh();
 refreshBotStatus();
+refreshTelegramStatus();
 fetchPerformance();
 setInterval(refresh, 5000);
 setInterval(refreshBotStatus, 5000);
+setInterval(refreshTelegramStatus, 5000);
 setInterval(fetchPerformance, 15000);
 </script>
 </body>
