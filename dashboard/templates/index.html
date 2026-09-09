@@ -181,6 +181,40 @@
   body.env-live .card, body.env-live section, body.env-live .symbol-card {
     border-color: rgba(248,113,113,.5);
   }
+  /* 무보호 포지션 경보 — 손절 없는 레버리지 포지션은 화면에서 즉시 튀어야 한다(2026-09-09).
+     지금까지는 손절가 칸에 "-" 한 글자로만 표시돼서 정상 상태와 육안 구분이 안 됐다. */
+  .alert-banner {
+    display: none; background: rgba(248,113,113,.15); border: 1px solid rgba(248,113,113,.6);
+    border-radius: 10px; padding: 12px 16px; margin-bottom: 16px; font-size: 13px;
+    color: var(--red); font-weight: 600; line-height: 1.6;
+  }
+  .alert-banner.show { display: block; }
+  .alert-banner .detail { color: var(--text); font-weight: 400; font-size: 12px; margin-top: 4px; }
+  .symbol-card.unprotected { border-color: var(--red); box-shadow: 0 0 0 1px rgba(248,113,113,.35); }
+  .warn-badge {
+    background: rgba(248,113,113,.2); color: var(--red); border-radius: 999px;
+    padding: 1px 8px; font-size: 11px; font-weight: 700;
+  }
+  /* 손절(-1R)~익절(+2R) 사이에서 지금 어디인지 + 보유 중 최고점 */
+  .rbar { position: relative; height: 8px; border-radius: 999px; background: rgba(139,147,167,.18); margin: 12px 0 4px; }
+  .rbar-fill { position: absolute; top: 0; bottom: 0; border-radius: 999px; background: var(--green); }
+  .rbar-fill.neg { background: var(--red); }
+  .rbar-mark { position: absolute; top: -3px; bottom: -3px; width: 2px; }
+  .rbar-mark.entry { background: var(--muted); }
+  .rbar-mark.peak { background: var(--amber); }
+  .rbar-legend { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .reason-chip.bad { border-color: rgba(248,113,113,.4); color: var(--red); }
+  /* R배수 성과 + 자산곡선 (2026-09-09) */
+  .curve-head { display: flex; justify-content: space-between; align-items: center; margin: 14px 0 6px; }
+  .curve-toggle button {
+    background: transparent; color: var(--muted); border: 1px solid var(--border);
+    border-radius: 6px; padding: 2px 10px; font-size: 11px; cursor: pointer; margin-left: 4px;
+  }
+  .curve-toggle button.active { color: var(--text); border-color: var(--blue); background: rgba(96,165,250,.12); }
+  .curve-wrap { background: rgba(139,147,167,.06); border-radius: 8px; padding: 8px; }
+  .curve-wrap svg { display: block; width: 100%; height: 150px; }
+  .side-table td .pill { font-size: 11px; color: var(--muted); }
+  .mfe-note { font-size: 12px; color: var(--muted); margin-top: 10px; line-height: 1.7; }
 </style>
 </head>
 <body>
@@ -198,6 +232,8 @@
     </div>
   </div>
   <div class="sub">{{ symbols|join(', ') }} · {{ leverage }}x · 최대 동시 {{ max_concurrent }}포지션 · <span id="last-updated">불러오는 중…</span></div>
+
+  <div class="alert-banner" id="unprotected-banner"></div>
 
   <div class="grid">
     <div class="card"><div class="label">마진 자산</div><div class="value" id="margin-equity">–</div></div>
@@ -244,6 +280,7 @@
 
   <section>
     <h2>진입 조건 근접도 <span id="cond-meta" style="font-weight:400"></span></h2>
+    <div class="reason-chips" id="filter-chips" style="margin:0 0 12px"></div>
     <div class="cond-list" id="cond-list"></div>
     <div class="cond-note" id="cond-note"></div>
   </section>
@@ -257,6 +294,8 @@
     </div>
     <div class="config-grid" id="config-grid"></div>
     <div class="config-grid" id="consecutive-loss-grid"></div>
+    <div class="reason-chips" id="issue-chips"></div>
+    <div class="cond-note" id="issue-note"></div>
   </section>
 
   <section>
@@ -267,7 +306,21 @@
       <div class="stat"><div class="label">총 실현손익</div><div class="value" id="perf-total-pnl">–</div></div>
       <div class="stat"><div class="label">평균 손익/거래</div><div class="value" id="perf-avg-pnl">–</div></div>
     </div>
-    <div class="reason-chips" id="perf-reasons"></div>
+    <div class="stat-row" id="perf-r-grid" style="margin-top:12px"></div>
+    <div class="curve-head">
+      <span style="font-size:12px;color:var(--muted)">누적 성과 곡선 · <span id="perf-r-coverage"></span></span>
+      <span class="curve-toggle">
+        <button id="curve-btn-r" class="active" onclick="setCurveMode('r')">R배수</button>
+        <button id="curve-btn-usd" onclick="setCurveMode('usd')">실현손익</button>
+      </span>
+    </div>
+    <div class="curve-wrap"><svg id="equity-curve" viewBox="0 0 600 150" preserveAspectRatio="none"></svg></div>
+    <div class="mfe-note" id="perf-mfe"></div>
+    <table class="subtable side-table" id="perf-side-table" style="display:none;margin-top:12px">
+      <thead><tr><th>방향</th><th>거래수</th><th>승률</th><th>총R</th></tr></thead>
+      <tbody id="perf-side-body"></tbody>
+    </table>
+    <div class="reason-chips" id="perf-reasons" style="margin-top:12px"></div>
     <table class="subtable" id="perf-symbol-table" style="display:none">
       <thead><tr><th>종목</th><th>거래수</th><th>승률</th><th>총손익</th></tr></thead>
       <tbody id="perf-symbol-body"></tbody>
@@ -309,7 +362,196 @@ function fmtPct(n, digits) {
   if (n === null || n === undefined) return '–';
   return (n * 100).toFixed(digits === undefined ? 1 : digits) + '%';
 }
+
+// 손절 주문이 없는 포지션은 화면 맨 위에서 경고한다 — 10배 레버리지에서 일어날 수 있는 가장
+// 비싼 실패인데 지금까지는 카드 안의 "-" 하나로만 표시됐다(2026-09-09).
+function renderUnprotectedBanner(symbols) {
+  const banner = document.getElementById('unprotected-banner');
+  if (!symbols.length) {
+    banner.className = 'alert-banner';
+    banner.innerHTML = '';
+    return;
+  }
+  banner.className = 'alert-banner show';
+  banner.innerHTML = `🚨 손절 주문이 없는 포지션: ${symbols.map(shortSymbol).join(', ')}
+    <div class="detail">레버리지 포지션이 손절 없이 열려 있습니다. 아래 카드에서 즉시 청산하거나
+    거래소에서 손절 주문을 직접 확인하세요.</div>`;
+}
+
+// 거래소가 주문을 거부한 기록은 저널엔 남지만 알림에선 노이즈로 빠져 있고 "최근 내역" 30줄에서도
+// 금방 밀려나서, 실제로는 몇 달치가 조용히 쌓이기만 했다(TSLA -2027 141건 등). 코드별 건수로
+// 묶어서 스팸 없이 드러나게 한다.
+function renderIssues(issues) {
+  const chips = document.getElementById('issue-chips');
+  const note = document.getElementById('issue-note');
+  const rejections = issues.rejections || [];
+  const hours = issues.since_hours || 24;
+  if (!rejections.length) {
+    chips.innerHTML = `<span class="reason-chip">최근 ${hours}시간 거래소 거부 없음</span>`;
+    note.innerHTML = '';
+    return;
+  }
+  chips.innerHTML = `<span style="font-size:12px;color:var(--muted);align-self:center">최근 ${hours}시간 거부</span>`
+    + rejections.map(r => `<span class="reason-chip bad">${r.code} × ${r.count}
+        <span style="color:var(--muted)">${r.symbols.join(', ')}</span></span>`).join('');
+  note.innerHTML = rejections.filter(r => r.hint)
+    .map(r => `${r.code} — ${r.hint}`).join('<br>');
+}
+
+// 저널에 안 남는 진입 차단 사유(레짐숏/저변동/같은봉/가격이탈)의 일별 집계. 필터가 실제로 몇 번
+// 일하고 있는지 확인할 유일한 창구다 — 없으면 방금 넣은 필터가 도는지조차 알 수 없다.
+function renderFilterStats(stats, events) {
+  const chips = document.getElementById('filter-chips');
+  // 날짜 키도 Flask가 정렬해서 내보내므로 순서를 서버에 맡기지 않고 여기서 최신순으로 세운다.
+  const days = Object.keys(stats).sort().reverse();
+  if (!days.length) {
+    chips.innerHTML = '<span class="reason-chip">아직 집계된 차단이 없습니다</span>';
+    return;
+  }
+  chips.innerHTML = days.map(day => {
+    const counts = stats[day];
+    const parts = events.filter(e => counts[e.key]).map(e => `${e.label} ${counts[e.key]}`);
+    return `<span class="reason-chip">${day.slice(5)} · ${parts.length ? parts.join(' · ') : '차단 없음'}</span>`;
+  }).join('');
+}
+
+
+// ---- R배수 성과 + 누적 곡선 (2026-09-09) ----
+// 달러 요약과 나란히 두는 이유: 달러는 "얼마 벌었나", R은 "계획 대비 잘하고 있나"이고
+// 백테스트 기대치와 비교할 수 있는 건 후자뿐이다(사이징을 바꿔도 R은 그대로 비교된다).
+let curveMode = 'r';
+let lastRData = null;
+
+function fmtR(v) { return v === null || v === undefined ? '–' : (v >= 0 ? '+' : '') + Number(v).toFixed(2) + 'R'; }
+
+function setCurveMode(mode) {
+  curveMode = mode;
+  document.getElementById('curve-btn-r').classList.toggle('active', mode === 'r');
+  document.getElementById('curve-btn-usd').classList.toggle('active', mode === 'usd');
+  if (lastRData) drawEquityCurve(lastRData.equity_curve || []);
+}
+
+function drawEquityCurve(points) {
+  const svg = document.getElementById('equity-curve');
+  const key = curveMode === 'r' ? 'cumulative_r' : 'cumulative_pnl';
+  if (points.length < 2) {
+    svg.innerHTML = '<text x="300" y="75" fill="#8b93a7" font-size="11" text-anchor="middle">아직 곡선을 그릴 만큼 청산된 거래가 없습니다</text>';
+    return;
+  }
+
+  const W = 600, H = 150, PAD = 8;
+  const values = points.map(p => p[key]);
+  // 0선을 항상 포함시킨다 — 안 그러면 전 구간 손실인 곡선이 "우상향"처럼 보인다.
+  const lo = Math.min(0, ...values), hi = Math.max(0, ...values);
+  const span = (hi - lo) || 1;
+  const x = i => PAD + (i / (points.length - 1)) * (W - PAD * 2);
+  const y = v => H - PAD - ((v - lo) / span) * (H - PAD * 2);
+
+  const line = values.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+  const area = `${x(0).toFixed(1)},${y(0).toFixed(1)} ${line} ${x(values.length - 1).toFixed(1)},${y(0).toFixed(1)}`;
+  const last = values[values.length - 1];
+  const color = last >= 0 ? 'var(--green)' : 'var(--red)';
+
+  svg.innerHTML = `
+    <polygon points="${area}" fill="${color}" opacity="0.12"></polygon>
+    <line x1="${PAD}" y1="${y(0).toFixed(1)}" x2="${W - PAD}" y2="${y(0).toFixed(1)}"
+          stroke="#8b93a7" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"></line>
+    <polyline points="${line}" fill="none" stroke="${color}" stroke-width="1.6"
+              vector-effect="non-scaling-stroke"></polyline>`;
+}
+
+function renderRPerformance(r) {
+  lastRData = r;
+  const grid = document.getElementById('perf-r-grid');
+  const totalR = r.total_r;
+  grid.innerHTML = `
+    <div class="stat"><div class="label">총 R</div>
+      <div class="value ${totalR >= 0 ? 'green' : 'red'}">${fmtR(totalR)}</div></div>
+    <div class="stat"><div class="label">거래당 기대값</div>
+      <div class="value ${(r.avg_r || 0) >= 0 ? 'green' : 'red'}">${fmtR(r.avg_r)}</div></div>
+    <div class="stat"><div class="label">최대 낙폭 (R)</div>
+      <div class="value red">${fmtR(r.max_drawdown_r)}</div></div>
+    <div class="stat"><div class="label">최대 낙폭 (실현)</div>
+      <div class="value red">${fmtUsd(r.max_drawdown_usd)}</div></div>`;
+
+  drawEquityCurve(r.equity_curve || []);
+
+  // 위 달러 줄과 모수가 다를 수 있다 — 진입가가 청산과 안 맞아 R을 못 믿는 거래는 R 통계에서만
+  // 빠진다. 설명 없이 두 줄의 거래수가 다르면 어느 쪽이 틀린 건지 알 수 없다.
+  const excluded = (r.trades_total || 0) - (r.num_trades || 0);
+  document.getElementById('perf-r-coverage').textContent = excluded > 0
+    ? `R 기준 ${r.num_trades}건 (진입가가 청산과 맞지 않아 ${excluded}건 제외 — 달러 통계에는 포함)`
+    : `R 기준 ${r.num_trades}건`;
+
+  const sides = Object.entries(r.by_side || {});
+  const sideTable = document.getElementById('perf-side-table');
+  if (!sides.length) {
+    sideTable.style.display = 'none';
+  } else {
+    sideTable.style.display = 'table';
+    document.getElementById('perf-side-body').innerHTML = sides.map(([side, s]) => {
+      const label = side === 'long' ? '롱' : side === 'short' ? '숏' : side;
+      return `<tr>
+        <td>${label}</td><td>${s.trades}</td>
+        <td>${fmtPct(s.trades ? s.wins / s.trades : null)}</td>
+        <td><span style="color:var(--${s.total_r >= 0 ? 'green' : 'red'})">${fmtR(s.total_r)}</span></td>
+      </tr>`;
+    }).join('');
+  }
+
+  // "익절 코앞까지 갔다가 손절났다"가 실제로 얼마나 되는지 — 보유 중 최고점이 청산 기록에
+  // 남기 시작한(2026-09-09) 거래부터만 셀 수 있어서, 아직 없으면 그렇다고 말해준다.
+  const mfe = r.mfe || {};
+  const note = document.getElementById('perf-mfe');
+  if (!mfe.losers_measured) {
+    note.textContent = '되돌림 통계: 최고점 기록이 있는 청산이 아직 없습니다 (기록은 2026-09-09부터 쌓입니다).';
+  } else {
+    const pct = (mfe.losers_reaching_1r / mfe.losers_measured * 100).toFixed(0);
+    note.innerHTML = `되돌림 통계: 손실 거래 ${mfe.losers_measured}건 중 <b>${mfe.losers_reaching_1r}건(${pct}%)</b>이
+      손절 전에 +1R 이상 갔었습니다 · 손실 거래의 최고점 중앙값 ${fmtR(mfe.median_loser_peak_r)}`;
+  }
+}
+
 function shortSymbol(s) { return s.split('/')[0]; }
+
+// 진입가/손절가/현재가로 R배수를 계산한다. 손절가까지가 정확히 -1R이라, 손익($)과 달리
+// 사이징과 무관하게 "계획 대비 지금 어디쯤인지"를 바로 읽을 수 있다.
+function rMultiples(position, s) {
+  const entry = position.entryPrice, stop = s.stop_loss_price;
+  if (!entry || !stop) return null;
+  const risk = Math.abs(entry - stop);
+  if (!(risk > 0)) return null;
+  const dir = position.side === 'long' ? 1 : -1;
+  const now = dir * (position.markPrice - entry) / risk;
+  const target = s.take_profit_price ? dir * (s.take_profit_price - entry) / risk : 2;
+  const peak = s.excursion && typeof s.excursion.max_favorable_r === 'number'
+    ? s.excursion.max_favorable_r : null;
+  return { now, target, peak };
+}
+
+// 손절 -1R부터 익절까지의 막대 위에 지금 위치와 보유 중 최고점을 같이 찍는다.
+// "양전했다가 익절 못 닿고 흘러내려 손절"이 실제로 얼마나 자주 나는지 보려던 것 —
+// 최고점 표식(주황)이 현재 위치보다 한참 오른쪽에 있으면 지금 되돌림 중이라는 뜻.
+function renderRBar(r) {
+  if (!r) return '';
+  const lo = -1.15, hi = Math.max(r.target, r.peak || 0, r.now) + 0.15;
+  const pos = v => Math.max(0, Math.min(100, ((v - lo) / (hi - lo)) * 100));
+  const zero = pos(0), cur = pos(r.now);
+  const fmt = v => (v >= 0 ? '+' : '') + v.toFixed(2) + 'R';
+  const peakMark = r.peak === null ? ''
+    : `<div class="rbar-mark peak" style="left:${pos(r.peak)}%" title="보유 중 최고 ${fmt(r.peak)}"></div>`;
+  const peakText = r.peak === null ? '' : ` · 최고 ${fmt(r.peak)}`;
+  return `<div class="rbar">
+      <div class="rbar-fill ${r.now < 0 ? 'neg' : ''}" style="left:${Math.min(zero, cur)}%;width:${Math.abs(cur - zero)}%"></div>
+      <div class="rbar-mark entry" style="left:${zero}%"></div>
+      ${peakMark}
+    </div>
+    <div class="rbar-legend">
+      <span>손절 -1R</span>
+      <span style="color:${r.now >= 0 ? 'var(--green)' : 'var(--red)'}">${fmt(r.now)}${peakText}</span>
+      <span>익절 ${fmt(r.target)}</span>
+    </div>`;
+}
 
 const REASON_LABELS = {
   stop_loss: '손절', take_profit: '익절', manual: '수동청산', breakeven_stop: '손익분기청산', unknown: '기타',
@@ -334,6 +576,12 @@ function showStatusUnavailable(message) {
   document.getElementById('open-count').textContent = '–';
   document.getElementById('symbol-grid').innerHTML = `<div class="empty">${message}</div>`;
   document.getElementById('idle-row').innerHTML = '';
+  // 경보/거부요약/차단통계도 같은 이유로 지운다 — 데모의 무보호 경보가 LIVE 화면에 그대로
+  // 남아있으면 어느 계좌 얘기인지 오인한다.
+  renderUnprotectedBanner([]);
+  document.getElementById('issue-chips').innerHTML = '';
+  document.getElementById('issue-note').innerHTML = '';
+  document.getElementById('filter-chips').innerHTML = '';
 }
 
 async function fetchPublicIp() {
@@ -551,6 +799,8 @@ async function fetchPerformance() {
   totalPnlEl.textContent = fmtUsd(data.total_realized_pnl);
   totalPnlEl.className = 'value ' + (data.total_realized_pnl >= 0 ? 'green' : 'red');
   document.getElementById('perf-avg-pnl').textContent = fmtUsd(data.avg_realized_pnl);
+
+  renderRPerformance(data.r || {});
 
   document.getElementById('perf-reasons').innerHTML = Object.entries(data.reason_counts || {}).map(
     ([reason, count]) => `<span class="reason-chip">${REASON_LABELS[reason] || reason} <b>${count}</b></span>`
@@ -771,6 +1021,10 @@ async function refresh() {
     `;
   }
 
+  renderUnprotectedBanner(data.unprotected_symbols || []);
+  renderIssues(data.recent_issues || {});
+  renderFilterStats(data.filter_stats || {}, data.filter_events || []);
+
   const allSymbols = Object.entries(data.symbols);
   const active = allSymbols.filter(([, s]) => s.has_position && s.position);
   const idle = allSymbols.filter(([, s]) => !(s.has_position && s.position));
@@ -782,16 +1036,17 @@ async function refresh() {
     const refPrices = JSON.stringify({
       entry_price: p.entryPrice, stop_loss_price: s.stop_loss_price, take_profit_price: s.take_profit_price,
     }).replace(/"/g, '&quot;');
-    return `<div class="symbol-card">
+    return `<div class="symbol-card ${s.unprotected ? 'unprotected' : ''}">
       <div class="header"><span class="ticker" onclick='openChart(${JSON.stringify(symbol)}, ${refPrices})'>
         <span class="dot on"></span>${shortSymbol(symbol)}</span>
-      <span style="font-size:12px;color:var(--muted)">${p.side === 'long' ? '롱' : '숏'}${s.leverage ? ' · ' + s.leverage + 'x' : ''}</span></div>
+      <span style="font-size:12px;color:var(--muted)">${s.unprotected ? '<span class="warn-badge">손절 없음</span> ' : ''}${p.side === 'long' ? '롱' : '숏'}${s.leverage ? ' · ' + s.leverage + 'x' : ''}</span></div>
       <div class="row"><span class="k">진입가</span><span class="v">${fmtPrice(p.entryPrice)}</span></div>
       <div class="row"><span class="k">현재가</span><span class="v">${fmtPrice(p.markPrice)}</span></div>
       <div class="row"><span class="k">미실현손익</span><span class="v ${pnlClass}">${fmtUsd(p.unrealizedPnl)}</span></div>
       <div class="row"><span class="k">청산가</span><span class="v" style="color:var(--amber)">${fmtPrice(p.liquidationPrice)}</span></div>
       <div class="row"><span class="k">손절가</span><span class="v" style="color:var(--red)">${fmtPrice(s.stop_loss_price)}</span></div>
       <div class="row"><span class="k">익절가</span><span class="v" style="color:var(--green)">${fmtPrice(s.take_profit_price)}</span></div>
+      ${renderRBar(rMultiples(p, s))}
       <button class="close-btn" id="close-btn-${shortSymbol(symbol)}" style="width:100%;margin-top:10px"
         onclick="closePosition('${symbol}')">긴급 청산</button>
     </div>`;
@@ -824,7 +1079,7 @@ async function refresh() {
     emptyEl.style.display = 'none';
     body.innerHTML = entries.map(e => {
       const ts = e.timestamp ? new Date(e.timestamp).toLocaleString('ko-KR') : '–';
-      const badge = e.event || (e.execution ? 'entered' : 'no_signal');
+      const badge = e.event || 'no_signal';  // execution 블롭은 이제 안 내려온다(전 기록에 event 있음)
       const isClosed = e.event === 'closed';
       const pnlClass = isClosed ? (e.realized_pnl >= 0 ? 'green' : 'red') : '';
       const pnlCell = isClosed
