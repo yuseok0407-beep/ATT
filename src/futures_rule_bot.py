@@ -12,15 +12,18 @@ from src.core.config import (
     MARGIN_MODE,
     MAX_CONCURRENT_POSITIONS,
     MAX_ENTRY_PRICE_DRIFT_R,
+    MIN_ATR_TO_STOP_RATIO,
     RULE_REGIME_SMA_PERIOD,
     RULE_TIMEFRAME,
 )
 from src.core.futures_risk import check_stop_before_liquidation, estimate_liquidation_price, leveraged_position_size
 from src.core.futures_strategy import (
     apply_regime_filter,
+    atr_to_stop_ratio,
     compute_bracket_prices,
     detect_signal,
     is_above_long_sma,
+    passes_volatility_floor,
 )
 from src.core.risk import check_circuit_breaker
 from src.core.state import compute_consecutive_losses, get_daily_pnl_pct
@@ -57,7 +60,7 @@ logger = logging.getLogger(__name__)
 # 막고 있다"는 뜻이라 사용자 조치가 필요한 rejected_exchange_error와 성격이 다르다. 현재 사이클
 # 결과(run_once의 반환값)에는 그대로 실려서 대시보드에서는 볼 수 있다.
 _SILENT_EVENTS = ("no_signal", "holding_position", "skipped_max_positions",
-                  "skipped_same_signal_bar", "skipped_price_drift")
+                  "skipped_same_signal_bar", "skipped_price_drift", "skipped_low_volatility")
 
 
 def _load_last_trade_ids(path: str = LAST_TRADE_STATE_PATH) -> dict:
@@ -416,6 +419,17 @@ def _evaluate_symbol(client, symbol: str, position: dict | None, margin_equity: 
         result["event"] = "no_signal"
         return result
 
+    # 저변동 구간이면 진입하지 않는다 — 손절폭 대비 ATR이 너무 작으면 익절까지 가야 할 거리가
+    # ATR 몇 배가 되어 사실상 도달이 어렵고, 대신 시간이 흐르며 손절로 흘러간다
+    # (UPDATE_LOG.md 2026-09-09: 이 구간이 일관된 손실 구간이었다).
+    atr_ratio = atr_to_stop_ratio(df)
+    if not passes_volatility_floor(atr_ratio):
+        result.update({
+            "event": "skipped_low_volatility", "signal": signal, "atr_to_stop_ratio": atr_ratio,
+            "reason": f"ATR이 손절폭의 {atr_ratio:.2f}배로 하한({MIN_ATR_TO_STOP_RATIO})에 미달",
+        })
+        return result
+
     # 신호를 만든 마감 봉의 시각 — "같은 봉으로 두 번 진입하지 않는다"의 판정 키.
     # fetch_ohlcv_df는 항상 timestamp 열을 주지만, 없으면 인덱스로 대체한다(테스트용 최소 df 등).
     signal_bar_timestamp = str(df["timestamp"].iloc[-1] if "timestamp" in df.columns else df.index[-1])
@@ -452,6 +466,7 @@ def _evaluate_symbol(client, symbol: str, position: dict | None, margin_equity: 
 
     result.update({
         "signal": signal, "entry_price": entry_price, "signal_bar_timestamp": signal_bar_timestamp,
+        "atr_to_stop_ratio": atr_ratio,
         "stop_loss_price": stop_loss_price, "take_profit_price": take_profit_price,
     })
 

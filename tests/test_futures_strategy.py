@@ -164,3 +164,43 @@ def test_regime_filter_survives_reset_index_slices(monkeypatch):
     signal_fn = make_regime_filtered_signal_fn(df, 200)
     second_half = df.iloc[200:].reset_index(drop=True)
     assert signal_fn(second_half.iloc[-100:]) is None
+
+
+def _vol_df(n=60, close=100.0, hl_pct=0.01):
+    closes = np.full(n, close)
+    return pd.DataFrame({
+        "high": closes * (1 + hl_pct), "low": closes * (1 - hl_pct), "close": closes,
+    })
+
+
+def test_atr_to_stop_ratio_measures_atr_in_units_of_the_stop_distance():
+    from src.core.futures_strategy import atr_to_stop_ratio
+
+    # 고가-저가 = 종가의 2% -> ATR ≈ 2%, 손절폭 1% -> 비율 ≈ 2.0
+    ratio = atr_to_stop_ratio(_vol_df(hl_pct=0.01), stop_loss_pct=0.01)
+    assert ratio == pytest.approx(2.0, rel=0.05)
+    # 손절폭을 두 배로 하면 비율은 절반
+    assert atr_to_stop_ratio(_vol_df(hl_pct=0.01), stop_loss_pct=0.02) == pytest.approx(1.0, rel=0.05)
+
+
+def test_atr_to_stop_ratio_returns_none_while_warming_up():
+    from src.core.futures_strategy import atr_to_stop_ratio
+
+    assert atr_to_stop_ratio(_vol_df(n=5)) is None
+
+
+def test_volatility_floor_blocks_only_below_the_threshold():
+    from src.core.futures_strategy import passes_volatility_floor
+
+    assert passes_volatility_floor(0.63, 0.64) is False
+    assert passes_volatility_floor(0.64, 0.64) is True
+    assert passes_volatility_floor(2.0, 0.64) is True
+
+
+def test_volatility_floor_is_permissive_when_unknown_or_disabled():
+    """ATR warm-up 부족이나 필터 off는 '변동성이 부족하다'는 근거가 아니므로 통과시킨다
+    (레짐 필터가 above_long_sma=None을 다루는 방식과 같은 방침)."""
+    from src.core.futures_strategy import passes_volatility_floor
+
+    assert passes_volatility_floor(None, 0.64) is True
+    assert passes_volatility_floor(0.01, 0) is True

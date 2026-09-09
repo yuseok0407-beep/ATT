@@ -7,15 +7,19 @@ import pandas as pd
 import pytest
 
 from src import futures_rule_bot as bot
-from src.core.config import RULE_REGIME_SMA_PERIOD
+from src.core.config import MIN_ATR_TO_STOP_RATIO, RULE_REGIME_SMA_PERIOD
 from src.core.risk import MAX_CONSECUTIVE_LOSSES
 
 SYMBOLS = ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT", "XRP/USDT:USDT"]
 
 
+# 고가/저가 폭은 ATR이 손절폭 하한(MIN_ATR_TO_STOP_RATIO x STOP_LOSS_PCT)을 넘도록 잡는다 —
+# 너무 좁으면 저변동 필터에 막혀 모든 테스트가 "진입 안 함"이 되어버린다.
+_HL = 0.6
+
 def _flat_df(n=60):
     closes = np.full(n, 100.0)
-    return pd.DataFrame({"high": closes + 0.1, "low": closes - 0.1, "close": closes})
+    return pd.DataFrame({"high": closes + _HL, "low": closes - _HL, "close": closes})
 
 
 @pytest.fixture(autouse=True)
@@ -922,7 +926,7 @@ def _signal_df(n=61, close=100.0, live_close=None):
         closes[-1] = live_close
     return pd.DataFrame({
         "timestamp": pd.date_range("2026-09-07", periods=n, freq="h"),
-        "high": closes + 0.1, "low": closes - 0.1, "close": closes,
+        "high": closes + _HL, "low": closes - _HL, "close": closes,
     })
 
 
@@ -1018,9 +1022,11 @@ def test_evaluate_symbol_blocks_shorts_in_an_uptrend_regime():
     """상승 레짐(종가가 장기 SMA 위)에서는 숏 진입을 막고 롱은 그대로 통과시킨다."""
     n = RULE_REGIME_SMA_PERIOD + 2
     closes = np.linspace(100.0, 200.0, n)  # 꾸준한 상승 -> 종가가 장기 SMA 위
+    # 가격이 100 -> 200으로 변하므로 고가/저가 폭도 비율로 잡아야 ATR%가 일정하게 유지된다
+    # (고정폭으로 두면 뒤로 갈수록 ATR%가 작아져 저변동 필터에 걸린다)
     df = pd.DataFrame({
         "timestamp": pd.date_range("2026-01-01", periods=n, freq="h"),
-        "high": closes + 0.1, "low": closes - 0.1, "close": closes,
+        "high": closes * 1.006, "low": closes * 0.994, "close": closes,
     })
 
     patches = _base_patches()
@@ -1076,6 +1082,68 @@ def test_new_skip_events_are_not_written_to_the_journal():
             cycle = bot.run_once(MagicMock(), consecutive_losses=0, daily_pnl_pct=0.0)
 
         assert all(r["event"] == "skipped_price_drift" for r in cycle["symbols"].values())
+        assert not mock_append.called
+    finally:
+        _stop(patches)
+
+
+def _low_vol_df(n=61, close=100.0, hl=0.05):
+    """ATR이 손절폭 하한에 한참 못 미치는 저변동 시계열."""
+    closes = np.full(n, close)
+    return pd.DataFrame({
+        "timestamp": pd.date_range("2026-09-07", periods=n, freq="h"),
+        "high": closes + hl, "low": closes - hl, "close": closes,
+    })
+
+
+def test_evaluate_symbol_skips_entry_in_a_low_volatility_regime():
+    """손절 1.25%/익절 2.5%인데 ATR이 그보다 훨씬 작으면 익절까지 ATR 몇 배를 가야 해서 사실상
+    도달이 어렵고, 대신 시간이 흐르며 손절로 흘러간다 — 후보 신호를 특성별로 쪼개보면 이 구간이
+    일관된 손실 구간이었다(UPDATE_LOG.md 2026-09-09)."""
+    patches = _base_patches()
+    _start(patches)
+    try:
+        with patch("src.futures_rule_bot.fetch_ohlcv_df", return_value=_low_vol_df()), \
+             patch("src.futures_rule_bot.detect_signal", return_value="LONG"), \
+             patch("src.futures_rule_bot.open_position_with_bracket") as mock_open:
+            cycle = bot.run_once(MagicMock(), consecutive_losses=0, daily_pnl_pct=0.0)
+
+        result = cycle["symbols"]["BTC/USDT:USDT"]
+        assert result["event"] == "skipped_low_volatility"
+        assert result["atr_to_stop_ratio"] < MIN_ATR_TO_STOP_RATIO
+        assert not mock_open.called
+    finally:
+        _stop(patches)
+
+
+def test_evaluate_symbol_enters_when_volatility_clears_the_floor():
+    patches = _base_patches()
+    _start(patches)
+    try:
+        with patch("src.futures_rule_bot.fetch_ohlcv_df", return_value=_signal_df()), \
+             patch("src.futures_rule_bot.detect_signal", return_value="LONG"), \
+             patch("src.futures_rule_bot.open_position_with_bracket") as mock_open:
+            cycle = bot.run_once(MagicMock(), consecutive_losses=0, daily_pnl_pct=0.0)
+
+        result = cycle["symbols"]["BTC/USDT:USDT"]
+        assert result["event"] == "entered"
+        # 나중에 저널만으로 필터 효과를 검증할 수 있도록 진입 기록에 비율을 남긴다
+        assert result["atr_to_stop_ratio"] >= MIN_ATR_TO_STOP_RATIO
+        assert mock_open.called
+    finally:
+        _stop(patches)
+
+
+def test_low_volatility_skip_is_not_written_to_the_journal():
+    """신호가 살아있는 동안 매 사이클 반복되므로 저널에 남기면 안 된다."""
+    patches = _base_patches()
+    _start(patches)
+    try:
+        with patch("src.futures_rule_bot.fetch_ohlcv_df", return_value=_low_vol_df()), \
+             patch("src.futures_rule_bot.detect_signal", return_value="LONG"), \
+             patch("src.futures_rule_bot.append_entry") as mock_append:
+            cycle = bot.run_once(MagicMock(), consecutive_losses=0, daily_pnl_pct=0.0)
+        assert all(r["event"] == "skipped_low_volatility" for r in cycle["symbols"].values())
         assert not mock_append.called
     finally:
         _stop(patches)

@@ -2,8 +2,14 @@ from typing import Callable
 
 import pandas as pd
 
-from src.core.config import RULE_ADX_THRESHOLD, RULE_SMA_PERIOD, STOP_LOSS_PCT, TAKE_PROFIT_RR
-from src.core.indicators import adx, rsi, sma
+from src.core.config import (
+    MIN_ATR_TO_STOP_RATIO,
+    RULE_ADX_THRESHOLD,
+    RULE_SMA_PERIOD,
+    STOP_LOSS_PCT,
+    TAKE_PROFIT_RR,
+)
+from src.core.indicators import adx, atr, rsi, sma
 
 VALID_SIDES = ("long", "short")
 
@@ -173,3 +179,33 @@ def make_regime_filtered_signal_fn(
         return apply_regime_filter(signal, above, filter_longs=filter_longs)
 
     return signal_fn
+
+
+def atr_to_stop_ratio(df: pd.DataFrame, stop_loss_pct: float = STOP_LOSS_PCT,
+                       atr_period: int = 14) -> float | None:
+    """마지막 봉의 ATR이 손절폭의 몇 배인지. 봉이 모자라 ATR이 NaN이면 None.
+
+    실거래 봇은 신호 계산과 마찬가지로 **마감된 봉만** 담긴 df를 넘겨야 한다."""
+    if stop_loss_pct <= 0 or len(df) < atr_period + 1:
+        return None
+    latest_atr = atr(df, atr_period).iloc[-1]
+    close = df["close"].iloc[-1]
+    if pd.isna(latest_atr) or close <= 0:
+        return None
+    return float(latest_atr / close / stop_loss_pct)
+
+
+def passes_volatility_floor(ratio: float | None,
+                             min_ratio: float = MIN_ATR_TO_STOP_RATIO) -> bool:
+    """ATR/손절폭 비율이 하한을 넘는지 — **이 규칙의 유일한 정의**이고, 실거래 봇과 조건 근접도
+    화면이 둘 다 이걸 부른다(같은 조건을 두 군데 적었다가 어긋나는 걸 막기 위함).
+
+    왜 필요한가: 손절 1.25%/익절 2.5%인데 ATR이 0.5%면 익절까지 5 ATR을 가야 한다 — 1시간봉
+    스케일에서 거의 안 일어나고 대신 시간이 흐르며 손절로 흘러간다. 후보 신호를 특성별로 쪼개보면
+    이 저변동 구간이 일관된 손실 구간이었다(UPDATE_LOG.md 2026-09-09).
+
+    min_ratio<=0(필터 off)이거나 ratio가 None(ATR warm-up 부족)이면 통과시킨다 — 데이터가
+    없다는 게 "변동성이 부족하다"는 근거는 아니므로(레짐 필터와 같은 방침)."""
+    if min_ratio <= 0 or ratio is None:
+        return True
+    return ratio >= min_ratio

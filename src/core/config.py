@@ -52,6 +52,15 @@ RULE_REGIME_SMA_PERIOD = int(os.getenv("RULE_REGIME_SMA_PERIOD", "400"))
 # 이미 손절선 근처/너머면 진입하자마자 손절되거나 브라켓 주문이 -2021로 거부된다
 # (2026-09-07 실계좌에서 3분 만에 연속손실 5회로 서킷브레이커가 걸린 사고의 직접 원인).
 MAX_ENTRY_PRICE_DRIFT_R = float(os.getenv("MAX_ENTRY_PRICE_DRIFT_R", "0.5"))
+# 저변동 구간 진입 차단 (2026-09-09) — ATR이 손절폭의 이 배수보다 작으면 진입하지 않는다.
+# 근거: 손절 1.25%/익절 2.5%인데 ATR이 0.5%면 익절까지 5 ATR을 가야 한다. 1시간봉 스케일에서
+# 그건 거의 안 일어나고 대신 시간이 흐르며 손절로 흘러간다 — 실제로 후보 신호 1999건을 특성별로
+# 쪼개보면 저변동 구간이 일관되게 손실 구간이었다. ATR% 절대값이 아니라 손절폭 대비 비율로 쓰는
+# 이유는 STOP_LOSS_PCT를 바꿔도 조건이 자동으로 따라오게 하기 위함.
+# 포트폴리오 시뮬레이션(12종목·1h·365일, 동시보유/서킷브레이커 반영): 필터 없음은 4분할 OOS를
+# 배정순서 50회 전부 FAIL(총R +157.6, MDD -32.0%)인 반면 k=0.64는 전부 PASS(+185.0, -25.6%).
+# k를 0.4~1.2로 훑어도 전부 PASS라 특정 값에만 맞은 게 아니다. 0으로 두면 필터가 꺼진다.
+MIN_ATR_TO_STOP_RATIO = float(os.getenv("MIN_ATR_TO_STOP_RATIO", "0.64"))
 
 # 다종목 감시 — 여러 심볼을 동시에 감시하되, 거래당 리스크(FUTURES_RISK_PER_TRADE)는 종목별로 그대로
 # 두고 대신 "동시에 열 수 있는 포지션 개수"를 제한해 총 노출을 억제한다.
@@ -77,6 +86,11 @@ FUTURES_SYMBOLS = [s.strip() for s in os.getenv(
     "BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT,XRP/USDT:USDT,CRCL/USDT:USDT,TSLA/USDT:USDT,"
     "BNB/USDT:USDT,SOXL/USDT:USDT,1000PEPE/USDT:USDT,TAO/USDT:USDT,SUI/USDT:USDT,ZEC/USDT:USDT",
 ).split(",") if s.strip()]
+# 2026-09-09: 동시보유 상한이 '좋은 거래'를 막고 있었다 — 여러 종목이 동시에 신호를 낼 때
+# 그 거래들이 오히려 더 좋은데(거래당 +0.164R, 전·후반 일관) 낮은 상한이 정확히 그때 걸린다.
+# 정정된 포트폴리오 시뮬레이션에서 8이 정점(+185.0R/MDD -25.6%)이고 그 이상은 오히려 나빠진다
+# (12는 +157.9R/-30.1%) — 동시보유가 많을수록 손실이 큰 뭉치로 도착해 서킷브레이커가 훨씬 자주
+# 걸리기 때문. 실운영 값은 .env가 관리한다.
 MAX_CONCURRENT_POSITIONS = int(os.getenv("MAX_CONCURRENT_POSITIONS", "2"))
 
 # 텔레그램 알림/원격 시작·중지 (2026-08-22) — src/telegram_bot.py, scripts/run_telegram_bot.py 참고.
