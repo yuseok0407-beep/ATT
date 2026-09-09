@@ -99,3 +99,68 @@ def test_compute_bracket_prices_short():
 def test_compute_bracket_prices_invalid_side():
     with pytest.raises(ValueError):
         compute_bracket_prices(100, "up")
+
+
+def _regime_df(n=400, *, uptrend=True):
+    """장기 SMA 대비 종가가 확실히 위(상승 레짐) 또는 아래(하락 레짐)에 있는 df."""
+    step = 0.5 if uptrend else -0.5
+    closes = 500 + np.arange(n) * step
+    return pd.DataFrame({
+        "timestamp": pd.date_range("2026-01-01", periods=n, freq="h"),
+        "high": closes + 0.5, "low": closes - 0.5, "close": closes,
+    })
+
+
+def test_regime_filter_allows_shorts_in_downtrend(monkeypatch):
+    from src.core import futures_strategy
+    from src.core.futures_strategy import make_regime_filtered_signal_fn
+
+    df = _regime_df(uptrend=False)
+    monkeypatch.setattr(futures_strategy, "detect_signal", lambda window, **kw: "SHORT")
+    signal_fn = make_regime_filtered_signal_fn(df, 200)
+    assert signal_fn(df.iloc[-100:]) == "SHORT"
+
+
+def test_regime_filter_blocks_short_when_price_above_long_sma(monkeypatch):
+    from src.core import futures_strategy
+    from src.core.futures_strategy import make_regime_filtered_signal_fn
+
+    df = _regime_df(uptrend=True)
+    monkeypatch.setattr(futures_strategy, "detect_signal", lambda window, **kw: "SHORT")
+    signal_fn = make_regime_filtered_signal_fn(df, 200)
+    assert signal_fn(df.iloc[-100:]) is None
+
+
+def test_regime_filter_leaves_longs_alone_by_default(monkeypatch):
+    from src.core import futures_strategy
+    from src.core.futures_strategy import make_regime_filtered_signal_fn
+
+    df = _regime_df(uptrend=False)  # 종가가 장기선 아래 = 하락 레짐
+    monkeypatch.setattr(futures_strategy, "detect_signal", lambda window, **kw: "LONG")
+    assert make_regime_filtered_signal_fn(df, 200)(df.iloc[-100:]) == "LONG"
+    assert make_regime_filtered_signal_fn(df, 200, filter_longs=True)(df.iloc[-100:]) is None
+
+
+def test_regime_filter_allows_entry_while_long_sma_is_warming_up(monkeypatch):
+    """레짐 SMA가 아직 NaN인 구간에서는 필터를 적용하지 않고 원래 신호를 그대로 통과시킨다."""
+    from src.core import futures_strategy
+    from src.core.futures_strategy import make_regime_filtered_signal_fn
+
+    df = _regime_df(n=400, uptrend=True)
+    monkeypatch.setattr(futures_strategy, "detect_signal", lambda window, **kw: "SHORT")
+    signal_fn = make_regime_filtered_signal_fn(df, 200)
+    assert signal_fn(df.iloc[:100]) == "SHORT"   # warm-up 구간 -> 통과
+    assert signal_fn(df.iloc[-100:]) is None      # warm-up 끝난 뒤 -> 차단
+
+
+def test_regime_filter_survives_reset_index_slices(monkeypatch):
+    """run_walk_forward처럼 df를 잘라 reset_index(drop=True)한 조각으로 호출해도 timestamp 기준
+    조회라 레짐 판정이 어긋나지 않는다."""
+    from src.core import futures_strategy
+    from src.core.futures_strategy import make_regime_filtered_signal_fn
+
+    df = _regime_df(n=400, uptrend=True)
+    monkeypatch.setattr(futures_strategy, "detect_signal", lambda window, **kw: "SHORT")
+    signal_fn = make_regime_filtered_signal_fn(df, 200)
+    second_half = df.iloc[200:].reset_index(drop=True)
+    assert signal_fn(second_half.iloc[-100:]) is None

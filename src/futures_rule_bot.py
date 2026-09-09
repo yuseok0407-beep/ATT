@@ -11,10 +11,17 @@ from src.core.config import (
     LEVERAGE,
     MARGIN_MODE,
     MAX_CONCURRENT_POSITIONS,
+    MAX_ENTRY_PRICE_DRIFT_R,
+    RULE_REGIME_SMA_PERIOD,
     RULE_TIMEFRAME,
 )
 from src.core.futures_risk import check_stop_before_liquidation, estimate_liquidation_price, leveraged_position_size
-from src.core.futures_strategy import compute_bracket_prices, detect_signal
+from src.core.futures_strategy import (
+    apply_regime_filter,
+    compute_bracket_prices,
+    detect_signal,
+    is_above_long_sma,
+)
 from src.core.risk import check_circuit_breaker
 from src.core.state import compute_consecutive_losses, get_daily_pnl_pct
 from src.data.exchange import fetch_ohlcv_df
@@ -44,8 +51,13 @@ LIVE_LAST_TRADE_STATE_PATH = "state/futures_rule_last_trade.live.json"
 
 logger = logging.getLogger(__name__)
 
-# 저널에 남기지 않는(스팸 방지) 이벤트 — 매 사이클 반복돼도 상태 변화가 없는 것들
-_SILENT_EVENTS = ("no_signal", "holding_position", "skipped_max_positions")
+# 저널에 남기지 않는(스팸 방지) 이벤트 — 매 사이클 반복돼도 상태 변화가 없는 것들.
+# skipped_same_signal_bar / skipped_price_drift는 신호가 살아있는 동안 POLL_INTERVAL_SECONDS마다
+# 계속 재발생해서(1시간봉이면 한 봉당 최대 120회) 남기면 저널이 터진다 — 게다가 둘 다 "정상적으로
+# 막고 있다"는 뜻이라 사용자 조치가 필요한 rejected_exchange_error와 성격이 다르다. 현재 사이클
+# 결과(run_once의 반환값)에는 그대로 실려서 대시보드에서는 볼 수 있다.
+_SILENT_EVENTS = ("no_signal", "holding_position", "skipped_max_positions",
+                  "skipped_same_signal_bar", "skipped_price_drift")
 
 
 def _load_last_trade_ids(path: str = LAST_TRADE_STATE_PATH) -> dict:
@@ -388,23 +400,58 @@ def _evaluate_symbol(client, symbol: str, position: dict | None, margin_equity: 
     # 마감됐을 때의 종가로 다시 계산하면 신호 자체가 안 떴어야 했던 것으로 확인됨(UPDATE_LOG.md
     # 참고). 마지막 봉을 버려서 항상 "확실히 마감된" 캔들만 쓰게 하면 백테스트가 실제로 검증한
     # 조건과 정확히 같아진다 — 대신 신호 확정이 최대 한 시간봉만큼 늦어진다.
-    df = fetch_ohlcv_df(market_client, symbol, timeframe=RULE_TIMEFRAME, limit=101)
-    df = df.iloc[:-1]
+    # 신호 계산엔 100봉이면 충분하지만, 레짐 필터를 쓰면 장기 SMA만큼 더 필요하다.
+    # +1은 아래에서 버릴 "아직 마감 안 된" 마지막 봉 몫.
+    limit = max(101, RULE_REGIME_SMA_PERIOD + 1 + 1) if RULE_REGIME_SMA_PERIOD > 0 else 101
+    raw_df = fetch_ohlcv_df(market_client, symbol, timeframe=RULE_TIMEFRAME, limit=limit)
+    # 진행 중인 봉의 종가 = 사실상 현재가. 아래 괴리 검사에 쓰려고 버리기 전에 챙겨둔다
+    # (티커를 따로 조회하지 않아도 되므로 API 호출이 안 늘어난다).
+    live_price = float(raw_df["close"].iloc[-1])
+    df = raw_df.iloc[:-1]
     signal = detect_signal(df)
+    signal = apply_regime_filter(signal, is_above_long_sma(df, RULE_REGIME_SMA_PERIOD))
 
     result = {"symbol": symbol, "has_position": False, "entered": False}
     if signal is None:
         result["event"] = "no_signal"
         return result
 
+    # 신호를 만든 마감 봉의 시각 — "같은 봉으로 두 번 진입하지 않는다"의 판정 키.
+    # fetch_ohlcv_df는 항상 timestamp 열을 주지만, 없으면 인덱스로 대체한다(테스트용 최소 df 등).
+    signal_bar_timestamp = str(df["timestamp"].iloc[-1] if "timestamp" in df.columns else df.index[-1])
+    last_entry = _find_last_entry_journal(symbol, journal_path=journal_path or JOURNAL_PATH)
+    if last_entry is not None and last_entry.get("signal_bar_timestamp") == signal_bar_timestamp:
+        # 백테스트(run_backtest)는 봉 하나당 최대 한 번만 진입하고 청산된 봉 다음 봉부터 다시
+        # 신호를 본다. 반면 실거래는 마감 봉이 그 시간봉 내내 고정이라, 포지션이 도중에 청산되면
+        # POLL_INTERVAL_SECONDS마다 같은 신호로 계속 재진입한다 — 2026-09-07 실계좌에서 ZEC가
+        # 한 시간 안에 같은 값으로 5번 진입해 수수료만 태운 유령 왕복을 만들고 3분 만에 연속손실
+        # 5회로 서킷브레이커를 걸었다(UPDATE_LOG.md 참고). 봉 단위로 잠가서 백테스트와 맞춘다.
+        result["event"] = "skipped_same_signal_bar"
+        result["signal_bar_timestamp"] = signal_bar_timestamp
+        return result
+
     entry_price = float(df["close"].iloc[-1])
     side = "long" if signal == "LONG" else "short"
     stop_loss_price, take_profit_price = compute_bracket_prices(entry_price, side)
+
+    # 손절/익절가가 전부 entry_price(마감 봉 종가) 기준이라, 현재가가 거기서 너무 멀어졌으면
+    # 그 브라켓은 이미 무의미하다 — 진입하자마자 손절되거나 브라켓 주문이 -2021
+    # "Order would immediately trigger"로 거부된다(둘 다 실계좌에서 확인).
+    drift = abs(live_price - entry_price)
+    max_drift = MAX_ENTRY_PRICE_DRIFT_R * abs(entry_price - stop_loss_price)
+    if max_drift > 0 and drift > max_drift:
+        result.update({
+            "event": "skipped_price_drift", "signal": signal, "entry_price": entry_price,
+            "live_price": live_price,
+            "reason": f"현재가가 신호 봉 종가에서 손절폭의 {drift / max_drift * MAX_ENTRY_PRICE_DRIFT_R:.2f}배 이탈",
+        })
+        return result
+
     liquidation_estimate = estimate_liquidation_price(entry_price, leverage, side)
     safety = check_stop_before_liquidation(entry_price, stop_loss_price, side, liquidation_estimate)
 
     result.update({
-        "signal": signal, "entry_price": entry_price,
+        "signal": signal, "entry_price": entry_price, "signal_bar_timestamp": signal_bar_timestamp,
         "stop_loss_price": stop_loss_price, "take_profit_price": take_profit_price,
     })
 

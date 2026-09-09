@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from src import futures_rule_bot as bot
+from src.core.config import RULE_REGIME_SMA_PERIOD
 from src.core.risk import MAX_CONSECUTIVE_LOSSES
 
 SYMBOLS = ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT", "XRP/USDT:USDT"]
@@ -216,8 +217,10 @@ def test_evaluate_symbol_drops_the_still_forming_last_candle_before_signal_detec
              patch("src.futures_rule_bot.detect_signal", return_value=None) as mock_detect:
             bot.run_once(MagicMock(), consecutive_losses=0, daily_pnl_pct=0.0)
 
-        # 버릴 여유분을 확보하려면 limit=100이 아니라 101로 요청해야 한다
-        assert mock_fetch.call_args.kwargs.get("limit") == 101
+        # 버릴 여유분(+1)을 항상 확보해야 한다. 레짐 필터가 켜져 있으면 장기 SMA 몫까지 더 받는다
+        # (하드코딩 대신 config에서 계산 — 필터 기간을 바꿔도 이 테스트가 같이 따라간다).
+        expected_limit = max(101, RULE_REGIME_SMA_PERIOD + 2) if RULE_REGIME_SMA_PERIOD > 0 else 101
+        assert mock_fetch.call_args.kwargs.get("limit") == expected_limit
 
         # detect_signal에 넘어간 데이터의 마지막 행은 원본의 "진행중" 스파이크 행이면 안 된다
         passed_df = mock_detect.call_args.args[0]
@@ -910,3 +913,169 @@ class TestCheckAndLogUntrackedPosition:
         result = bot.check_and_log_untracked_position(client, self.SYMBOL, {"entryPrice": 63000.0})
 
         assert result is not None  # BTC엔 기록이 없으니 ETH 기록과 무관하게 새로 남겨야 함
+
+
+def _signal_df(n=61, close=100.0, live_close=None):
+    """timestamp 열이 있는 최소 df — 마지막 행은 '아직 마감 안 된' 진행중 봉 몫이다."""
+    closes = np.full(n, close)
+    if live_close is not None:
+        closes[-1] = live_close
+    return pd.DataFrame({
+        "timestamp": pd.date_range("2026-09-07", periods=n, freq="h"),
+        "high": closes + 0.1, "low": closes - 0.1, "close": closes,
+    })
+
+
+def test_evaluate_symbol_skips_reentry_on_the_same_signal_candle():
+    """실전 버그 재현(2026-09-07): 마감 봉이 그 시간봉 내내 고정이라, 포지션이 도중에 청산되면
+    같은 신호로 30초마다 계속 재진입한다 — 실계좌 ZEC가 한 시간에 같은 값으로 5번 진입해
+    수수료만 태운 왕복을 만들고 3분 만에 연속손실 5회로 서킷브레이커를 걸었다. 백테스트는 봉
+    하나당 한 번만 진입하므로, 실거래도 같은 봉으로는 재진입하지 않아야 한다."""
+    df = _signal_df()
+    signal_bar = str(df.iloc[:-1]["timestamp"].iloc[-1])
+    already_entered = [{"symbol": "BTC/USDT:USDT", "event": "entered",
+                        "signal_bar_timestamp": signal_bar}]
+
+    patches = _base_patches()
+    _start(patches)
+    try:
+        with patch("src.futures_rule_bot.fetch_ohlcv_df", return_value=df), \
+             patch("src.futures_rule_bot.detect_signal", return_value="LONG"), \
+             patch("src.futures_rule_bot.read_entries", return_value=already_entered), \
+             patch("src.futures_rule_bot.open_position_with_bracket") as mock_open:
+            cycle = bot.run_once(MagicMock(), consecutive_losses=0, daily_pnl_pct=0.0)
+
+        assert cycle["symbols"]["BTC/USDT:USDT"]["event"] == "skipped_same_signal_bar"
+        # 같은 봉 이력이 없는 다른 심볼은 정상 진입해야 한다(잠금이 전역이 아니라 심볼별)
+        assert cycle["symbols"]["ETH/USDT:USDT"]["event"] == "entered"
+        assert mock_open.called
+    finally:
+        _stop(patches)
+
+
+def test_evaluate_symbol_enters_when_last_entry_used_a_different_candle():
+    df = _signal_df()
+    stale = [{"symbol": "BTC/USDT:USDT", "event": "entered",
+              "signal_bar_timestamp": "2020-01-01 00:00:00"}]
+
+    patches = _base_patches()
+    _start(patches)
+    try:
+        with patch("src.futures_rule_bot.fetch_ohlcv_df", return_value=df), \
+             patch("src.futures_rule_bot.detect_signal", return_value="LONG"), \
+             patch("src.futures_rule_bot.read_entries", return_value=stale), \
+             patch("src.futures_rule_bot.open_position_with_bracket"):
+            cycle = bot.run_once(MagicMock(), consecutive_losses=0, daily_pnl_pct=0.0)
+
+        result = cycle["symbols"]["BTC/USDT:USDT"]
+        assert result["event"] == "entered"
+        # 다음 사이클에서 잠글 수 있도록 저널에 남길 결과에 봉 시각이 실려야 한다
+        assert result["signal_bar_timestamp"] == str(df.iloc[:-1]["timestamp"].iloc[-1])
+    finally:
+        _stop(patches)
+
+
+def test_evaluate_symbol_skips_entry_when_live_price_drifted_past_the_bracket():
+    """손절/익절가는 전부 신호 봉 종가 기준이라, 현재가가 이미 손절선 쪽으로 크게 이동했으면
+    진입하자마자 손절되거나 브라켓이 -2021로 거부된다. 진입 전에 걸러야 한다."""
+    # 손절폭 = 100 * STOP_LOSS_PCT(1.25%) = 1.25, 허용 이탈 = 그 절반 = 0.625
+    df = _signal_df(close=100.0, live_close=99.0)  # 현재가가 1.0 아래로 이탈 > 0.625
+
+    patches = _base_patches()
+    _start(patches)
+    try:
+        with patch("src.futures_rule_bot.fetch_ohlcv_df", return_value=df), \
+             patch("src.futures_rule_bot.detect_signal", return_value="LONG"), \
+             patch("src.futures_rule_bot.open_position_with_bracket") as mock_open:
+            cycle = bot.run_once(MagicMock(), consecutive_losses=0, daily_pnl_pct=0.0)
+
+        result = cycle["symbols"]["BTC/USDT:USDT"]
+        assert result["event"] == "skipped_price_drift"
+        assert result["entry_price"] == 100.0 and result["live_price"] == 99.0
+        assert not mock_open.called
+    finally:
+        _stop(patches)
+
+
+def test_evaluate_symbol_enters_when_live_price_drift_is_within_tolerance():
+    df = _signal_df(close=100.0, live_close=100.3)  # 이탈 0.3 < 허용 0.625
+
+    patches = _base_patches()
+    _start(patches)
+    try:
+        with patch("src.futures_rule_bot.fetch_ohlcv_df", return_value=df), \
+             patch("src.futures_rule_bot.detect_signal", return_value="LONG"), \
+             patch("src.futures_rule_bot.open_position_with_bracket") as mock_open:
+            cycle = bot.run_once(MagicMock(), consecutive_losses=0, daily_pnl_pct=0.0)
+
+        assert cycle["symbols"]["BTC/USDT:USDT"]["event"] == "entered"
+        assert mock_open.called
+    finally:
+        _stop(patches)
+
+
+def test_evaluate_symbol_blocks_shorts_in_an_uptrend_regime():
+    """상승 레짐(종가가 장기 SMA 위)에서는 숏 진입을 막고 롱은 그대로 통과시킨다."""
+    n = RULE_REGIME_SMA_PERIOD + 2
+    closes = np.linspace(100.0, 200.0, n)  # 꾸준한 상승 -> 종가가 장기 SMA 위
+    df = pd.DataFrame({
+        "timestamp": pd.date_range("2026-01-01", periods=n, freq="h"),
+        "high": closes + 0.1, "low": closes - 0.1, "close": closes,
+    })
+
+    patches = _base_patches()
+    _start(patches)
+    try:
+        with patch("src.futures_rule_bot.fetch_ohlcv_df", return_value=df), \
+             patch("src.futures_rule_bot.detect_signal", return_value="SHORT"), \
+             patch("src.futures_rule_bot.open_position_with_bracket") as mock_open:
+            cycle = bot.run_once(MagicMock(), consecutive_losses=0, daily_pnl_pct=0.0)
+        assert cycle["symbols"]["BTC/USDT:USDT"]["event"] == "no_signal"
+        assert not mock_open.called
+
+        with patch("src.futures_rule_bot.fetch_ohlcv_df", return_value=df), \
+             patch("src.futures_rule_bot.detect_signal", return_value="LONG"), \
+             patch("src.futures_rule_bot.open_position_with_bracket") as mock_open:
+            cycle = bot.run_once(MagicMock(), consecutive_losses=0, daily_pnl_pct=0.0)
+        assert cycle["symbols"]["BTC/USDT:USDT"]["event"] == "entered"
+        assert mock_open.called
+    finally:
+        _stop(patches)
+
+
+def test_new_skip_events_are_not_written_to_the_journal():
+    """진입 잠금/괴리 스킵은 신호가 살아있는 동안 매 사이클 반복된다 — 저널에 남기면 예전
+    rejected_exchange_error 스팸(2026-08-20, 실제 체결 기록이 대시보드 last 30에서 밀려남)과
+    같은 사고가 난다. 사이클 결과에는 남되 저널에는 안 남아야 한다."""
+    df = _signal_df()
+    signal_bar = str(df.iloc[:-1]["timestamp"].iloc[-1])
+    already = [{"symbol": s, "event": "entered", "signal_bar_timestamp": signal_bar} for s in SYMBOLS]
+
+    patches = _base_patches()
+    _start(patches)
+    try:
+        with patch("src.futures_rule_bot.fetch_ohlcv_df", return_value=df), \
+             patch("src.futures_rule_bot.detect_signal", return_value="LONG"), \
+             patch("src.futures_rule_bot.read_entries", return_value=already), \
+             patch("src.futures_rule_bot.append_entry") as mock_append:
+            cycle = bot.run_once(MagicMock(), consecutive_losses=0, daily_pnl_pct=0.0)
+
+        assert all(r["event"] == "skipped_same_signal_bar" for r in cycle["symbols"].values())
+        assert not mock_append.called
+
+    finally:
+        _stop(patches)
+
+    drift_df = _signal_df(close=100.0, live_close=99.0)
+    patches = _base_patches()
+    _start(patches)
+    try:
+        with patch("src.futures_rule_bot.fetch_ohlcv_df", return_value=drift_df), \
+             patch("src.futures_rule_bot.detect_signal", return_value="LONG"), \
+             patch("src.futures_rule_bot.append_entry") as mock_append:
+            cycle = bot.run_once(MagicMock(), consecutive_losses=0, daily_pnl_pct=0.0)
+
+        assert all(r["event"] == "skipped_price_drift" for r in cycle["symbols"].values())
+        assert not mock_append.called
+    finally:
+        _stop(patches)
