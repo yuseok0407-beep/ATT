@@ -4,6 +4,7 @@ import pytest
 
 from dashboard import app as dashboard_app
 from src.data.futures_exchange import LiveKeysNotConfiguredError
+from src.execution import excursion, filter_stats
 
 
 class _FakeClient:
@@ -223,3 +224,120 @@ def test_api_conditions_returns_rows_for_the_env_symbols(client, monkeypatch):
 
 def test_api_conditions_rejects_an_unknown_env(client):
     assert client.get("/api/conditions?env=bogus").status_code == 400
+
+
+
+# ---------- 무보호 포지션 / 거부 요약 / 차단 통계 (2026-09-09) ----------
+
+def _position(side="long"):
+    return {"side": side, "entryPrice": 100.0, "markPrice": 101.0, "contracts": 1.0}
+
+
+def test_api_status_flags_a_position_without_a_stop_order(client, monkeypatch):
+    """손절 없는 레버리지 포지션은 화면 맨 위 경보로 올라가야 한다 — 지금까지는 카드 안
+    손절가 칸의 "-" 한 글자로만 표시돼서 정상 상태와 구분이 안 됐다."""
+    monkeypatch.setattr(dashboard_app, "get_futures_balance", lambda client: {"USDT": {"total": 1000.0}})
+    monkeypatch.setattr(dashboard_app, "get_position",
+                        lambda client, symbol: _position() if symbol == "BTC/USDT:USDT" else None)
+    monkeypatch.setattr(dashboard_app, "get_bracket_prices", lambda client, symbol: (None, 102.0))
+
+    body = client.get("/api/status").get_json()
+
+    assert body["unprotected_symbols"] == ["BTC/USDT:USDT"]
+    assert body["symbols"]["BTC/USDT:USDT"]["unprotected"] is True
+    assert body["symbols"]["ETH/USDT:USDT"]["unprotected"] is False
+
+
+def test_api_status_does_not_flag_a_protected_position(client, monkeypatch):
+    monkeypatch.setattr(dashboard_app, "get_futures_balance", lambda client: {"USDT": {"total": 1000.0}})
+    monkeypatch.setattr(dashboard_app, "get_position",
+                        lambda client, symbol: _position() if symbol == "BTC/USDT:USDT" else None)
+    monkeypatch.setattr(dashboard_app, "get_bracket_prices", lambda client, symbol: (99.0, 102.0))
+
+    body = client.get("/api/status").get_json()
+
+    assert body["unprotected_symbols"] == []
+    assert body["symbols"]["BTC/USDT:USDT"]["unprotected"] is False
+
+
+def test_api_status_includes_recent_exchange_rejections(client, monkeypatch):
+    """저널엔 남지만 알림에서도 "최근 내역" 30줄에서도 밀려나 안 보이던 것들."""
+    from datetime import datetime, timedelta, timezone
+    recent = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    monkeypatch.setattr(dashboard_app, "get_futures_balance", lambda client: {"USDT": {"total": 1000.0}})
+    monkeypatch.setattr(dashboard_app, "get_position", lambda client, symbol: None)
+    monkeypatch.setattr(dashboard_app, "read_entries", lambda path=None: [
+        {"timestamp": recent, "event": "rejected_exchange_error", "symbol": "TSLA/USDT:USDT",
+         "reason": 'binance {"code":-2027,"msg":"Exceeded the maximum allowable position"}'},
+    ])
+
+    body = client.get("/api/status").get_json()
+
+    assert body["recent_issues"]["rejections"][0]["code"] == "-2027"
+    assert body["recent_issues"]["rejections"][0]["symbols"] == ["TSLA"]
+
+
+def test_api_status_includes_todays_filter_blocks(client, monkeypatch, tmp_path):
+    """저널에 안 남는 차단 사유(레짐숏/저변동/…)를 볼 수 있는 유일한 창구."""
+    monkeypatch.setattr(dashboard_app, "get_futures_balance", lambda client: {"USDT": {"total": 1000.0}})
+    monkeypatch.setattr(dashboard_app, "get_position", lambda client, symbol: None)
+    stats_path = str(tmp_path / "stats.json")
+    filter_stats.record("skipped_low_volatility", "BTC/USDT:USDT", "bar1",
+                        path=stats_path, today="2026-09-09")
+    monkeypatch.setattr(dashboard_app, "FILTER_STATS_PATH", stats_path)
+
+    body = client.get("/api/status").get_json()
+
+    assert body["filter_stats"]["2026-09-09"] == {"skipped_low_volatility": 1}
+    # 규칙 적용 순서 그대로 내려와야 한다(딕셔너리로 보내면 Flask가 알파벳순으로 섞는다)
+    assert [e["key"] for e in body["filter_events"]] == list(filter_stats.TRACKED_EVENTS)
+    assert body["filter_events"][1]["label"] == "저변동"
+
+
+def test_api_status_includes_the_excursion_of_an_open_position(client, monkeypatch, tmp_path):
+    """"지금 +0.4R인데 아까 +1.6R까지 갔었다"를 카드에 그리기 위한 데이터."""
+    monkeypatch.setattr(dashboard_app, "get_futures_balance", lambda client: {"USDT": {"total": 1000.0}})
+    monkeypatch.setattr(dashboard_app, "get_position",
+                        lambda client, symbol: _position() if symbol == "BTC/USDT:USDT" else None)
+    monkeypatch.setattr(dashboard_app, "get_bracket_prices", lambda client, symbol: (99.0, 102.0))
+    excursion_path = str(tmp_path / "exc.json")
+    excursion.update("BTC/USDT:USDT", entry_price=100.0, stop_loss_price=99.0,
+                     mark_price=101.6, side="long", path=excursion_path)
+    monkeypatch.setattr(dashboard_app, "EXCURSION_PATH", excursion_path)
+
+    body = client.get("/api/status").get_json()
+
+    assert body["symbols"]["BTC/USDT:USDT"]["excursion"]["max_favorable_r"] == pytest.approx(1.6)
+    assert body["symbols"]["ETH/USDT:USDT"]["excursion"] is None
+
+
+def test_api_status_strips_the_raw_order_blob_from_recent_entries(client, monkeypatch):
+    """진입 기록 하나의 execution(주문 원본 응답)이 6KB인데 화면은 이 중 아무것도 안 쓴다 —
+    30줄이면 36KB이고 5초마다 나간다. 저널 파일에는 그대로 남는다."""
+    monkeypatch.setattr(dashboard_app, "get_futures_balance", lambda client: {"USDT": {"total": 1000.0}})
+    monkeypatch.setattr(dashboard_app, "get_position", lambda client, symbol: None)
+    monkeypatch.setattr(dashboard_app, "read_entries", lambda path=None: [
+        {"timestamp": "2026-09-09T01:00:00+00:00", "event": "entered", "symbol": "BTC/USDT:USDT",
+         "entry_price": 100.0, "execution": {"entry_order": {"info": {"x": "y" * 1000}}}},
+    ])
+
+    body = client.get("/api/status").get_json()
+
+    entry = body["recent_entries"][0]
+    assert "execution" not in entry
+    assert entry["entry_price"] == 100.0  # 화면이 쓰는 필드는 그대로
+
+
+def test_api_performance_includes_r_metrics(client, monkeypatch):
+    monkeypatch.setattr(dashboard_app, "read_entries", lambda path=None: [
+        {"timestamp": "2026-09-08T01:00:00+00:00", "event": "entered", "symbol": "BTC/USDT:USDT",
+         "signal": "LONG", "entry_price": 100.0, "stop_loss_price": 99.0},
+        {"timestamp": "2026-09-08T02:00:00+00:00", "event": "closed", "symbol": "BTC/USDT:USDT",
+         "reason": "take_profit", "entry_price": 100.0, "exit_price": 102.0, "realized_pnl": 20.0},
+    ])
+
+    body = client.get("/api/performance").get_json()
+
+    assert body["num_trades"] == 1              # 기존 달러 요약은 그대로
+    assert body["r"]["total_r"] == pytest.approx(2.0)
+    assert len(body["r"]["equity_curve"]) == 1

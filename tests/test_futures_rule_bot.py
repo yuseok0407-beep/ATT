@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from src import futures_rule_bot as bot
+from src.execution import excursion, filter_stats
 from src.core.config import MIN_ATR_TO_STOP_RATIO, RULE_REGIME_SMA_PERIOD
 from src.core.risk import MAX_CONSECUTIVE_LOSSES
 
@@ -117,7 +118,8 @@ def test_run_once_isolates_one_symbols_reconcile_error_while_circuit_breaker_blo
     patches = _base_patches()
     _start(patches)
     try:
-        def _raise_for_eth(client, symbol, journal_path=None, last_trade_path=None):
+        def _raise_for_eth(client, symbol, journal_path=None, last_trade_path=None,
+                            excursion_path=None):
             if symbol == "ETH/USDT:USDT":
                 raise Exception("temporary exchange error")
 
@@ -1036,7 +1038,9 @@ def test_evaluate_symbol_blocks_shorts_in_an_uptrend_regime():
              patch("src.futures_rule_bot.detect_signal", return_value="SHORT"), \
              patch("src.futures_rule_bot.open_position_with_bracket") as mock_open:
             cycle = bot.run_once(MagicMock(), consecutive_losses=0, daily_pnl_pct=0.0)
-        assert cycle["symbols"]["BTC/USDT:USDT"]["event"] == "no_signal"
+        # 레짐 필터가 버린 숏은 skipped_regime으로 구분해서 남긴다 — no_signal과 뭉뚱그리면
+        # 필터가 실제로 몇 번 일했는지 셀 수 없다(2026-09-09 차단 통계 추가).
+        assert cycle["symbols"]["BTC/USDT:USDT"]["event"] == "skipped_regime"
         assert not mock_open.called
 
         with patch("src.futures_rule_bot.fetch_ohlcv_df", return_value=df), \
@@ -1147,3 +1151,262 @@ def test_low_volatility_skip_is_not_written_to_the_journal():
         assert not mock_append.called
     finally:
         _stop(patches)
+
+
+
+# ---------- 무보호 포지션 감지 (2026-09-09) ----------
+
+class TestCheckPositionProtection:
+    """손절 주문 없이 열려있는 레버리지 포지션을 감지해 저널(=텔레그램 알림 경로)에 남긴다."""
+
+    SYMBOL = "BTC/USDT:USDT"
+
+    def _journal_with_entry(self, tmp_path):
+        journal_path = str(tmp_path / "journal.jsonl")
+        bot.append_entry({"symbol": self.SYMBOL, "event": "entered", "signal": "LONG",
+                          "entry_price": 100.0, "stop_loss_price": 99.0}, path=journal_path)
+        return journal_path
+
+    def test_logs_once_when_the_stop_order_is_missing(self, tmp_path):
+        journal_path = self._journal_with_entry(tmp_path)
+        client = MagicMock()
+
+        with patch("src.futures_rule_bot.get_bracket_prices", return_value=(None, 102.0)):
+            first = bot.check_position_protection(client, self.SYMBOL, journal_path=journal_path)
+            second = bot.check_position_protection(client, self.SYMBOL, journal_path=journal_path)
+
+        assert first["event"] == "unprotected_position"
+        assert second is None  # 30초마다 같은 경보를 쌓지 않는다
+        events = [e["event"] for e in bot.read_entries(path=journal_path)]
+        assert events.count("unprotected_position") == 1
+
+    def test_says_nothing_while_the_stop_order_is_in_place(self, tmp_path):
+        journal_path = self._journal_with_entry(tmp_path)
+        client = MagicMock()
+
+        with patch("src.futures_rule_bot.get_bracket_prices", return_value=(99.0, 102.0)):
+            assert bot.check_position_protection(client, self.SYMBOL, journal_path=journal_path) is None
+
+        assert [e["event"] for e in bot.read_entries(path=journal_path)] == ["entered"]
+
+    def test_reports_recovery_after_an_alert(self, tmp_path):
+        """경보만 있고 해제 알림이 없으면 사용자가 아직 위험한지 계속 확인해야 한다."""
+        journal_path = self._journal_with_entry(tmp_path)
+        client = MagicMock()
+
+        with patch("src.futures_rule_bot.get_bracket_prices", return_value=(None, None)):
+            bot.check_position_protection(client, self.SYMBOL, journal_path=journal_path)
+        with patch("src.futures_rule_bot.get_bracket_prices", return_value=(99.0, 102.0)):
+            recovered = bot.check_position_protection(client, self.SYMBOL, journal_path=journal_path)
+            again = bot.check_position_protection(client, self.SYMBOL, journal_path=journal_path)
+
+        assert recovered["event"] == "position_protected"
+        assert recovered["stop_loss_price"] == 99.0
+        assert again is None  # 복구 알림도 한 번만
+
+    def test_stays_quiet_when_the_bracket_query_itself_fails(self, tmp_path):
+        """일시적 API 오류와 "정말로 무보호"를 구별해야 한다 — 잘못된 경보는 진짜 경보를
+        무시하게 만들어서 없느니만 못하다. get_bracket_prices(strict=True)가 예외를 올려준다."""
+        journal_path = self._journal_with_entry(tmp_path)
+        client = MagicMock()
+
+        with patch("src.futures_rule_bot.get_bracket_prices", side_effect=Exception("timeout")):
+            assert bot.check_position_protection(client, self.SYMBOL, journal_path=journal_path) is None
+
+        assert [e["event"] for e in bot.read_entries(path=journal_path)] == ["entered"]
+
+    def test_asks_the_exchange_strictly(self, tmp_path):
+        journal_path = self._journal_with_entry(tmp_path)
+        with patch("src.futures_rule_bot.get_bracket_prices", return_value=(99.0, None)) as mock_get:
+            bot.check_position_protection(MagicMock(), self.SYMBOL, journal_path=journal_path)
+        assert mock_get.call_args.kwargs["strict"] is True
+
+
+def test_untracked_position_backfill_is_not_repeated_after_an_unprotected_record(tmp_path):
+    """회귀 방지: unprotected_position이 그 심볼의 마지막 기록이 되어도 "봇이 모르는 포지션"으로
+    오인하면 안 된다 — 오인하면 매 사이클 진입 기록을 중복 백필하게 된다."""
+    journal_path = str(tmp_path / "journal.jsonl")
+    bot.append_entry({"symbol": "BTC/USDT:USDT", "event": "entered", "signal": "LONG",
+                      "entry_price": 100.0, "stop_loss_price": 99.0}, path=journal_path)
+    bot.append_entry({"symbol": "BTC/USDT:USDT", "event": "unprotected_position"}, path=journal_path)
+
+    with patch("src.futures_rule_bot.get_bracket_prices", return_value=(None, None)):
+        result = bot.check_and_log_untracked_position(
+            MagicMock(), "BTC/USDT:USDT", {"entryPrice": 100.0}, journal_path=journal_path)
+
+    assert result is None
+    assert [e["event"] for e in bot.read_entries(path=journal_path)].count("entered") == 1
+
+
+# ---------- 청산 기록의 R배수/최고점 (2026-09-09) ----------
+
+class TestClosedEntryCarriesTradeContext:
+    """$ 금액만으로는 "계획 대비 어땠는지"를 알 수 없어서 방향/손절가/R을 같이 남긴다."""
+
+    SYMBOL = "ETH/USDT:USDT"
+
+    def _setup(self, tmp_path, monkeypatch, signal="LONG"):
+        journal_path = str(tmp_path / "journal.jsonl")
+        last_trade_path = str(tmp_path / "last_trade.json")
+        monkeypatch.setattr(bot, "JOURNAL_PATH", journal_path)
+        monkeypatch.setattr(bot, "LAST_TRADE_STATE_PATH", last_trade_path)
+        bot.append_entry({
+            "symbol": self.SYMBOL, "event": "entered", "signal": signal, "entry_price": 100.0,
+            "stop_loss_price": 99.0, "take_profit_price": 102.0,
+        }, path=journal_path)
+        return journal_path, last_trade_path
+
+    def test_records_side_stop_and_realized_r(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch)
+        client = MagicMock()
+        client.fetch_my_trades.return_value = [
+            {"id": "1", "price": 100.0, "amount": 1.0, "info": {"realizedPnl": "0"}},
+            {"id": "2", "price": 102.0, "amount": 1.0, "info": {"realizedPnl": "2.0"}},
+        ]
+
+        result = bot.check_and_log_closed_trade(client, self.SYMBOL,
+                                                 excursion_path=str(tmp_path / "exc.json"))
+
+        assert result["side"] == "long"
+        assert result["stop_loss_price"] == 99.0
+        assert result["realized_r"] == pytest.approx(2.0)  # 손절폭 1.0, +2.0 이동
+
+    def test_records_realized_r_for_a_short(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch, signal="SHORT")
+        client = MagicMock()
+        client.fetch_my_trades.return_value = [
+            {"id": "1", "price": 100.0, "amount": 1.0, "info": {"realizedPnl": "0"}},
+            {"id": "2", "price": 101.0, "amount": 1.0, "info": {"realizedPnl": "-1.0"}},
+        ]
+
+        result = bot.check_and_log_closed_trade(client, self.SYMBOL,
+                                                 excursion_path=str(tmp_path / "exc.json"))
+
+        assert result["side"] == "short"
+        assert result["realized_r"] == pytest.approx(-1.0)  # 숏은 가격이 오르면 손실
+
+    def test_carries_the_best_and_worst_points_reached_while_open(self, tmp_path, monkeypatch):
+        """"익절 코앞까지 갔다가 손절났다"를 5분봉 재구성 없이 바로 볼 수 있게 한다."""
+        self._setup(tmp_path, monkeypatch)
+        excursion_path = str(tmp_path / "exc.json")
+        excursion.update(self.SYMBOL, entry_price=100.0, stop_loss_price=99.0,
+                         mark_price=101.8, side="long", path=excursion_path)
+        excursion.update(self.SYMBOL, entry_price=100.0, stop_loss_price=99.0,
+                         mark_price=99.0, side="long", path=excursion_path)
+
+        client = MagicMock()
+        client.fetch_my_trades.return_value = [
+            {"id": "1", "price": 100.0, "amount": 1.0, "info": {"realizedPnl": "0"}},
+            {"id": "2", "price": 99.0, "amount": 1.0, "info": {"realizedPnl": "-1.0"}},
+        ]
+
+        result = bot.check_and_log_closed_trade(client, self.SYMBOL, excursion_path=excursion_path)
+
+        assert result["max_favorable_r"] == pytest.approx(1.8)
+        assert result["max_adverse_r"] == pytest.approx(-1.0)
+        # 기록을 소비했으면 지워야 다음 포지션의 시작값이 오염되지 않는다
+        assert excursion.read_all(path=excursion_path) == {}
+
+    def test_infers_the_side_for_a_manually_opened_position(self, tmp_path, monkeypatch):
+        """사용자가 직접 넣은 포지션은 백필 기록에 signal이 없다 — 손절가 위치로 방향을 읽는다."""
+        journal_path = str(tmp_path / "journal.jsonl")
+        monkeypatch.setattr(bot, "JOURNAL_PATH", journal_path)
+        monkeypatch.setattr(bot, "LAST_TRADE_STATE_PATH", str(tmp_path / "last_trade.json"))
+        bot.append_entry({"symbol": self.SYMBOL, "event": "entered", "signal": None,
+                          "entry_price": 100.0, "stop_loss_price": 101.0}, path=journal_path)
+
+        client = MagicMock()
+        client.fetch_my_trades.return_value = [
+            {"id": "1", "price": 100.0, "amount": 1.0, "info": {"realizedPnl": "0"}},
+            {"id": "2", "price": 98.0, "amount": 1.0, "info": {"realizedPnl": "2.0"}},
+        ]
+
+        result = bot.check_and_log_closed_trade(client, self.SYMBOL,
+                                                 excursion_path=str(tmp_path / "exc.json"))
+
+        assert result["side"] == "short"  # 손절가가 진입가보다 위 -> 숏
+
+
+def test_track_excursion_updates_while_a_position_is_open(tmp_path):
+    journal_path = str(tmp_path / "journal.jsonl")
+    excursion_path = str(tmp_path / "exc.json")
+    bot.append_entry({"symbol": "BTC/USDT:USDT", "event": "entered", "signal": "LONG",
+                      "entry_price": 100.0, "stop_loss_price": 99.0}, path=journal_path)
+
+    bot._track_excursion("BTC/USDT:USDT", {"markPrice": 101.5, "side": "long"},
+                         journal_path, excursion_path)
+
+    assert excursion.read_all(path=excursion_path)["BTC/USDT:USDT"]["max_favorable_r"] == pytest.approx(1.5)
+
+
+def test_track_excursion_does_nothing_without_an_entry_record(tmp_path):
+    excursion_path = str(tmp_path / "exc.json")
+    bot._track_excursion("BTC/USDT:USDT", {"markPrice": 101.5, "side": "long"},
+                         str(tmp_path / "journal.jsonl"), excursion_path)
+    assert excursion.read_all(path=excursion_path) == {}
+
+
+# ---------- 차단 통계 (2026-09-09) ----------
+
+def test_run_once_counts_silently_blocked_signals(tmp_path):
+    """저널에 안 남는 차단 사유도 집계는 남아야 한다 — 안 그러면 필터가 도는지조차 알 수 없다."""
+    n = RULE_REGIME_SMA_PERIOD + 2
+    closes = np.linspace(100.0, 200.0, n)  # 꾸준한 상승 -> 종가가 장기 SMA 위
+    df = pd.DataFrame({
+        "timestamp": pd.date_range("2026-01-01", periods=n, freq="h"),
+        "high": closes * 1.006, "low": closes * 0.994, "close": closes,
+    })
+    stats_path = str(tmp_path / "stats.json")
+
+    patches = _base_patches()
+    _start(patches)
+    try:
+        with patch("src.futures_rule_bot.fetch_ohlcv_df", return_value=df), \
+             patch("src.futures_rule_bot.detect_signal", return_value="SHORT"), \
+             patch("src.futures_rule_bot.open_position_with_bracket"):
+            bot.run_once(MagicMock(), consecutive_losses=0, daily_pnl_pct=0.0,
+                         filter_stats_path=stats_path)
+            # 같은 봉으로 한 사이클 더 돌아도 집계는 안 늘어야 한다
+            bot.run_once(MagicMock(), consecutive_losses=0, daily_pnl_pct=0.0,
+                         filter_stats_path=stats_path)
+    finally:
+        _stop(patches)
+
+    counts = next(iter(filter_stats.read_counts(path=stats_path).values()))
+    assert counts["skipped_regime"] == len(SYMBOLS)
+
+
+def test_run_once_does_not_count_plain_no_signal(tmp_path):
+    """no_signal은 "필터가 일한 것"이 아니라 그냥 신호가 없는 것 — 집계 대상이 아니다."""
+    stats_path = str(tmp_path / "stats.json")
+    patches = _base_patches()
+    _start(patches)
+    try:
+        with patch("src.futures_rule_bot.detect_signal", return_value=None):
+            bot.run_once(MagicMock(), consecutive_losses=0, daily_pnl_pct=0.0,
+                         filter_stats_path=stats_path)
+    finally:
+        _stop(patches)
+
+    assert filter_stats.read_counts(path=stats_path) == {}
+
+
+def test_run_once_uses_live_state_paths_for_live_env(tmp_path, monkeypatch):
+    """데모/실계좌가 통계·최고점 파일도 완전히 분리돼야 한다."""
+    monkeypatch.setattr(bot, "LIVE_FILTER_STATS_PATH", str(tmp_path / "live_stats.json"))
+    monkeypatch.setattr(bot, "LIVE_EXCURSION_PATH", str(tmp_path / "live_exc.json"))
+    captured = {}
+
+    def _reconcile(client, symbol, position, journal_path=None, last_trade_path=None,
+                    excursion_path=None):
+        captured["excursion_path"] = excursion_path
+
+    patches = _base_patches()
+    _start(patches)
+    try:
+        with patch("src.futures_rule_bot._reconcile_symbol", side_effect=_reconcile):
+            bot.run_once(MagicMock(), env="live", consecutive_losses=0, daily_pnl_pct=0.0)
+    finally:
+        _stop(patches)
+
+    assert captured["excursion_path"] == str(tmp_path / "live_exc.json")

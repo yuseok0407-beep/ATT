@@ -1,8 +1,14 @@
 import json
 import logging
+from datetime import datetime, timedelta
 from pathlib import Path
 
-from src.core.config import FUTURES_SYMBOLS, TELEGRAM_POLL_INTERVAL_SECONDS
+from src.core.config import (
+    FUTURES_SYMBOLS,
+    HEARTBEAT_STALE_SECONDS,
+    TELEGRAM_DAILY_SUMMARY_HOUR,
+    TELEGRAM_POLL_INTERVAL_SECONDS,
+)
 from src.core.signal_status import collect_conditions
 from src.data.futures_exchange import (
     LiveKeysNotConfiguredError,
@@ -11,14 +17,23 @@ from src.data.futures_exchange import (
     get_position,
 )
 from src.data.public_ip import get_public_ip
-from src.execution import bot_process
+from src.execution import bot_process, excursion, filter_stats
 from src.execution.futures_orders import get_bracket_prices
 from src.execution.heartbeat import DEFAULT_PATH as HEARTBEAT_DEMO_PATH
 from src.execution.heartbeat import LIVE_DEFAULT_PATH as HEARTBEAT_LIVE_PATH
 from src.execution.heartbeat import read_heartbeat
 from src.execution.journal import read_entries
+from src.execution.performance import summarize_day
 from src.execution.telegram_client import get_updates, send_message
-from src.futures_rule_bot import JOURNAL_PATH, LIVE_JOURNAL_PATH, reset_consecutive_losses
+from src.futures_rule_bot import (
+    EXCURSION_PATH,
+    FILTER_STATS_PATH,
+    JOURNAL_PATH,
+    LIVE_EXCURSION_PATH,
+    LIVE_FILTER_STATS_PATH,
+    LIVE_JOURNAL_PATH,
+    reset_consecutive_losses,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +42,10 @@ STATE_PATH = "state/telegram_bot_state.json"
 # 진입/청산/서킷브레이커만 폰으로 쏜다 — no_signal/holding_position/skipped_max_positions는 애초에
 # 저널에 안 남고(futures_rule_bot._SILENT_EVENTS), rejected_exchange_error 등은 저널엔 남지만
 # 매 사이클 반복될 수 있어 알림으로는 노이즈라 제외한다.
-_NOTIFY_EVENTS = ("entered", "closed", "circuit_breaker_blocked")
+# unprotected_position/position_protected는 매 사이클 반복되지 않고(futures_rule_bot이 상태
+# 전이에서만 남긴다) 손절 없는 레버리지 포지션은 즉시 알아야 하는 사고라 알림 대상이다.
+_NOTIFY_EVENTS = ("entered", "closed", "circuit_breaker_blocked",
+                  "unprotected_position", "position_protected")
 
 _REASON_LABELS = {
     "stop_loss": "손절", "take_profit": "익절", "manual": "수동청산",
@@ -35,9 +53,13 @@ _REASON_LABELS = {
 }
 _SIGNAL_LABELS = {"LONG": "롱", "SHORT": "숏"}
 
+# 여기 목록과 _COMMANDS는 항상 같아야 한다 — 안 그러면 동작하는데 아무도 모르는 명령이 생긴다
+# (실제로 /conditions가 그랬다). tests/test_telegram_bot.py가 둘이 어긋나면 실패시킨다.
 _HELP_TEXT = (
     "사용 가능한 명령:\n"
-    "/status — 데모/실계좌 상태 조회\n"
+    "/status — 데모/실계좌 상태 조회 (포지션·손절·익절·보유 중 최고점)\n"
+    "/conditions — 종목별 진입 조건 근접도\n"
+    "/summary — 어제 하루 성과 요약 (매일 자동으로도 발송)\n"
     "/start_demo, /stop_demo — 데모 봇 시작/중지\n"
     "/start_live, /stop_live — 실계좌 봇 시작/중지 (실제 자금에 영향)\n"
     "/reset_streak_demo, /reset_streak_live — 연속손실 카운트를 0으로 리셋\n"
@@ -52,6 +74,7 @@ _COMMANDS = {
     "/reset_streak_demo": ("demo", "reset_streak"),
     "/reset_streak_live": ("live", "reset_streak"),
     "/status": ("", "status"),
+    "/summary": ("", "summary"),
     "/conditions": ("", "conditions"),
     "/help": ("", "help"),
 }
@@ -59,6 +82,14 @@ _COMMANDS = {
 
 def _journal_path(env: str) -> str:
     return LIVE_JOURNAL_PATH if env == "live" else JOURNAL_PATH
+
+
+def _filter_stats_path(env: str) -> str:
+    return LIVE_FILTER_STATS_PATH if env == "live" else FILTER_STATS_PATH
+
+
+def _excursion_path(env: str) -> str:
+    return LIVE_EXCURSION_PATH if env == "live" else EXCURSION_PATH
 
 
 def _heartbeat_path(env: str) -> str:
@@ -123,6 +154,14 @@ def _format_entry(env: str, entry: dict) -> str | None:
     if event == "circuit_breaker_blocked":
         return f"⛔ [{label}] 서킷브레이커 발동 — {entry.get('reason')}"
 
+    if event == "unprotected_position":
+        return (f"🚨 [{label}] {short_symbol} 손절 주문이 없습니다 — 레버리지 포지션이 무방비 상태입니다."
+                f" 대시보드에서 확인하거나 즉시 청산하세요.")
+
+    if event == "position_protected":
+        return (f"🛡 [{label}] {short_symbol} 손절 주문이 복구됐습니다"
+                f" (손절 {_fmt_price(entry.get('stop_loss_price'))}).")
+
     return None
 
 
@@ -166,6 +205,34 @@ def check_bot_status_change(env: str, state: dict) -> str | None:
     if was_running is None or running == was_running:
         return None
     return f"✅ [{label}] 감시 봇이 시작됐습니다." if running else f"⚠️ [{label}] 감시 봇이 꺼졌습니다."
+
+
+def check_heartbeat_stall(env: str, state: dict) -> str | None:
+    """봇 프로세스는 살아있는데 사이클이 멈춘 경우를 알린다(2026-09-09 추가).
+
+    check_bot_status_change는 프로세스의 생사만 본다 — 프로세스가 떠 있는 채로 거래소 응답을
+    기다리며 멈추거나 예외 루프에 빠지면 알림이 한 건도 안 가고, /status를 직접 쳐보기 전엔 알
+    방법이 없었다. 봇이 꺼져 있을 때는 아무 말도 안 한다(하트비트가 낡은 게 당연하고,
+    check_bot_status_change가 이미 알렸다). 상태가 바뀔 때만 한 번씩 보낸다."""
+    label = "LIVE" if env == "live" else "DEMO"
+    env_state = state.setdefault(env, {})
+    was_stalled = env_state.get("heartbeat_stalled", False)
+
+    if not bot_process.get_status(env)["running"]:
+        env_state["heartbeat_stalled"] = False
+        return None
+
+    heartbeat = read_heartbeat(path=_heartbeat_path(env))
+    age = heartbeat.get("age_seconds") if heartbeat else None
+    stalled = age is not None and age > HEARTBEAT_STALE_SECONDS
+    env_state["heartbeat_stalled"] = stalled
+
+    if stalled and not was_stalled:
+        return (f"⚠️ [{label}] 프로세스는 살아있는데 마지막 사이클이 {age / 60:.0f}분 전입니다"
+                f" — 거래소 응답 대기나 오류 루프일 수 있습니다.")
+    if was_stalled and not stalled:
+        return f"✅ [{label}] 사이클이 다시 정상적으로 돌고 있습니다."
+    return None
 
 
 def check_ip_change(state: dict) -> str | None:
@@ -256,6 +323,75 @@ def format_conditions(limit: int = 6) -> str:
     return "\n".join(lines)
 
 
+def _format_day_line(env: str, day: str) -> str:
+    """한 계좌의 하루 성과를 두어 줄로. 거래가 없었으면 그렇다고만 말한다."""
+    label = "LIVE" if env == "live" else "DEMO"
+    stats = summarize_day(read_entries(path=_journal_path(env)), day)
+
+    if not stats["trades"]:
+        extras = []
+        if stats["rejections"]:
+            extras.append(f"거부 {stats['rejections']}건")
+        if stats["circuit_breakers"]:
+            extras.append(f"서킷브레이커 {stats['circuit_breakers']}회")
+        tail = f" ({' · '.join(extras)})" if extras else ""
+        return f"[{label}] 청산된 거래 없음{tail}"
+
+    total_r = stats["total_r"]
+    r_text = f"{total_r:+.2f}R" if total_r is not None else "R 측정 불가"
+    lines = [f"[{label}] {stats['trades']}건 · 승 {stats['wins']} / 패 {stats['losses']}"
+             f" · {r_text} · {stats['realized_pnl']:+.2f} USDT"]
+
+    blocked = filter_stats.format_counts(
+        filter_stats.read_counts(path=_filter_stats_path(env), days=14).get(day, {}))
+    if blocked:
+        lines.append(f"  차단: {blocked}")
+    if stats["rejections"] or stats["circuit_breakers"]:
+        lines.append(f"  거부 {stats['rejections']}건 · 서킷브레이커 {stats['circuit_breakers']}회")
+    return "\n".join(lines)
+
+
+def build_daily_summary(day: str) -> str:
+    """전날 성과 한 통. 데모/실계좌를 한 메시지에 담는다 — 두 통으로 나누면 폰에서 비교가 안 된다."""
+    return "\n".join([f"📊 일일 요약 · {day}",
+                       _format_day_line("demo", day),
+                       _format_day_line("live", day)])
+
+
+def check_daily_summary(state: dict, now: datetime = None) -> str | None:
+    """하루에 한 번, 설정한 시각(로컬)을 지나면 전날 요약을 돌려준다. 이미 보낸 날이면 None.
+
+    "지금까지의 오늘"이 아니라 **전날 하루치**를 보내는 이유는 그래야 완결된 하루이기 때문이다 —
+    일일 손실 한도가 리셋되는 경계와 같은 기준(로컬 날짜)을 쓴다.
+
+    다른 알림들과 달리 최초 실행에서도 건너뛰지 않는다. 과거 이력을 한꺼번에 쏘는 문제(그래서
+    check_new_journal_entries는 워터마크만 잡고 넘어간다)가 여기엔 없다 — 어차피 하루에 한 통이라
+    첫 실행에 한 통 나가는 게 오히려 "기능이 살아있다"는 확인이 된다."""
+    if TELEGRAM_DAILY_SUMMARY_HOUR < 0:
+        return None
+    now = now or datetime.now().astimezone()
+    if now.hour < TELEGRAM_DAILY_SUMMARY_HOUR:
+        return None
+
+    target = (now.date() - timedelta(days=1)).isoformat()
+    if state.get("last_summary_date") == target:
+        return None
+    state["last_summary_date"] = target
+    return build_daily_summary(target)
+
+
+def _format_excursion(record: dict | None) -> str:
+    """보유 중 최고/최저 지점을 R배수로 한 줄 덧붙인다. "지금 +0.4R인데 아까 +1.6R까지 갔었다"를
+    바로 보여주려는 것 — 이 체감("양전했다가 익절 못 닿고 흘러내려 손절")이 전략을 다시 들여다본
+    출발점이었는데, 지금까지는 5분봉으로 경로를 재구성해야만 확인할 수 있었다(2026-09-09)."""
+    if not record:
+        return ""
+    mfe, mae = record.get("max_favorable_r"), record.get("max_adverse_r")
+    if mfe is None or mae is None:
+        return ""
+    return f"\n  최고 {mfe:+.2f}R · 최저 {mae:+.2f}R"
+
+
 def format_status(env: str) -> str:
     """[env] 실행 여부/하트비트 + 마진 자산 + 보유 포지션별 진입가·현재가·미실현손익·손절가·익절가.
     계좌 연결 자체가 실패해도(라이브 키 미설정 등) 실행 여부/하트비트는 이미 계산해둔 걸 그대로
@@ -277,6 +413,13 @@ def format_status(env: str) -> str:
         margin_equity = (balance.get("USDT") or {}).get("total") or 0.0
         lines.append(f"마진 자산: ${margin_equity:,.2f}")
 
+        # 오늘 필터가 몇 번 진입을 걸렀는지 — 저널에 안 남는 이벤트라 이 집계 말고는 볼 방법이 없다.
+        today_counts = next(iter(filter_stats.read_counts(path=_filter_stats_path(env), days=1).values()), {})
+        blocked_line = filter_stats.format_counts(today_counts)
+        if blocked_line:
+            lines.append(f"오늘 차단: {blocked_line}")
+
+        excursions = excursion.read_all(path=_excursion_path(env))
         available_symbols = [s for s in FUTURES_SYMBOLS if s in client.markets]
         for symbol in available_symbols:
             try:
@@ -300,6 +443,7 @@ def format_status(env: str) -> str:
                 f"  진입 {_fmt_price(position.get('entryPrice'))} · 현재가 {_fmt_price(position.get('markPrice'))}"
                 f" · 손익 {pnl_str} USDT\n"
                 f"  손절 {_fmt_price(stop_loss_price)} · 익절 {_fmt_price(take_profit_price)}"
+                + _format_excursion(excursions.get(symbol))
             )
     except LiveKeysNotConfiguredError:
         lines.append("계좌 연결: 라이브 키 미설정")
@@ -337,6 +481,9 @@ def run_once(state: dict, chat_id: str, token: str) -> dict:
             send_message(_HELP_TEXT, chat_id=chat_id, token=token)
         elif action == "conditions":
             send_message(format_conditions(), chat_id=chat_id, token=token)
+        elif action == "summary":
+            yesterday = (datetime.now().astimezone().date() - timedelta(days=1)).isoformat()
+            send_message(build_daily_summary(yesterday), chat_id=chat_id, token=token)
         elif action == "status":
             send_message(format_status("demo") + "\n\n" + format_status("live"), chat_id=chat_id, token=token)
         elif action == "start":
@@ -358,6 +505,13 @@ def run_once(state: dict, chat_id: str, token: str) -> dict:
         status_message = check_bot_status_change(env, state)
         if status_message:
             send_message(status_message, chat_id=chat_id, token=token)
+        stall_message = check_heartbeat_stall(env, state)
+        if stall_message:
+            send_message(stall_message, chat_id=chat_id, token=token)
+
+    summary_message = check_daily_summary(state)
+    if summary_message:
+        send_message(summary_message, chat_id=chat_id, token=token)
 
     ip_message = check_ip_change(state)
     if ip_message:

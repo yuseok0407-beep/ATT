@@ -98,3 +98,13 @@ MAX_CONCURRENT_POSITIONS = int(os.getenv("MAX_CONCURRENT_POSITIONS", "2"))
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 TELEGRAM_POLL_INTERVAL_SECONDS = int(os.getenv("TELEGRAM_POLL_INTERVAL_SECONDS", "15"))
+# 하트비트가 이 시간 넘게 안 갱신되면 텔레그램으로 알린다(2026-09-09). 프로세스가 살아있는 것과
+# 사이클이 실제로 도는 것은 다른 문제라, 지금까지 "프로세스는 떠 있는데 거래소 응답을 못 받아
+# 멈춘" 상태는 /status를 직접 쳐보기 전엔 알 방법이 없었다. POLL_INTERVAL_SECONDS(30초)의 배수로
+# 넉넉히 잡아서 일시적 지연에는 안 울리게 한다.
+HEARTBEAT_STALE_SECONDS = int(os.getenv("HEARTBEAT_STALE_SECONDS", "600"))
+
+# 하루 한 번 전날 성과를 텔레그램으로 보낸다(2026-09-09). 로컬 시각 기준 이 시(hour)를 지나면
+# 전날치를 한 번 쏜다 — 일일 손실 한도가 리셋되는 경계(date.today())와 같은 기준이라 "하루"의
+# 정의가 대시보드와 어긋나지 않는다. -1이면 이 기능만 끈다.
+TELEGRAM_DAILY_SUMMARY_HOUR = int(os.getenv("TELEGRAM_DAILY_SUMMARY_HOUR", "9"))

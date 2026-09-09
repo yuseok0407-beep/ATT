@@ -8,12 +8,19 @@ def _guard_live(env: str, confirm_live: bool) -> None:
         )
 
 
-def get_bracket_prices(client, symbol: str) -> tuple[float | None, float | None]:
+def get_bracket_prices(client, symbol: str, strict: bool = False) -> tuple[float | None, float | None]:
     """현재 걸려있는 손절/익절(algo/conditional) 주문에서 각각의 트리거 가격을 찾는다. 없으면 None.
-    대시보드와 futures_rule_bot 양쪽에서 쓰던 걸 여기 하나로 합침(2026-08-14)."""
+    대시보드와 futures_rule_bot 양쪽에서 쓰던 걸 여기 하나로 합침(2026-08-14).
+
+    strict=True면 조회 실패를 예외로 그대로 올린다. 기본값(False)은 조회 실패도 (None, None)로
+    뭉뚱그리는데, 화면에 "-"를 띄우는 용도로는 그걸로 충분하지만 **"손절 주문이 없다"를 판정할
+    때는 치명적이다** — 일시적 API 오류와 "정말로 무보호"가 구별이 안 돼서 멀쩡한 포지션에
+    무보호 경보를 쏘게 된다(2026-09-09, 무보호 포지션 감지 추가하면서 분리)."""
     try:
         orders = client.fetch_open_orders(symbol, params={"trigger": True})
     except Exception:
+        if strict:
+            raise
         return None, None
 
     stop_price, take_profit_price = None, None

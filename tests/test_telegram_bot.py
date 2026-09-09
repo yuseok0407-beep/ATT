@@ -265,7 +265,8 @@ def test_run_once_authorized_start_live_calls_bot_process_and_replies():
          patch("src.telegram_bot.send_message") as mock_send, \
          patch("src.telegram_bot.check_new_journal_entries", return_value=[]), \
          patch("src.telegram_bot.check_bot_status_change", return_value=None), \
-         patch("src.telegram_bot.check_ip_change", return_value=None):
+         patch("src.telegram_bot.check_ip_change", return_value=None), \
+         patch("src.telegram_bot.check_daily_summary", return_value=None):
         state = tb.run_once({}, chat_id="555", token="tok")
 
     mock_start.assert_called_once_with("live")
@@ -280,7 +281,8 @@ def test_run_once_authorized_reset_streak_live_uses_live_journal_and_replies():
          patch("src.telegram_bot.send_message") as mock_send, \
          patch("src.telegram_bot.check_new_journal_entries", return_value=[]), \
          patch("src.telegram_bot.check_bot_status_change", return_value=None), \
-         patch("src.telegram_bot.check_ip_change", return_value=None):
+         patch("src.telegram_bot.check_ip_change", return_value=None), \
+         patch("src.telegram_bot.check_daily_summary", return_value=None):
         tb.run_once({}, chat_id="555", token="tok")
 
     mock_reset.assert_called_once_with(journal_path=tb.LIVE_JOURNAL_PATH)
@@ -294,7 +296,8 @@ def test_run_once_ignores_unauthorized_command_without_calling_bot_process():
          patch("src.telegram_bot.send_message") as mock_send, \
          patch("src.telegram_bot.check_new_journal_entries", return_value=[]), \
          patch("src.telegram_bot.check_bot_status_change", return_value=None), \
-         patch("src.telegram_bot.check_ip_change", return_value=None):
+         patch("src.telegram_bot.check_ip_change", return_value=None), \
+         patch("src.telegram_bot.check_daily_summary", return_value=None):
         state = tb.run_once({}, chat_id="555", token="tok")
 
     mock_start.assert_not_called()
@@ -324,7 +327,8 @@ def test_run_once_replies_help_and_does_not_touch_bot_process():
          patch("src.telegram_bot.send_message") as mock_send, \
          patch("src.telegram_bot.check_new_journal_entries", return_value=[]), \
          patch("src.telegram_bot.check_bot_status_change", return_value=None), \
-         patch("src.telegram_bot.check_ip_change", return_value=None):
+         patch("src.telegram_bot.check_ip_change", return_value=None), \
+         patch("src.telegram_bot.check_daily_summary", return_value=None):
         tb.run_once({}, chat_id="555", token="tok")
 
     mock_start.assert_not_called()
@@ -378,3 +382,224 @@ def test_format_conditions_survives_a_collect_failure(monkeypatch):
 
 def _raise_(exc):
     raise exc
+
+
+
+# ---------- 하트비트 워치독 (2026-09-09) ----------
+
+def _running(monkeypatch, running=True):
+    monkeypatch.setattr(tb.bot_process, "get_status", lambda env: {"running": running})
+
+
+def test_check_heartbeat_stall_warns_once_when_cycles_stop_while_the_process_lives(monkeypatch):
+    """프로세스 생사만 보던 기존 알림으로는 "떠 있는데 멈춘" 상태를 절대 못 잡는다."""
+    _running(monkeypatch)
+    monkeypatch.setattr(tb, "read_heartbeat", lambda path=None: {"age_seconds": 3600})
+
+    state = {}
+    first = tb.check_heartbeat_stall("demo", state)
+    second = tb.check_heartbeat_stall("demo", state)
+
+    assert first is not None and "60분 전" in first
+    assert second is None  # 매 사이클 반복해서 쏘지 않는다
+
+
+def test_check_heartbeat_stall_is_quiet_while_cycles_are_fresh(monkeypatch):
+    _running(monkeypatch)
+    monkeypatch.setattr(tb, "read_heartbeat", lambda path=None: {"age_seconds": 31})
+
+    assert tb.check_heartbeat_stall("demo", {}) is None
+
+
+def test_check_heartbeat_stall_reports_recovery(monkeypatch):
+    _running(monkeypatch)
+    state = {}
+    monkeypatch.setattr(tb, "read_heartbeat", lambda path=None: {"age_seconds": 3600})
+    tb.check_heartbeat_stall("demo", state)
+
+    monkeypatch.setattr(tb, "read_heartbeat", lambda path=None: {"age_seconds": 20})
+    recovered = tb.check_heartbeat_stall("demo", state)
+
+    assert recovered is not None and "다시" in recovered
+    assert tb.check_heartbeat_stall("demo", state) is None
+
+
+def test_check_heartbeat_stall_says_nothing_when_the_bot_is_stopped(monkeypatch):
+    """봇이 꺼져 있으면 하트비트가 낡은 게 당연하다 — check_bot_status_change가 이미 알렸다."""
+    _running(monkeypatch, running=False)
+    monkeypatch.setattr(tb, "read_heartbeat", lambda path=None: {"age_seconds": 99999})
+
+    assert tb.check_heartbeat_stall("demo", {}) is None
+
+
+def test_check_heartbeat_stall_does_not_report_recovery_after_a_restart(monkeypatch):
+    """멈춤 -> 봇 중지 -> 재시작 순서에서 "복구됐다"가 잘못 나가면 안 된다."""
+    state = {}
+    _running(monkeypatch)
+    monkeypatch.setattr(tb, "read_heartbeat", lambda path=None: {"age_seconds": 3600})
+    tb.check_heartbeat_stall("demo", state)
+
+    _running(monkeypatch, running=False)
+    tb.check_heartbeat_stall("demo", state)
+
+    _running(monkeypatch)
+    monkeypatch.setattr(tb, "read_heartbeat", lambda path=None: {"age_seconds": 10})
+    assert tb.check_heartbeat_stall("demo", state) is None
+
+
+def test_check_heartbeat_stall_is_quiet_when_there_is_no_heartbeat_yet(monkeypatch):
+    _running(monkeypatch)
+    monkeypatch.setattr(tb, "read_heartbeat", lambda path=None: None)
+
+    assert tb.check_heartbeat_stall("demo", {}) is None
+
+
+# ---------- 무보호 포지션 알림 (2026-09-09) ----------
+
+def test_unprotected_position_is_notified(monkeypatch):
+    entries = [
+        {"timestamp": "2026-09-09T02:00:00+00:00", "event": "unprotected_position",
+         "symbol": "BTC/USDT:USDT"},
+    ]
+    monkeypatch.setattr(tb, "read_entries", lambda path=None: entries)
+
+    messages = tb.check_new_journal_entries("live", {"live": {"last_entry_ts": "2026-09-09T01:00:00+00:00"}})
+
+    assert len(messages) == 1
+    assert "BTC" in messages[0] and "손절 주문이 없습니다" in messages[0]
+    assert "LIVE" in messages[0]
+
+
+def test_position_protected_is_notified_as_a_resolution(monkeypatch):
+    entries = [
+        {"timestamp": "2026-09-09T02:00:00+00:00", "event": "position_protected",
+         "symbol": "BTC/USDT:USDT", "stop_loss_price": 78000.0},
+    ]
+    monkeypatch.setattr(tb, "read_entries", lambda path=None: entries)
+
+    messages = tb.check_new_journal_entries("demo", {"demo": {"last_entry_ts": "2026-09-09T01:00:00+00:00"}})
+
+    assert len(messages) == 1
+    assert "복구" in messages[0] and "78,000" in messages[0]
+
+
+# ---------- 보유 중 최고점 표시 ----------
+
+def test_format_excursion_shows_the_best_and_worst_points():
+    text = tb._format_excursion({"max_favorable_r": 1.62, "max_adverse_r": -0.35})
+    assert "최고 +1.62R" in text and "최저 -0.35R" in text
+
+
+def test_format_excursion_is_empty_without_a_record():
+    assert tb._format_excursion(None) == ""
+    assert tb._format_excursion({}) == ""
+
+
+
+# ---------- 일일 요약 푸시 (2026-09-09) ----------
+
+from datetime import datetime, timedelta, timezone
+
+
+def _fixed_now(hour, day=8):
+    return datetime(2026, 9, day, hour, 0, tzinfo=timezone.utc).astimezone()
+
+
+def test_check_daily_summary_waits_until_the_configured_hour(monkeypatch):
+    monkeypatch.setattr(tb, "TELEGRAM_DAILY_SUMMARY_HOUR", 9)
+    monkeypatch.setattr(tb, "build_daily_summary", lambda day: f"요약 {day}")
+
+    state = {}
+    assert tb.check_daily_summary(state, now=_fixed_now(8).replace(hour=8)) is None
+    assert state == {}
+
+
+def test_check_daily_summary_sends_yesterday_once_past_the_hour(monkeypatch):
+    """"지금까지의 오늘"이 아니라 완결된 전날을 보낸다."""
+    monkeypatch.setattr(tb, "TELEGRAM_DAILY_SUMMARY_HOUR", 9)
+    monkeypatch.setattr(tb, "build_daily_summary", lambda day: f"요약 {day}")
+
+    now = _fixed_now(9).replace(hour=10)
+    state = {}
+    message = tb.check_daily_summary(state, now=now)
+
+    yesterday = (now.date() - timedelta(days=1)).isoformat()
+    assert message == f"요약 {yesterday}"
+    assert state["last_summary_date"] == yesterday
+
+
+def test_check_daily_summary_sends_only_once_per_day(monkeypatch):
+    monkeypatch.setattr(tb, "TELEGRAM_DAILY_SUMMARY_HOUR", 9)
+    monkeypatch.setattr(tb, "build_daily_summary", lambda day: f"요약 {day}")
+
+    now = _fixed_now(9).replace(hour=14)
+    state = {}
+    assert tb.check_daily_summary(state, now=now) is not None
+    assert tb.check_daily_summary(state, now=now) is None
+    assert tb.check_daily_summary(state, now=now.replace(hour=23)) is None
+
+
+def test_check_daily_summary_sends_again_the_next_day(monkeypatch):
+    monkeypatch.setattr(tb, "TELEGRAM_DAILY_SUMMARY_HOUR", 9)
+    monkeypatch.setattr(tb, "build_daily_summary", lambda day: f"요약 {day}")
+
+    state = {}
+    tb.check_daily_summary(state, now=_fixed_now(9, day=8).replace(hour=10))
+    message = tb.check_daily_summary(state, now=_fixed_now(9, day=9).replace(hour=10))
+
+    assert message is not None
+
+
+def test_check_daily_summary_can_be_turned_off(monkeypatch):
+    monkeypatch.setattr(tb, "TELEGRAM_DAILY_SUMMARY_HOUR", -1)
+    assert tb.check_daily_summary({}, now=_fixed_now(9).replace(hour=23)) is None
+
+
+def test_build_daily_summary_covers_both_accounts(monkeypatch):
+    """두 계좌를 한 메시지에 담는다 — 두 통으로 나누면 폰에서 비교가 안 된다."""
+    entries = [
+        {"timestamp": "2026-09-08T05:00:00+00:00", "event": "entered", "symbol": "BTC/USDT:USDT",
+         "signal": "LONG", "entry_price": 100.0, "stop_loss_price": 99.0},
+        {"timestamp": "2026-09-08T06:00:00+00:00", "event": "closed", "symbol": "BTC/USDT:USDT",
+         "reason": "take_profit", "entry_price": 100.0, "exit_price": 102.0, "realized_pnl": 20.0},
+    ]
+    monkeypatch.setattr(tb, "read_entries", lambda path=None: entries if "live" not in str(path) else [])
+    monkeypatch.setattr(tb.filter_stats, "read_counts", lambda path=None, days=1: {})
+
+    from src.execution.performance import _local_day
+    text = tb.build_daily_summary(_local_day("2026-09-08T06:00:00+00:00"))
+
+    assert "[DEMO] 1건 · 승 1 / 패 0 · +2.00R · +20.00 USDT" in text
+    assert "[LIVE] 청산된 거래 없음" in text
+
+
+def test_build_daily_summary_includes_blocked_counts(monkeypatch):
+    entries = [
+        {"timestamp": "2026-09-08T05:00:00+00:00", "event": "entered", "symbol": "BTC/USDT:USDT",
+         "signal": "LONG", "entry_price": 100.0, "stop_loss_price": 99.0},
+        {"timestamp": "2026-09-08T06:00:00+00:00", "event": "closed", "symbol": "BTC/USDT:USDT",
+         "reason": "stop_loss", "entry_price": 100.0, "exit_price": 99.0, "realized_pnl": -10.0},
+    ]
+    from src.execution.performance import _local_day
+    day = _local_day("2026-09-08T06:00:00+00:00")
+    monkeypatch.setattr(tb, "read_entries", lambda path=None: entries)
+    monkeypatch.setattr(tb.filter_stats, "read_counts",
+                        lambda path=None, days=1: {day: {"skipped_low_volatility": 7}})
+
+    text = tb.build_daily_summary(day)
+
+    assert "차단: 저변동 7" in text
+
+
+def test_help_text_lists_every_registered_command():
+    """/help와 _COMMANDS가 어긋나면 "동작은 하는데 아무도 모르는 명령"이 생긴다 — 실제로
+    /conditions가 추가된 뒤 한동안 그랬고, /summary도 같은 실수를 반복할 뻔했다."""
+    missing = [command for command in tb._COMMANDS if command not in tb._HELP_TEXT]
+    assert missing == []
+
+
+def test_help_text_does_not_advertise_commands_that_do_not_exist():
+    """반대 방향도 막는다 — 없는 명령을 안내하면 사용자가 오타를 의심하게 된다."""
+    import re
+    advertised = set(re.findall(r"/[a-z_]+", tb._HELP_TEXT))
+    assert advertised - set(tb._COMMANDS) == set()

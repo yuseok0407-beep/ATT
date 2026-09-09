@@ -1,6 +1,15 @@
 import pytest
 
-from src.execution.performance import summarize_performance
+from datetime import datetime, timedelta, timezone
+
+from src.execution.performance import (
+    _local_day,
+    resolve_closed_trades,
+    summarize_day,
+    summarize_performance,
+    summarize_r_performance,
+    summarize_recent_issues,
+)
 
 
 def test_summarize_performance_empty_entries():
@@ -75,3 +84,252 @@ def test_summarize_performance_excludes_manual_trades():
     assert result["total_realized_pnl"] == pytest.approx(100.0)
     assert "TSLA/USDT:USDT" not in result["per_symbol"]
     assert result["per_symbol"]["BTC/USDT:USDT"]["trades"] == 1
+
+
+
+# ---------- summarize_recent_issues (2026-09-09) ----------
+
+NOW = datetime(2026, 9, 9, 12, 0, tzinfo=timezone.utc)
+
+
+def _at(hours_ago, **fields):
+    return {"timestamp": (NOW - timedelta(hours=hours_ago)).isoformat(), **fields}
+
+
+def test_summarize_recent_issues_groups_rejections_by_exchange_code():
+    entries = [
+        _at(1, event="rejected_exchange_error", symbol="TSLA/USDT:USDT",
+            reason='binance {"code":-2027,"msg":"Exceeded the maximum allowable position"}'),
+        _at(2, event="rejected_exchange_error", symbol="CRCL/USDT:USDT",
+            reason='binance {"code":-2027,"msg":"Exceeded the maximum allowable position"}'),
+        _at(3, event="rejected_exchange_error", symbol="ZEC/USDT:USDT",
+            reason='binance {"code":-2021,"msg":"Order would immediately trigger."}'),
+    ]
+
+    summary = summarize_recent_issues(entries, now=NOW)
+
+    assert summary["rejections"][0]["code"] == "-2027"
+    assert summary["rejections"][0]["count"] == 2
+    assert summary["rejections"][0]["symbols"] == ["TSLA", "CRCL"]
+    assert summary["rejections"][0]["hint"]  # 코드만 보여주면 매번 검색해야 한다
+    assert summary["rejections"][1]["code"] == "-2021"
+
+
+def test_summarize_recent_issues_ignores_anything_older_than_the_window():
+    entries = [
+        _at(30, event="rejected_exchange_error", symbol="TSLA/USDT:USDT",
+            reason='binance {"code":-2027,"msg":"x"}'),
+        _at(2, event="rejected_exchange_error", symbol="ZEC/USDT:USDT",
+            reason='binance {"code":-2021,"msg":"y"}'),
+    ]
+
+    summary = summarize_recent_issues(entries, hours=24, now=NOW)
+
+    assert [r["code"] for r in summary["rejections"]] == ["-2021"]
+
+
+def test_summarize_recent_issues_labels_non_api_failures_as_network():
+    entries = [_at(1, event="rejected_exchange_error", symbol="SOXL/USDT:USDT",
+                    reason="binance GET https://fapi.binance.com/fapi/v1/exchangeInfo")]
+
+    assert summarize_recent_issues(entries, now=NOW)["rejections"][0]["code"] == "network"
+
+
+def test_summarize_recent_issues_counts_circuit_breaker_events_separately():
+    entries = [
+        _at(1, event="circuit_breaker_blocked", reason="연속 손실 5회"),
+        _at(2, event="circuit_breaker_blocked", reason="일일 손실 한도"),
+        _at(3, event="entered", symbol="BTC/USDT:USDT"),
+    ]
+
+    summary = summarize_recent_issues(entries, now=NOW)
+
+    assert summary["circuit_breaker_count"] == 2
+    assert summary["rejections"] == []
+
+
+def test_summarize_recent_issues_survives_entries_without_a_usable_timestamp():
+    entries = [
+        {"event": "rejected_exchange_error", "symbol": "BTC/USDT:USDT", "reason": "x"},
+        {"timestamp": "not-a-date", "event": "rejected_exchange_error", "symbol": "BTC/USDT:USDT"},
+    ]
+
+    assert summarize_recent_issues(entries, now=NOW)["rejections"] == []
+
+
+
+# ---------- R배수 성과 / 자산곡선 (2026-09-09) ----------
+
+def _entered(symbol, entry, stop, signal="LONG", ts="2026-09-08T01:00:00+00:00"):
+    return {"timestamp": ts, "event": "entered", "symbol": symbol, "signal": signal,
+            "entry_price": entry, "stop_loss_price": stop}
+
+
+def _closed(symbol, entry, exit_price, pnl, ts="2026-09-08T02:00:00+00:00", **extra):
+    return {"timestamp": ts, "event": "closed", "symbol": symbol, "reason": "stop_loss",
+            "entry_price": entry, "exit_price": exit_price, "realized_pnl": pnl, **extra}
+
+
+def test_resolve_closed_trades_backfills_r_from_the_matching_entry():
+    """2026-09-09 이전 청산 기록엔 방향도 손절가도 없다 — 진입 기록에서 끌어와 R을 복원해야
+    새 지표가 몇 주 동안 빈 화면으로 있지 않는다."""
+    entries = [
+        _entered("BTC/USDT:USDT", 100.0, 99.0),
+        _closed("BTC/USDT:USDT", 100.0, 102.0, 20.0),
+    ]
+
+    trades = resolve_closed_trades(entries)
+
+    assert len(trades) == 1
+    assert trades[0]["side"] == "long"
+    assert trades[0]["stop_loss_price"] == 99.0
+    assert trades[0]["realized_r"] == pytest.approx(2.0)
+
+
+def test_resolve_closed_trades_prefers_values_already_on_the_record():
+    """새 기록은 청산 시점에 계산된 값을 들고 있다 — 그걸 덮어쓰면 안 된다."""
+    entries = [
+        _entered("BTC/USDT:USDT", 100.0, 99.0),
+        _closed("BTC/USDT:USDT", 100.0, 102.0, 20.0, side="long", stop_loss_price=99.5,
+                realized_r=4.0),
+    ]
+
+    trade = resolve_closed_trades(entries)[0]
+
+    assert trade["stop_loss_price"] == 99.5
+    assert trade["realized_r"] == 4.0
+
+
+def test_resolve_closed_trades_drops_r_that_contradicts_realized_pnl():
+    """실제 사고 재현(2026-09-07 ZEC 재진입 루프): 청산 6건이 같은 "entered" 기록에 묶이면서
+    손실 거래인데 R이 +2.6~+3.1로 계산됐다. 부호가 모순되면 그 R은 못 믿는 값이다."""
+    entries = [
+        _entered("ZEC/USDT:USDT", 1181.86, 1167.08),
+        _closed("ZEC/USDT:USDT", 1181.86, 1220.66, -1.53),  # 가격상 +2.6R인데 실현손익은 손실
+    ]
+
+    trade = resolve_closed_trades(entries)[0]
+
+    assert trade["realized_r"] is None
+    assert trade["realized_pnl"] == -1.53  # 달러 통계에서는 빠지지 않는다
+
+
+def test_resolve_closed_trades_skips_manual_closes():
+    entries = [
+        _entered("BTC/USDT:USDT", 100.0, 99.0),
+        {"timestamp": "2026-09-08T02:00:00+00:00", "event": "closed", "symbol": "BTC/USDT:USDT",
+         "reason": "manual", "entry_price": 100.0, "exit_price": 101.0, "realized_pnl": 10.0},
+    ]
+
+    assert resolve_closed_trades(entries) == []
+
+
+def test_summarize_r_performance_splits_by_side():
+    entries = [
+        _entered("BTC/USDT:USDT", 100.0, 99.0, signal="LONG"),
+        _closed("BTC/USDT:USDT", 100.0, 102.0, 20.0),
+        _entered("ETH/USDT:USDT", 50.0, 50.5, signal="SHORT"),
+        _closed("ETH/USDT:USDT", 50.0, 50.5, -5.0),
+    ]
+
+    summary = summarize_r_performance(entries)
+
+    assert summary["num_trades"] == 2
+    assert summary["total_r"] == pytest.approx(1.0)
+    assert summary["by_side"]["long"] == {"trades": 1, "wins": 1, "total_r": pytest.approx(2.0)}
+    assert summary["by_side"]["short"]["total_r"] == pytest.approx(-1.0)
+
+
+def test_summarize_r_performance_builds_a_cumulative_curve():
+    entries = [
+        _entered("BTC/USDT:USDT", 100.0, 99.0),
+        _closed("BTC/USDT:USDT", 100.0, 102.0, 20.0, ts="2026-09-08T02:00:00+00:00"),
+        _entered("BTC/USDT:USDT", 100.0, 99.0, ts="2026-09-08T03:00:00+00:00"),
+        _closed("BTC/USDT:USDT", 100.0, 99.0, -10.0, ts="2026-09-08T04:00:00+00:00"),
+    ]
+
+    curve = summarize_r_performance(entries)["equity_curve"]
+
+    assert [round(p["cumulative_r"], 2) for p in curve] == [2.0, 1.0]
+    assert [p["cumulative_pnl"] for p in curve] == [20.0, 10.0]
+
+
+def test_summarize_r_performance_measures_drawdown_from_the_peak():
+    entries = []
+    for i, (exit_price, pnl) in enumerate([(102.0, 20.0), (99.0, -10.0), (99.0, -10.0)]):
+        ts = f"2026-09-08T0{i}:00:00+00:00"
+        entries.append(_entered("BTC/USDT:USDT", 100.0, 99.0, ts=ts))
+        entries.append(_closed("BTC/USDT:USDT", 100.0, exit_price, pnl, ts=ts))
+
+    summary = summarize_r_performance(entries)
+
+    assert summary["max_drawdown_r"] == pytest.approx(-2.0)  # +2R 고점에서 0R까지
+    assert summary["max_drawdown_usd"] == pytest.approx(-20.0)
+
+
+def test_summarize_r_performance_counts_losers_that_nearly_won():
+    """"익절 코앞까지 갔다가 손절났다"가 실제로 얼마나 되는지 — 원래 질문에 대한 상시 답."""
+    entries = [
+        _entered("BTC/USDT:USDT", 100.0, 99.0),
+        _closed("BTC/USDT:USDT", 100.0, 99.0, -10.0, max_favorable_r=1.6),
+        _entered("ETH/USDT:USDT", 50.0, 49.5, ts="2026-09-08T03:00:00+00:00"),
+        _closed("ETH/USDT:USDT", 50.0, 49.5, -5.0, ts="2026-09-08T04:00:00+00:00",
+                max_favorable_r=0.2),
+    ]
+
+    mfe = summarize_r_performance(entries)["mfe"]
+
+    assert mfe["losers_measured"] == 2
+    assert mfe["losers_reaching_1r"] == 1
+
+
+def test_summarize_r_performance_is_empty_without_trades():
+    summary = summarize_r_performance([])
+    assert summary["num_trades"] == 0
+    assert summary["avg_r"] is None
+    assert summary["equity_curve"] == []
+
+
+def test_summarize_r_performance_caps_the_curve_length():
+    entries = []
+    for i in range(20):
+        ts = f"2026-09-08T{i:02d}:00:00+00:00"
+        entries.append(_entered("BTC/USDT:USDT", 100.0, 99.0, ts=ts))
+        entries.append(_closed("BTC/USDT:USDT", 100.0, 102.0, 20.0, ts=ts))
+
+    assert len(summarize_r_performance(entries, max_points=5)["equity_curve"]) == 5
+
+
+# ---------- summarize_day (일일 요약용) ----------
+
+def test_summarize_day_counts_only_that_local_day():
+    entries = [
+        _entered("BTC/USDT:USDT", 100.0, 99.0, ts="2026-09-08T02:00:00+00:00"),
+        _closed("BTC/USDT:USDT", 100.0, 102.0, 20.0, ts="2026-09-08T03:00:00+00:00"),
+        _entered("ETH/USDT:USDT", 50.0, 49.5, ts="2026-09-20T02:00:00+00:00"),
+        _closed("ETH/USDT:USDT", 50.0, 49.5, -5.0, ts="2026-09-20T03:00:00+00:00"),
+    ]
+    day = _local_day("2026-09-08T03:00:00+00:00")
+
+    stats = summarize_day(entries, day)
+
+    assert stats["trades"] == 1
+    assert stats["wins"] == 1
+    assert stats["losses"] == 0
+    assert stats["realized_pnl"] == pytest.approx(20.0)
+    assert stats["total_r"] == pytest.approx(2.0)
+
+
+def test_summarize_day_counts_rejections_and_circuit_breakers():
+    ts = "2026-09-08T03:00:00+00:00"
+    entries = [
+        {"timestamp": ts, "event": "rejected_exchange_error", "symbol": "TSLA/USDT:USDT",
+         "reason": 'binance {"code":-2027}'},
+        {"timestamp": ts, "event": "circuit_breaker_blocked", "reason": "연속 손실"},
+    ]
+
+    stats = summarize_day(entries, _local_day(ts))
+
+    assert stats["trades"] == 0
+    assert stats["rejections"] == 1
+    assert stats["circuit_breakers"] == 1
