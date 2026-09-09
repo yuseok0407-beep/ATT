@@ -27,6 +27,15 @@
 - `src/core/signal_status.py` — "진입 조건에 지금 얼마나 가까운지" 계산. 대시보드
   `/api/conditions`와 텔레그램 `/conditions`가 **같은 함수**를 쓴다(조건을 두 군데 적으면
   실거래 로직과 어긋나므로). 실제 판정은 `futures_strategy`를 그대로 호출하고 거리/점수만 덧붙인다.
+- `src/execution/performance.py` — 저널 → 대시보드 성과 요약. `summarize_performance`(달러 기준),
+  `summarize_r_performance`(R배수 + 자산곡선 + 방향별), `summarize_recent_issues`(거래소 거부
+  24시간 집계), `summarize_day`(일일 요약 푸시용). **R 복원은 `resolve_closed_trades` 한 곳에서
+  한다** — 2026-09-09 이전 청산 기록엔 방향도 손절가도 없어서 진입 기록에서 끌어와야 하고,
+  R과 실현손익의 부호가 모순되면 그 R은 버린다(아래 주의 참고).
+- `src/execution/filter_stats.py` — 저널에 안 남는 진입 차단 사유(레짐숏/저변동/같은봉/가격이탈)의
+  **일별 집계**. 저널에 못 남기는 이유(30초마다 재발생)는 그대로라 카운터 파일에 따로 쌓는다.
+- `src/execution/excursion.py` — 보유 중 최고/최저 지점(MFE/MAE)을 R배수로 추적. 청산 시
+  `check_and_log_closed_trade`가 꺼내서 청산 기록에 옮겨 적는다.
 - `src/telegram_bot.py` / `scripts/run_telegram_bot.py` — 텔레그램 알림 + 원격 시작/중지 (아래
   "텔레그램 알림" 절 참고), `src/data/public_ip.py` — 공인 IP 조회(대시보드와 공유)
 - `journal/trades.jsonl` — 현물, `journal/futures_trades.jsonl` — 선물(Claude), `journal/futures_rule_trades.jsonl` — 선물(규칙기반)
@@ -82,7 +91,29 @@
   `futures_strategy.apply_regime_filter()`이고 백테스트와 실거래 봇이 둘 다 이걸 부른다 —
   조건을 두 군데 따로 적지 말 것. 이 필터 때문에 캔들 조회 개수가 101 → `SMA기간+2`로 늘었다.
 - `skipped_same_signal_bar`/`skipped_price_drift`는 `_SILENT_EVENTS`라 저널에 안 남는다(매
-  사이클 반복되므로) — 현재 사이클 결과에는 실려서 대시보드로는 보인다.
+  사이클 반복되므로) — 현재 사이클 결과에는 실려서 대시보드로는 보인다. 대신 **일별 집계는
+  `filter_stats`에 쌓는다**(2026-09-09) — 필터가 백테스트대로 도는지 확인할 유일한 수단이라.
+  집계는 `(심볼, 신호봉)` 단위로 중복 제거하므로 30초마다 반복돼도 한 봉은 1로만 센다. 레짐
+  필터가 버린 숏도 `no_signal`이 아니라 `skipped_regime`으로 구분해서 셀 수 있게 해뒀다.
+  **새 차단 사유를 만들면 결과에 `signal_bar_timestamp`를 반드시 실을 것** — 없으면 안 세진다.
+- **포지션이 있는데 손절 주문이 없으면 `unprotected_position`을 저널에 남긴다**(2026-09-09,
+  `check_position_protection`). 10배 레버리지에서 가장 비싼 실패인데 그동안 대시보드 카드의
+  "-" 한 글자로만 표시돼 정상 상태와 구분이 안 됐다. 저널에 남기면 텔레그램 알림 경로를 그대로
+  타고, 대시보드는 화면 맨 위 빨간 배너로 띄운다. 보호가 복구되면 `position_protected`를 한 번
+  남긴다. **판정에는 반드시 `get_bracket_prices(..., strict=True)`를 쓸 것** — 기본값은 조회
+  실패도 `(None, None)`으로 뭉뚱그려서 일시적 API 오류가 무보호 경보로 둔갑한다.
+- 이 두 이벤트가 생기면서 "봇이 이 포지션을 아는가" 판정은 **마지막 기록이 아니라 마지막
+  *생애주기* 기록**(`_LIFECYCLE_EVENTS`)을 봐야 한다 — 안 그러면 무보호 기록이 마지막이 되는
+  순간 `check_and_log_untracked_position`이 매 사이클 진입 기록을 중복 백필한다.
+- 청산 기록(`event="closed"`)에는 실현손익($) 외에 **방향/손절가/익절가/진입시각/`realized_r`/
+  `max_favorable_r`/`max_adverse_r`**가 같이 들어간다(2026-09-09). $ 금액만으로는 사이징에 따라
+  같은 -20달러가 -0.3R일 수도 -1R일 수도 있어 백테스트와 비교가 안 됐고, 방향·손절가가 없어
+  사후 복원도 불가능했다. R은 가격만으로 계산해서(손절가까지가 -1R) 수량/레버리지와 무관하다.
+- **가격으로 잰 R은 저널의 진입가가 그 청산과 맞을 때만 유효하다.** 2026-09-07 ZEC 재진입 루프
+  때는 청산 6건이 같은 `entered` 기록에 묶여서, 실현손익 -1.53인 거래의 R이 +2.63으로 계산됐다.
+  `resolve_closed_trades`는 **R과 실현손익의 부호가 모순되면 그 R을 버린다**(달러 통계에는 그대로
+  남는다) — 손절/익절 판정에 이미 쓰던 것과 같은 기준이다. 그래서 화면의 달러 거래수와 R 거래수가
+  다를 수 있고, 대시보드는 그 차이를 곡선 위에 명시한다.
 - 선물은 현물과 달리 `enable_demo_trading(True)`로 연결한다(구 testnet.binancefuture.com 방식인
   `set_sandbox_mode`가 아님). 키는 실제 바이낸스 계정 로그인 후 demo.binance.com/en/my/settings/api-management 에서 발급.
 - `client.fetch_my_trades(symbol, limit=N)`을 `since` 없이 부르면 "최신 N개"가 아니라 계좌에 쌓인
@@ -128,8 +159,19 @@
   `index.html`의 `fmtPrice()`와 같은 기준(`telegram_bot._fmt_price`)을 파이썬으로 맞춰서 통일.
 - `src/execution/telegram_client.py`의 `send_message`/`get_updates`는 절대 예외를 안 올린다(실패
   시 로그만 남기고 False/빈 리스트) — 알림 실패가 감시 루프를 죽이면 안 되므로.
-- 저널의 `entered`/`closed`/`circuit_breaker_blocked` 이벤트만 알림 대상(`src.telegram_bot.
-  _NOTIFY_EVENTS`) — `rejected_exchange_error` 등은 매 사이클 반복될 수 있어 노이즈라 제외.
+- 저널의 `entered`/`closed`/`circuit_breaker_blocked`/`unprotected_position`/`position_protected`
+  이벤트만 알림 대상(`src.telegram_bot._NOTIFY_EVENTS`) — `rejected_exchange_error` 등은 매
+  사이클 반복될 수 있어 노이즈라 제외한다(대신 대시보드가 24시간 코드별 건수로 집계해서 보여준다,
+  `performance.summarize_recent_issues`. 실제로 몇 달간 TSLA -2027이 141건 쌓이도록 아무도 몰랐다).
+- **하루 한 번 전날 성과를 자동으로 보낸다**(2026-09-09, `check_daily_summary`). 로컬 시각
+  `TELEGRAM_DAILY_SUMMARY_HOUR`(기본 9시)를 지나면 **전날 하루치**를 한 통 — "지금까지의 오늘"이
+  아니라 완결된 하루라야 의미가 있고, 일일 손실 한도가 리셋되는 경계(로컬 날짜)와 같은 기준을
+  써야 대시보드가 말하는 "오늘"과 어긋나지 않는다. `/summary`로 아무 때나 다시 볼 수도 있다.
+  다른 알림과 달리 최초 실행에서 건너뛰지 않는다 — 하루 한 통이라 과거를 쏟아낼 위험이 없다.
+- **프로세스 생존과 사이클이 도는 것은 다른 문제다**(2026-09-09). `check_bot_status_change`는
+  프로세스 생사만 보므로 "떠 있는데 거래소 응답 대기로 멈춘" 상태를 못 잡는다 —
+  `check_heartbeat_stall`이 하트비트 나이가 `HEARTBEAT_STALE_SECONDS`(기본 600초)를 넘으면
+  한 번 알리고, 다시 돌기 시작하면 한 번 더 알린다. 봇이 꺼져 있을 땐 아무 말도 안 한다.
 - `state/telegram_bot_state.json` 하나에 데모/실계좌 각각의 마지막 처리 저널 타임스탬프, 봇
   실행여부, 마지막 공인 IP, 텔레그램 update_offset을 전부 담는다(다른 파일이 안 읽는 새 관심사라
   여러 파일로 안 쪼갬). **최초 실행 시 과거 이력을 한꺼번에 쏘지 않는다** — state가 비어있으면
