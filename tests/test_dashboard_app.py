@@ -197,3 +197,29 @@ def test_api_telegram_stop_calls_bot_process_with_telegram_key(client, monkeypat
     resp = client.post("/api/telegram/stop")
     assert resp.status_code == 200
     assert resp.get_json() == {"running": False, "pid": None, "started_at": None}
+
+
+def test_api_conditions_returns_rows_for_the_env_symbols(client, monkeypatch):
+    """조건 근접도는 계좌 마켓에 있는 심볼만 대상으로 한다(SOXL처럼 env마다 다름).
+    계산 자체는 core.signal_status가 하므로 여기서는 라우트 배선만 확인한다."""
+    captured = {}
+
+    def _collect(symbols):
+        captured["symbols"] = list(symbols)
+        return {"timeframe": "1h", "adx_threshold": 30.0, "sma_period": 10,
+                "regime_sma_period": 400, "cross_near_pct": 1.0,
+                "symbols": [{"symbol": "BTC/USDT:USDT", "proximity": 0.5}],
+                "errors": [], "generated_at": 0.0}
+
+    monkeypatch.setattr(dashboard_app, "collect_conditions", _collect)
+    resp = client.get("/api/conditions?env=demo")
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["env"] == "demo"
+    assert captured["symbols"] == ["BTC/USDT:USDT", "ETH/USDT:USDT"]
+    assert body["symbols"][0]["symbol"] == "BTC/USDT:USDT"
+
+
+def test_api_conditions_rejects_an_unknown_env(client):
+    assert client.get("/api/conditions?env=bogus").status_code == 400

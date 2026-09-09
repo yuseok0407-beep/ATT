@@ -14,6 +14,7 @@ from src.core.config import (
     LEVERAGE,
     MAX_CONCURRENT_POSITIONS,
     RULE_ADX_THRESHOLD,
+    RULE_REGIME_SMA_PERIOD,
     RULE_SMA_PERIOD,
     RULE_TIMEFRAME,
     STOP_LOSS_PCT,
@@ -22,6 +23,7 @@ from src.core.config import (
     TELEGRAM_CHAT_ID,
 )
 from src.core.risk import MAX_CONSECUTIVE_LOSSES, MAX_DAILY_LOSS_PCT
+from src.core.signal_status import collect_conditions
 from src.core.state import compute_consecutive_losses, get_daily_pnl_pct
 from src.data.exchange import fetch_ohlcv_df
 from src.data.futures_exchange import LiveKeysNotConfiguredError, get_futures_balance, get_futures_client, get_position
@@ -218,6 +220,26 @@ def api_chart(symbol):
         for row in df.itertuples()
     ]
     return jsonify({"symbol": symbol, "timeframe": RULE_TIMEFRAME, "candles": candles})
+
+
+@app.route("/api/conditions")
+def api_conditions():
+    """종목별로 "지금 진입 조건에 얼마나 가까운지"를 돌려준다 — 신호가 안 뜨는 대부분의 시간에
+    봇이 무엇을 기다리는 중인지 보여주기 위한 것.
+
+    시세 조회는 공개 데이터라 계좌 클라이언트가 필요 없지만, **어떤 심볼을 볼지**는 env에 따라
+    다르다(SOXL은 실계좌에만 있음) — 그래서 env로 심볼 목록만 고르고 캔들은 공개 클라이언트로
+    받는다. 같은 응답을 텔레그램 봇도 쓰므로 계산 자체는 src/core/signal_status.py에 있다."""
+    env = _resolve_env()
+    if env is None:
+        return jsonify({"status": "error", "message": "알 수 없는 env입니다."}), 400
+    client, err = _get_client_or_error(env)
+    if err:
+        return err
+
+    payload = collect_conditions(_available_symbols(client))
+    payload["env"] = env
+    return jsonify(payload)
 
 
 @app.route("/api/close/<path:symbol>", methods=["POST"])

@@ -85,6 +85,34 @@
     padding: 3px 10px; font-size: 12px; color: var(--muted);
   }
   .reason-chip b { color: var(--text); }
+  /* 진입 조건 근접도 */
+  .cond-list { display: grid; gap: 8px; }
+  .cond-row {
+    display: grid; grid-template-columns: 84px 1fr auto; gap: 12px; align-items: center;
+    padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px;
+    background: rgba(139,147,167,.04);
+  }
+  .cond-row.ready { border-color: rgba(52,211,153,.5); background: rgba(52,211,153,.08); }
+  .cond-row.blocked { opacity: .55; }
+  .cond-name { font-weight: 600; font-size: 13px; }
+  .cond-side { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .cond-side.long { color: var(--green); }
+  .cond-side.short { color: var(--red); }
+  .cond-bars { display: grid; gap: 5px; }
+  .cond-metric { display: grid; grid-template-columns: 88px 1fr 96px; gap: 8px; align-items: center; font-size: 11px; }
+  .cond-metric .k { color: var(--muted); }
+  .cond-metric .v { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+  .cond-metric .v.ok { color: var(--green); }
+  .cond-metric .v.no { color: var(--amber); }
+  .mini-track { background: rgba(139,147,167,.15); border-radius: 999px; height: 6px; overflow: hidden; }
+  .mini-fill { height: 100%; border-radius: 999px; transition: width .3s ease; background: var(--blue); }
+  .mini-fill.ok { background: var(--green); }
+  .mini-fill.no { background: var(--amber); }
+  .cond-score { text-align: right; min-width: 96px; }
+  .cond-score .pct { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .cond-score .cap { font-size: 11px; color: var(--muted); }
+  .cond-blockers { grid-column: 1 / -1; font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .cond-note { font-size: 11px; color: var(--muted); margin-top: 10px; line-height: 1.6; }
   .gauge-track {
     background: rgba(139,147,167,.15); border-radius: 999px; height: 10px; overflow: hidden; margin: 6px 0 4px;
   }
@@ -215,6 +243,12 @@
   </div>
 
   <section>
+    <h2>진입 조건 근접도 <span id="cond-meta" style="font-weight:400"></span></h2>
+    <div class="cond-list" id="cond-list"></div>
+    <div class="cond-note" id="cond-note"></div>
+  </section>
+
+  <section>
     <h2>리스크 현황</h2>
     <div>
       <div class="gauge-caption"><span>일일 손익</span><span id="daily-pnl-text">–</span></div>
@@ -327,6 +361,7 @@ function switchEnv(env) {
   refresh();
   refreshBotStatus();
   fetchPerformance();
+  fetchConditions();
   if (env === 'live') fetchPublicIp();  // 바이낸스 IP 화이트리스트와 비교할 수 있게 매번 전환 시 갱신
 }
 
@@ -816,10 +851,98 @@ refresh();
 refreshBotStatus();
 refreshTelegramStatus();
 fetchPerformance();
+
+// --- 진입 조건 근접도 ---------------------------------------------------
+// 서버(/api/conditions)가 core.signal_status로 계산한 값을 그대로 그린다 — 여기서 조건을
+// 다시 판정하지 않는다(대시보드/텔레그램/실거래봇이 같은 정의를 쓰게 하기 위함).
+function miniBar(ratio, state) {
+  const pct = Math.max(0, Math.min(1, ratio)) * 100;
+  return '<div class="mini-track"><div class="mini-fill ' + state + '" style="width:' + pct + '%"></div></div>';
+}
+
+// state: 'ok'(조건 충족) | 'no'(미충족 게이트) | ''(중립 — 통과/실패가 아니라 '거리'인 항목)
+// SMA까지의 거리를 미충족처럼 호박색으로 칠하면 모든 줄이 경고로 보여서 오히려 안 읽힌다.
+function condMetric(key, ratio, valueText, state) {
+  return '<div class="cond-metric"><span class="k">' + key + '</span>' + miniBar(ratio, state) +
+         '<span class="v ' + state + '">' + valueText + '</span></div>';
+}
+
+function renderConditions(data) {
+  const list = document.getElementById('cond-list');
+  const meta = document.getElementById('cond-meta');
+  const note = document.getElementById('cond-note');
+  meta.textContent = '· ' + data.timeframe + ' · ADX≥' + data.adx_threshold +
+                     ' · SMA' + data.sma_period + ' 돌파 · 레짐 SMA' + data.regime_sma_period;
+
+  if (!data.symbols || !data.symbols.length) {
+    list.innerHTML = '<div class="cond-note">표시할 종목이 없습니다.</div>';
+    return;
+  }
+
+  list.innerHTML = data.symbols.map(function (r) {
+    const name = r.symbol.split('/')[0];
+    if (r.candidate_side === null) {
+      return '<div class="cond-row blocked"><div><div class="cond-name">' + name + '</div></div>' +
+             '<div class="cond-blockers">' + (r.blockers.join(' · ') || '계산 불가') + '</div>' +
+             '<div class="cond-score"><div class="pct">–</div></div></div>';
+    }
+    const isLong = r.candidate_side === 'LONG';
+    const sideText = r.ready ? ('🔥 지금 ' + (r.signal === 'LONG' ? '롱' : '숏') + ' 신호')
+                             : ((isLong ? '롱' : '숏') + ' 대기');
+    // SMA까지의 거리: cross_near_pct 이내면 꽉 찬 막대(가까울수록 길게)
+    const crossRatio = 1 - Math.min(1, Math.abs(r.distance_pct) / data.cross_near_pct);
+    const adxRatio = r.adx_threshold ? r.adx / r.adx_threshold : 1;
+    const rsiRatio = isLong ? r.rsi / r.rsi_threshold : (100 - r.rsi) / r.rsi_threshold;
+
+    let rowClass = 'cond-row';
+    if (r.ready) rowClass += ' ready';
+    else if (r.regime_blocks_short) rowClass += ' blocked';
+
+    return '<div class="' + rowClass + '">' +
+      '<div><div class="cond-name">' + name + '</div>' +
+      '<div class="cond-side ' + (isLong ? 'long' : 'short') + '">' + sideText + '</div></div>' +
+      '<div class="cond-bars">' +
+        condMetric('SMA' + r.sma_period + '까지', crossRatio,
+                   r.distance_pct.toFixed(2) + '%', r.ready ? 'ok' : '') +
+        condMetric('ADX', adxRatio, r.adx.toFixed(1) + ' / ' + r.adx_threshold,
+                   r.adx_ok ? 'ok' : 'no') +
+        condMetric('RSI', rsiRatio,
+                   r.rsi.toFixed(1) + (isLong ? ' ≥ ' : ' ≤ ') + r.rsi_threshold,
+                   r.rsi_ok ? 'ok' : 'no') +
+      '</div>' +
+      '<div class="cond-score"><div class="pct">' + Math.round(r.proximity * 100) + '%</div>' +
+      '<div class="cap">' + (r.regime_blocks_short ? '숏 차단' : '근접도') + '</div></div>' +
+      '<div class="cond-blockers">' + (r.blockers.join(' · ') || '조건 충족') + '</div>' +
+    '</div>';
+  }).join('');
+
+  const parts = ['막대가 길수록 조건에 가깝습니다. 근접도는 세 조건의 곱이라 하나만 멀어도 낮게 나옵니다.',
+                 '진입 신호는 SMA를 "막 돌파하는 순간"만 잡으므로, 거리가 0%에 가까워도 실제 돌파 전까지는 대기입니다.'];
+  if (data.errors && data.errors.length) {
+    parts.push('조회 실패: ' + data.errors.map(function (e) { return e.symbol.split('/')[0]; }).join(', '));
+  }
+  note.innerHTML = parts.join('<br>');
+}
+
+async function fetchConditions() {
+  const requestedEnv = currentEnv;
+  try {
+    const res = await fetch('/api/conditions?env=' + requestedEnv);
+    if (!res.ok) return;
+    const data = await res.json();
+    // 응답을 기다리는 사이 사용자가 DEMO/LIVE 탭을 바꿨으면 낡은 결과를 그리지 않는다
+    if (data.env !== currentEnv) return;
+    renderConditions(data);
+  } catch (e) { /* 일시적 실패는 다음 주기에 다시 시도 */ }
+}
+
 setInterval(refresh, 5000);
 setInterval(refreshBotStatus, 5000);
 setInterval(refreshTelegramStatus, 5000);
 setInterval(fetchPerformance, 15000);
+// 서버가 20초 캐시를 두므로 그보다 촘촘히 부를 이유가 없다
+setInterval(fetchConditions, 20000);
+fetchConditions();
 </script>
 </body>
 </html>

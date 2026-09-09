@@ -3,6 +3,7 @@ import logging
 from pathlib import Path
 
 from src.core.config import FUTURES_SYMBOLS, TELEGRAM_POLL_INTERVAL_SECONDS
+from src.core.signal_status import collect_conditions
 from src.data.futures_exchange import (
     LiveKeysNotConfiguredError,
     get_futures_balance,
@@ -51,6 +52,7 @@ _COMMANDS = {
     "/reset_streak_demo": ("demo", "reset_streak"),
     "/reset_streak_live": ("live", "reset_streak"),
     "/status": ("", "status"),
+    "/conditions": ("", "conditions"),
     "/help": ("", "help"),
 }
 
@@ -194,6 +196,66 @@ def dispatch_command(text: str) -> tuple[str, str] | None:
     return _COMMANDS.get(command)
 
 
+def _proximity_bar(value: float, width: int = 10) -> str:
+    """0~1을 텍스트 게이지로. 텔레그램은 HTML/마크다운 파싱 없이도 읽히게 블록 문자만 쓴다."""
+    filled = max(0, min(width, round(value * width)))
+    return "█" * filled + "░" * (width - filled)
+
+
+def format_conditions(limit: int = 6) -> str:
+    """진입 조건에 가까운 순으로 종목을 보여준다 — "왜 안 들어가는지"를 폰에서 바로 보기 위한 것.
+
+    계산은 대시보드 /api/conditions와 완전히 같은 함수(core.signal_status.collect_conditions)를
+    쓴다. 시세 자체는 공개 데이터라 계좌 키가 없어도 되지만 "어떤 심볼을 볼지"는 계좌 마켓에 따라
+    달라서(SOXL은 실계좌에만 있음) 데모 기준 목록을 쓰고, 연결이 안 되면 설정값 전체로 폴백한다.
+
+    limit: 상위 몇 종목까지 자세히 보여줄지 — 12종목을 전부 풀어 쓰면 한 메시지가 너무 길어져서
+    나머지는 근접도만 한 줄로 접는다."""
+    try:
+        client = get_futures_client("demo")
+        client.load_markets()
+        symbols = [s for s in FUTURES_SYMBOLS if s in client.markets]
+    except Exception:
+        symbols = list(FUTURES_SYMBOLS)
+
+    try:
+        payload = collect_conditions(symbols)
+    except Exception as exc:
+        return f"조건 조회 실패: {exc}"
+
+    rows = payload["symbols"]
+    if not rows:
+        return "조회 가능한 종목이 없습니다."
+
+    lines = [f"[진입 조건] {payload['timeframe']} · ADX≥{payload['adx_threshold']:.0f} · "
+             f"SMA{payload['sma_period']} 돌파 · 레짐 SMA{payload['regime_sma_period']}"]
+
+    for row in rows[:limit]:
+        name = row["symbol"].split("/")[0]
+        if row["ready"]:
+            signal = _SIGNAL_LABELS.get(row["signal"], row["signal"])
+            lines.append(f"\n🔥 {name} — 지금 {signal} 신호!")
+            continue
+        if row["candidate_side"] is None:
+            lines.append(f"\n▸ {name} — {', '.join(row['blockers']) or '계산 불가'}")
+            continue
+        side = _SIGNAL_LABELS.get(row["candidate_side"], row["candidate_side"])
+        lines.append(
+            f"\n▸ {name} {side} 대기  {_proximity_bar(row['proximity'])} {row['proximity'] * 100:.0f}%"
+            f"\n  SMA{row['sma_period']}까지 {row['distance_pct']:+.2f}%"
+            f" · ADX {row['adx']:.1f}/{row['adx_threshold']:.0f} · RSI {row['rsi']:.1f}"
+            f"\n  {' · '.join(row['blockers'])}"
+        )
+
+    rest = rows[limit:]
+    if rest:
+        lines.append("\n" + ", ".join(
+            f"{r['symbol'].split('/')[0]} {r['proximity'] * 100:.0f}%" for r in rest))
+    for err in payload.get("errors", []):
+        lines.append(f"\n⚠️ {err['symbol'].split('/')[0]} 조회 실패: {err['message'][:60]}")
+    return "\n".join(lines)
+
+
 def format_status(env: str) -> str:
     """[env] 실행 여부/하트비트 + 마진 자산 + 보유 포지션별 진입가·현재가·미실현손익·손절가·익절가.
     계좌 연결 자체가 실패해도(라이브 키 미설정 등) 실행 여부/하트비트는 이미 계산해둔 걸 그대로
@@ -273,6 +335,8 @@ def run_once(state: dict, chat_id: str, token: str) -> dict:
         env, action = parsed
         if action == "help":
             send_message(_HELP_TEXT, chat_id=chat_id, token=token)
+        elif action == "conditions":
+            send_message(format_conditions(), chat_id=chat_id, token=token)
         elif action == "status":
             send_message(format_status("demo") + "\n\n" + format_status("live"), chat_id=chat_id, token=token)
         elif action == "start":

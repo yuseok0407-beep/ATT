@@ -1,0 +1,189 @@
+"""진입 조건에 지금 얼마나 가까운지를 계산한다 — 대시보드와 텔레그램이 공유하는 단일 정의.
+
+`detect_signal`은 "지금 진입인가 아닌가"만 알려주기 때문에, 신호가 안 뜨는 대부분의 시간 동안
+사용자는 "왜 안 들어가는지 / 얼마나 가까운지"를 알 수 없다. 이 모듈은 같은 조건들을 통과/미통과
+여부와 함께 **거리**로도 환산해서 돌려준다.
+
+조건을 두 군데(대시보드, 텔레그램)에 각각 적으면 실거래 로직과 어긋나기 쉬워서, 실제 판정은
+전부 `futures_strategy`의 함수(`detect_signal`/`apply_regime_filter`/`is_above_long_sma`)를 그대로
+호출해서 얻고, 이 모듈은 거기에 "거리/점수"만 덧붙인다.
+
+입력 df는 실거래 봇과 마찬가지로 **마감된 봉만** 담겨 있어야 한다(호출자가 마지막 진행중 봉을
+버리고 넘긴다) — 안 그러면 화면에 보이는 값과 봇이 실제로 판단하는 값이 달라진다.
+"""
+import pandas as pd
+
+from src.core.config import (
+    RULE_ADX_THRESHOLD,
+    RULE_REGIME_SMA_PERIOD,
+    RULE_SMA_PERIOD,
+    RULE_TIMEFRAME,
+)
+from src.core.futures_strategy import apply_regime_filter, detect_signal, is_above_long_sma
+from src.core.indicators import adx, rsi, sma
+
+# SMA까지의 거리가 이 % 이내면 "한 봉 안에 닿을 수 있는 거리"로 보고 근접도를 1에 가깝게 준다.
+# 1시간봉 기준 1%는 이 전략의 손절폭(1.25%)보다 약간 좁은 수준 — 한 봉에 충분히 움직이는 거리다.
+CROSS_NEAR_PCT = 1.0
+
+MIN_BARS = 35  # detect_signal이 요구하는 최소 워밍업과 동일
+
+
+def _safe(value):
+    """NaN/None을 그대로 JSON에 실으면 프론트에서 다루기 번거로워서 None으로 통일한다."""
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        return None
+    return float(value)
+
+
+def evaluate_conditions(
+    df: pd.DataFrame,
+    symbol: str = "",
+    *,
+    adx_threshold: float = RULE_ADX_THRESHOLD,
+    sma_period: int = RULE_SMA_PERIOD,
+    regime_sma_period: int = RULE_REGIME_SMA_PERIOD,
+    rsi_period: int = 14,
+    rsi_threshold: float = 50.0,
+) -> dict:
+    """마감된 봉만 담긴 df로 "지금 진입 조건에 얼마나 가까운지"를 계산한다.
+
+    후보 방향(candidate_side)은 **지금 종가가 SMA의 어느 쪽에 있는지**로 정한다 — 상향 돌파
+    신호는 "직전엔 SMA 아래, 지금은 위"라서 지금 아래에 있어야 다음 봉에 롱이 뜰 수 있고,
+    그 반대면 숏이다. 그래서 SMA 아래에 있으면 후보는 롱, 위에 있으면 숏이 된다.
+
+    proximity(0~1)는 세 요소의 곱이다:
+      - adx_score: ADX가 임계값에 얼마나 다다랐는지(넘으면 1)
+      - cross_score: 종가가 SMA에서 얼마나 가까운지(CROSS_NEAR_PCT 이내면 선형으로 1에 접근)
+      - rsi_score: RSI가 후보 방향 기준선에 얼마나 다다랐는지(넘으면 1)
+    상승 레짐이라 숏이 아예 막히는 경우엔 0으로 둔다 — 가격이 조금 움직인다고 풀리는 조건이
+    아니라서 "가깝다"고 표시하면 오해를 준다.
+    """
+    result = {
+        "symbol": symbol, "bars": len(df), "close": None, "sma": None, "sma_period": sma_period,
+        "distance_pct": None, "candidate_side": None,
+        "adx": None, "adx_threshold": adx_threshold, "adx_ok": False,
+        "rsi": None, "rsi_threshold": rsi_threshold, "rsi_ok": False,
+        "regime_sma": None, "regime_sma_period": regime_sma_period,
+        "above_regime": None, "regime_blocks_short": False,
+        "signal": None, "ready": False, "proximity": 0.0, "blockers": [],
+    }
+    if len(df) < MIN_BARS:
+        result["blockers"].append(f"캔들 부족 ({len(df)}/{MIN_BARS})")
+        return result
+
+    close = df["close"]
+    latest_close = float(close.iloc[-1])
+    sma_value = _safe(sma(close, sma_period).iloc[-1])
+    adx_value = _safe(adx(df, 14)["adx"].iloc[-1])
+    rsi_value = _safe(rsi(close, rsi_period).iloc[-1])
+    above_regime = is_above_long_sma(df, regime_sma_period)
+    regime_sma_value = _safe(close.rolling(regime_sma_period).mean().iloc[-1]) if regime_sma_period > 0 else None
+
+    # 실제 진입 판정은 실거래와 완전히 같은 함수로 얻는다(여기서 조건을 다시 구현하지 않는다).
+    raw_signal = detect_signal(df, adx_threshold=adx_threshold, sma_period=sma_period,
+                               rsi_period=rsi_period, rsi_threshold=rsi_threshold)
+    signal = apply_regime_filter(raw_signal, above_regime)
+
+    result.update({
+        "close": latest_close, "sma": sma_value, "adx": adx_value, "rsi": rsi_value,
+        "regime_sma": regime_sma_value, "above_regime": above_regime,
+        "signal": signal, "ready": signal is not None,
+    })
+
+    if sma_value is None or adx_value is None or rsi_value is None:
+        result["blockers"].append("지표 워밍업 중")
+        return result
+
+    distance_pct = (latest_close - sma_value) / sma_value * 100
+    candidate_side = "SHORT" if distance_pct > 0 else "LONG"
+    result["distance_pct"] = distance_pct
+    result["candidate_side"] = candidate_side
+
+    adx_ok = adx_value >= adx_threshold
+    rsi_ok = (rsi_value >= rsi_threshold) if candidate_side == "LONG" else (rsi_value <= (100 - rsi_threshold))
+    regime_blocks_short = bool(candidate_side == "SHORT" and above_regime)
+    result.update({"adx_ok": adx_ok, "rsi_ok": rsi_ok, "regime_blocks_short": regime_blocks_short})
+
+    blockers = []
+    if not adx_ok:
+        blockers.append(f"ADX {adx_value:.1f} < {adx_threshold:.0f}")
+    if not rsi_ok:
+        side_label = "롱" if candidate_side == "LONG" else "숏"
+        blockers.append(f"RSI {rsi_value:.1f} ({side_label} 방향 아님)")
+    if regime_blocks_short:
+        blockers.append(f"상승 레짐 (SMA{regime_sma_period} 위) — 숏 차단")
+    if not signal:
+        blockers.append(f"SMA{sma_period} 돌파 대기 ({distance_pct:+.2f}%)")
+    result["blockers"] = blockers
+
+    adx_score = min(1.0, adx_value / adx_threshold) if adx_threshold > 0 else 1.0
+    cross_score = max(0.0, 1.0 - abs(distance_pct) / CROSS_NEAR_PCT)
+    if candidate_side == "LONG":
+        rsi_score = min(1.0, rsi_value / rsi_threshold) if rsi_threshold > 0 else 1.0
+    else:
+        rsi_score = min(1.0, (100 - rsi_value) / rsi_threshold) if rsi_threshold > 0 else 1.0
+    result["proximity"] = 0.0 if regime_blocks_short else round(adx_score * cross_score * rsi_score, 4)
+    return result
+
+
+# --- 여러 종목을 한 번에 조회하는 계층 (대시보드 /api/conditions 와 텔레그램 /conditions 가 공유) ---
+
+CACHE_TTL_SECONDS = 20
+_cache: dict = {"key": None, "at": 0.0, "payload": None}
+
+
+def _fetch_closed_candles(symbol: str, limit: int):
+    """실거래 봇과 동일하게 캔들을 받아 마지막(아직 마감 안 된) 봉을 버린다.
+
+    화면/알림에 보이는 값이 봇이 실제로 판단하는 값과 달라지면 안 되므로, 트리밍 규칙을
+    `futures_rule_bot._evaluate_symbol`과 똑같이 맞춘다."""
+    from src.data.exchange import fetch_ohlcv_df
+    from src.data.futures_exchange import get_futures_market_data_client
+
+    df = fetch_ohlcv_df(get_futures_market_data_client(), symbol, timeframe=RULE_TIMEFRAME, limit=limit)
+    return df.iloc[:-1]
+
+
+def collect_conditions(symbols, *, ttl: float = CACHE_TTL_SECONDS, fetch=None) -> dict:
+    """여러 종목의 조건 근접도를 모아 proximity 내림차순으로 돌려준다.
+
+    종목마다 캔들을 새로 받아야 해서(레짐 SMA 때문에 402봉) 대시보드가 몇 초마다 부르면 낭비다 —
+    ttl초 동안은 같은 결과를 재사용한다. 대시보드와 텔레그램이 같은 캐시를 공유하지는 않는다
+    (별개 프로세스) — 각자의 프로세스 안에서만 유효하다.
+
+    한 종목 조회가 실패해도 나머지는 그대로 돌려준다(심볼별 예외 격리) — 실거래 봇의 run_once가
+    심볼 하나의 실패로 사이클 전체를 죽이지 않는 것과 같은 방침.
+    """
+    import time
+
+    symbols = list(symbols)
+    key = tuple(symbols)
+    now = time.time()
+    if _cache["payload"] is not None and _cache["key"] == key and (now - _cache["at"]) < ttl:
+        return _cache["payload"]
+
+    fetch = fetch or _fetch_closed_candles
+    limit = max(101, RULE_REGIME_SMA_PERIOD + 2) if RULE_REGIME_SMA_PERIOD > 0 else 101
+
+    rows, errors = [], []
+    for symbol in symbols:
+        try:
+            rows.append(evaluate_conditions(fetch(symbol, limit), symbol))
+        except Exception as exc:  # noqa: BLE001 - 심볼 하나의 실패가 전체를 막지 않게
+            errors.append({"symbol": symbol, "message": str(exc)})
+
+    rows.sort(key=lambda r: (r["ready"], r["proximity"]), reverse=True)
+    payload = {
+        "timeframe": RULE_TIMEFRAME, "adx_threshold": RULE_ADX_THRESHOLD,
+        "sma_period": RULE_SMA_PERIOD, "regime_sma_period": RULE_REGIME_SMA_PERIOD,
+        "cross_near_pct": CROSS_NEAR_PCT, "symbols": rows, "errors": errors,
+        "generated_at": now,
+    }
+    _cache.update({"key": key, "at": now, "payload": payload})
+    return payload

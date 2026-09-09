@@ -24,6 +24,9 @@
 - `src/core/futures_strategy.py` — 규칙 기반 신호 탐지(ADX+SMA20돌파+RSI), 손절/익절가 계산
 - `src/execution/` — 주문 실행, 포지션 추적 (`orders.py`=현물, `futures_orders.py`=선물)
 - `dashboard/app.py` — 선물 봇 상태를 보여주는 Flask 웹 대시보드 (http://127.0.0.1:5055)
+- `src/core/signal_status.py` — "진입 조건에 지금 얼마나 가까운지" 계산. 대시보드
+  `/api/conditions`와 텔레그램 `/conditions`가 **같은 함수**를 쓴다(조건을 두 군데 적으면
+  실거래 로직과 어긋나므로). 실제 판정은 `futures_strategy`를 그대로 호출하고 거리/점수만 덧붙인다.
 - `src/telegram_bot.py` / `scripts/run_telegram_bot.py` — 텔레그램 알림 + 원격 시작/중지 (아래
   "텔레그램 알림" 절 참고), `src/data/public_ip.py` — 공인 IP 조회(대시보드와 공유)
 - `journal/trades.jsonl` — 현물, `journal/futures_trades.jsonl` — 선물(Claude), `journal/futures_rule_trades.jsonl` — 선물(규칙기반)
@@ -48,6 +51,25 @@
   `fetch_ohlcv_df(..., limit=101)`로 한 봉 여유를 더 받은 뒤 `df.iloc[:-1]`로 마지막(진행중) 봉을
   버리고서 `detect_signal`/`entry_price` 계산에 쓴다 — 백테스트가 검증한 조건과 정확히 같아짐.
   새로 캔들 조회하는 코드를 짤 땐 항상 이 트리밍을 잊지 말 것.
+- **같은 신호 봉으로는 두 번 진입하지 않는다**(2026-09-07 추가). 미마감 캔들 트리밍 때문에
+  `detect_signal`이 보는 마지막 마감 봉은 그 시간봉 내내 고정이고, 포지션이 도중에 청산되면
+  같은 신호가 `POLL_INTERVAL_SECONDS`마다 계속 재발생해 재진입이 무한 반복된다(실계좌 ZEC가
+  한 시간에 같은 값으로 5번 진입, 수수료만 태운 왕복으로 3분 만에 연속손실 5회 → 서킷브레이커).
+  `_evaluate_symbol`이 신호 봉 시각을 `signal_bar_timestamp`로 저널의 `entered` 기록에 남기고,
+  같은 값이면 `skipped_same_signal_bar`로 건너뛴다 — 백테스트(`run_backtest`)가 봉당 한 번만
+  진입하는 것과 의미론을 맞추는 것이 목적. 새 진입 경로를 만들면 이 잠금을 반드시 같이 걸 것.
+- **진입 직전 신호가-현재가 괴리를 검사한다**(`MAX_ENTRY_PRICE_DRIFT_R`, 기본 0.5). 손절/익절가가
+  전부 신호 봉 종가 기준이라 현재가가 손절폭의 절반 넘게 벌어지면 그 브라켓은 이미 무의미하다 —
+  진입 즉시 손절되거나 브라켓이 -2021 "Order would immediately trigger"로 거부된다. 현재가는
+  티커를 새로 조회하지 않고 트리밍 전 마지막(진행중) 봉의 종가를 쓴다.
+- **상승 레짐에서는 숏 진입을 막는다**(`RULE_REGIME_SMA_PERIOD`, 기본 400 — 0이면 필터 off).
+  종가가 1시간봉 SMA400 위면 숏 신호를 버린다(롱은 안 건드림). 4분할 워크포워드에서 필터 없는
+  현재 설정은 마지막 구간 -5.4R로 FAIL, SMA400/700 숏차단만 전 구간 양수 PASS라서 총R이 더 나은
+  400을 채택(`scripts/run_regime_filter_walkforward.py`). 규칙의 유일한 정의는
+  `futures_strategy.apply_regime_filter()`이고 백테스트와 실거래 봇이 둘 다 이걸 부른다 —
+  조건을 두 군데 따로 적지 말 것. 이 필터 때문에 캔들 조회 개수가 101 → `SMA기간+2`로 늘었다.
+- `skipped_same_signal_bar`/`skipped_price_drift`는 `_SILENT_EVENTS`라 저널에 안 남는다(매
+  사이클 반복되므로) — 현재 사이클 결과에는 실려서 대시보드로는 보인다.
 - 선물은 현물과 달리 `enable_demo_trading(True)`로 연결한다(구 testnet.binancefuture.com 방식인
   `set_sandbox_mode`가 아님). 키는 실제 바이낸스 계정 로그인 후 demo.binance.com/en/my/settings/api-management 에서 발급.
 - `client.fetch_my_trades(symbol, limit=N)`을 `since` 없이 부르면 "최신 N개"가 아니라 계좌에 쌓인

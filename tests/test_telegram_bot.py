@@ -330,3 +330,51 @@ def test_run_once_replies_help_and_does_not_touch_bot_process():
     mock_start.assert_not_called()
     mock_stop.assert_not_called()
     assert mock_send.call_args_list[0].args[0] == tb._HELP_TEXT
+
+
+def test_conditions_command_is_dispatched():
+    assert tb.dispatch_command("/conditions") == ("", "conditions")
+
+
+def test_format_conditions_renders_waiting_symbols(monkeypatch):
+    """신호가 없을 때 '무엇을 기다리는 중인지'가 보여야 한다."""
+    monkeypatch.setattr(tb, "get_futures_client", lambda env: _raise_(RuntimeError("no keys")))
+    monkeypatch.setattr(tb, "collect_conditions", lambda symbols: {
+        "timeframe": "1h", "adx_threshold": 30.0, "sma_period": 10, "regime_sma_period": 400,
+        "symbols": [{
+            "symbol": "BTC/USDT:USDT", "ready": False, "signal": None, "candidate_side": "LONG",
+            "proximity": 0.62, "distance_pct": -0.14, "sma_period": 10,
+            "adx": 23.1, "adx_threshold": 30.0, "rsi": 42.3,
+            "blockers": ["ADX 23.1 < 30", "SMA10 돌파 대기 (-0.14%)"],
+        }],
+        "errors": [],
+    })
+
+    text = tb.format_conditions()
+    assert "BTC 롱 대기" in text
+    assert "62%" in text
+    assert "ADX 23.1/30" in text
+    assert "SMA10 돌파 대기" in text
+
+
+def test_format_conditions_highlights_a_live_signal(monkeypatch):
+    monkeypatch.setattr(tb, "get_futures_client", lambda env: _raise_(RuntimeError("no keys")))
+    monkeypatch.setattr(tb, "collect_conditions", lambda symbols: {
+        "timeframe": "1h", "adx_threshold": 30.0, "sma_period": 10, "regime_sma_period": 400,
+        "symbols": [{"symbol": "ZEC/USDT:USDT", "ready": True, "signal": "SHORT",
+                     "candidate_side": "SHORT", "proximity": 1.0, "blockers": []}],
+        "errors": [],
+    })
+    assert "ZEC — 지금 숏 신호" in tb.format_conditions()
+
+
+def test_format_conditions_survives_a_collect_failure(monkeypatch):
+    """조회가 통째로 실패해도 예외를 올리지 않고 사유를 돌려줘야 한다 — 알림 루프를 죽이면 안 된다."""
+    monkeypatch.setattr(tb, "get_futures_client", lambda env: _raise_(RuntimeError("no keys")))
+    monkeypatch.setattr(tb, "collect_conditions",
+                        lambda symbols: _raise_(TimeoutError("backend timeout")))
+    assert "조건 조회 실패" in tb.format_conditions()
+
+
+def _raise_(exc):
+    raise exc
