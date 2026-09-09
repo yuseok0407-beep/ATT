@@ -9,11 +9,13 @@ from src.core.signal_status import CROSS_NEAR_PCT, MIN_BARS, evaluate_conditions
 SMA_PERIOD = 10
 
 
-def _df(closes):
+def _df(closes, hl_pct=0.005):
+    """고가/저가 폭은 가격 대비 비율로 잡는다 — 고정폭으로 두면 가격이 오를수록 ATR%가 작아져
+    저변동 필터(MIN_ATR_TO_STOP_RATIO)에 걸려버린다."""
     closes = np.asarray(closes, dtype=float)
     return pd.DataFrame({
         "timestamp": pd.date_range("2026-01-01", periods=len(closes), freq="h"),
-        "high": closes + 0.3, "low": closes - 0.3, "close": closes,
+        "high": closes * (1 + hl_pct), "low": closes * (1 - hl_pct), "close": closes,
     })
 
 
@@ -242,3 +244,26 @@ def test_collect_requests_enough_candles_for_the_regime_sma():
     expected = (max(101, signal_status.RULE_REGIME_SMA_PERIOD + 2)
                 if signal_status.RULE_REGIME_SMA_PERIOD > 0 else 101)
     assert seen["limit"] == expected
+
+
+def test_low_volatility_blocks_the_signal_like_the_live_bot_does():
+    """봇은 저변동이면 진입을 건너뛴다 — 화면이 '진입 가능'으로 보이면 안 된다."""
+    df = _df(_trend(), hl_pct=0.0005)   # ATR이 손절폭 대비 한참 아래
+    result = evaluate_conditions(df, regime_sma_period=0)
+    assert result["atr_ok"] is False
+    assert result["atr_ratio"] < result["min_atr_ratio"]
+    assert result["ready"] is False
+    assert result["proximity"] == 0.0
+    assert any("저변동" in b for b in result["blockers"])
+
+
+def test_volatility_gate_passes_when_atr_clears_the_floor():
+    result = evaluate_conditions(_df(_trend()), regime_sma_period=0)
+    assert result["atr_ok"] is True
+    assert result["atr_ratio"] >= result["min_atr_ratio"]
+    assert not any("저변동" in b for b in result["blockers"])
+
+
+def test_volatility_gate_off_when_ratio_is_zero():
+    result = evaluate_conditions(_df(_trend(), hl_pct=0.0005), regime_sma_period=0, min_atr_ratio=0)
+    assert result["atr_ok"] is True

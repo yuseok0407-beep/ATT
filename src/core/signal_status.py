@@ -14,12 +14,20 @@
 import pandas as pd
 
 from src.core.config import (
+    MIN_ATR_TO_STOP_RATIO,
     RULE_ADX_THRESHOLD,
     RULE_REGIME_SMA_PERIOD,
     RULE_SMA_PERIOD,
     RULE_TIMEFRAME,
+    STOP_LOSS_PCT,
 )
-from src.core.futures_strategy import apply_regime_filter, detect_signal, is_above_long_sma
+from src.core.futures_strategy import (
+    apply_regime_filter,
+    atr_to_stop_ratio,
+    detect_signal,
+    is_above_long_sma,
+    passes_volatility_floor,
+)
 from src.core.indicators import adx, rsi, sma
 
 # SMA까지의 거리가 이 % 이내면 "한 봉 안에 닿을 수 있는 거리"로 보고 근접도를 1에 가깝게 준다.
@@ -50,6 +58,8 @@ def evaluate_conditions(
     regime_sma_period: int = RULE_REGIME_SMA_PERIOD,
     rsi_period: int = 14,
     rsi_threshold: float = 50.0,
+    min_atr_ratio: float = MIN_ATR_TO_STOP_RATIO,
+    stop_loss_pct: float = STOP_LOSS_PCT,
 ) -> dict:
     """마감된 봉만 담긴 df로 "지금 진입 조건에 얼마나 가까운지"를 계산한다.
 
@@ -71,6 +81,7 @@ def evaluate_conditions(
         "rsi": None, "rsi_threshold": rsi_threshold, "rsi_ok": False,
         "regime_sma": None, "regime_sma_period": regime_sma_period,
         "above_regime": None, "regime_blocks_short": False,
+        "atr_ratio": None, "min_atr_ratio": min_atr_ratio, "atr_ok": False,
         "signal": None, "ready": False, "proximity": 0.0, "blockers": [],
     }
     if len(df) < MIN_BARS:
@@ -89,10 +100,15 @@ def evaluate_conditions(
     raw_signal = detect_signal(df, adx_threshold=adx_threshold, sma_period=sma_period,
                                rsi_period=rsi_period, rsi_threshold=rsi_threshold)
     signal = apply_regime_filter(raw_signal, above_regime)
+    atr_ratio = atr_to_stop_ratio(df, stop_loss_pct)
+    atr_ok = passes_volatility_floor(atr_ratio, min_atr_ratio)
+    if not atr_ok:
+        signal = None  # 실거래 봇도 여기서 건너뛴다 — 화면이 "진입 가능"으로 보이면 안 된다
 
     result.update({
         "close": latest_close, "sma": sma_value, "adx": adx_value, "rsi": rsi_value,
         "regime_sma": regime_sma_value, "above_regime": above_regime,
+        "atr_ratio": atr_ratio, "atr_ok": atr_ok,
         "signal": signal, "ready": signal is not None,
     })
 
@@ -118,6 +134,8 @@ def evaluate_conditions(
         blockers.append(f"RSI {rsi_value:.1f} ({side_label} 방향 아님)")
     if regime_blocks_short:
         blockers.append(f"상승 레짐 (SMA{regime_sma_period} 위) — 숏 차단")
+    if not atr_ok:
+        blockers.append(f"저변동 (ATR이 손절폭의 {atr_ratio:.2f}배 < {min_atr_ratio})")
     if not signal:
         blockers.append(f"SMA{sma_period} 돌파 대기 ({distance_pct:+.2f}%)")
     result["blockers"] = blockers
@@ -128,7 +146,11 @@ def evaluate_conditions(
         rsi_score = min(1.0, rsi_value / rsi_threshold) if rsi_threshold > 0 else 1.0
     else:
         rsi_score = min(1.0, (100 - rsi_value) / rsi_threshold) if rsi_threshold > 0 else 1.0
-    result["proximity"] = 0.0 if regime_blocks_short else round(adx_score * cross_score * rsi_score, 4)
+    # 저변동도 레짐 차단과 같이 0으로 둔다 — 가격이 조금 움직인다고 풀리는 조건이 아니라서
+    # "가깝다"고 표시하면 오해를 준다(ATR은 봉이 여러 개 쌓여야 바뀐다).
+    atr_score = min(1.0, atr_ratio / min_atr_ratio) if (min_atr_ratio > 0 and atr_ratio) else 1.0
+    blocked = regime_blocks_short or not atr_ok
+    result["proximity"] = 0.0 if blocked else round(adx_score * cross_score * rsi_score * atr_score, 4)
     return result
 
 
