@@ -4,30 +4,15 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-def _require(name: str) -> str:
-    value = os.getenv(name)
-    if not value:
-        raise RuntimeError(f"{name} is not set in .env")
-    return value
-
-
-BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
-BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
-USE_TESTNET = os.getenv("USE_TESTNET", "true").lower() == "true"
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-5")
-CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", "0.6"))
-
-# 선물(futures) 전용 설정 — 바이낸스 선물 테스트넷(testnet.binancefuture.com)은 현물
-# 테스트넷(testnet.binance.vision)과 별개 사이트라 키도 별도로 발급받아야 한다.
-# 아래 BINANCE_FUTURES_API_KEY/SECRET은 데모 트레이딩(demo.binance.com) 전용 키다.
+# 데모 트레이딩(demo.binance.com) 전용 키 — 바이낸스가 옛 선물 테스트넷
+# (testnet.binancefuture.com)을 폐지하고 실제 계정으로 로그인해 쓰는 데모 트레이딩으로
+# 통합했다. 현물의 set_sandbox_mode()가 아니라 enable_demo_trading()으로 붙는다.
 BINANCE_FUTURES_API_KEY = os.getenv("BINANCE_FUTURES_API_KEY", "")
 BINANCE_FUTURES_API_SECRET = os.getenv("BINANCE_FUTURES_API_SECRET", "")
 # 실계좌(진짜 자금) 전용 키 — binance.com 실제 계정의 API 관리에서 발급(데모 계정 아님).
 # 데모와 실계좌를 동시에 운영하기 위한 별도 키 쌍(2026-08-22, get_futures_client(env=...) 참고).
 BINANCE_FUTURES_LIVE_API_KEY = os.getenv("BINANCE_FUTURES_LIVE_API_KEY", "")
 BINANCE_FUTURES_LIVE_API_SECRET = os.getenv("BINANCE_FUTURES_LIVE_API_SECRET", "")
-FUTURES_SYMBOL = os.getenv("FUTURES_SYMBOL", "BTC/USDT:USDT")
 LEVERAGE = int(os.getenv("LEVERAGE", "10"))
 MARGIN_MODE = os.getenv("MARGIN_MODE", "isolated")
 STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.0125"))  # 진입가 대비 손절 거리 (기본 1.25%)

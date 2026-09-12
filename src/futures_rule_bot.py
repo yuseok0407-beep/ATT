@@ -31,8 +31,8 @@ from src.core.futures_strategy import (
 )
 from src.core.risk import MAX_CONSECUTIVE_LOSSES, MAX_DAILY_LOSS_PCT, check_circuit_breaker
 from src.core.state import compute_consecutive_losses, get_daily_pnl_pct
-from src.data.exchange import fetch_ohlcv_df
 from src.data.futures_exchange import (
+    fetch_ohlcv_df,
     get_futures_balance,
     get_futures_client,
     get_futures_market_data_client,

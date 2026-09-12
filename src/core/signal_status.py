@@ -165,7 +165,7 @@ def _fetch_closed_candles(symbol: str, limit: int):
 
     화면/알림에 보이는 값이 봇이 실제로 판단하는 값과 달라지면 안 되므로, 트리밍 규칙을
     `futures_rule_bot._evaluate_symbol`과 똑같이 맞춘다."""
-    from src.data.exchange import fetch_ohlcv_df
+    from src.data.futures_exchange import fetch_ohlcv_df
     from src.data.futures_exchange import get_futures_market_data_client
 
     df = fetch_ohlcv_df(get_futures_market_data_client(), symbol, timeframe=RULE_TIMEFRAME, limit=limit)

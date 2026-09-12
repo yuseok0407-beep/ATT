@@ -1,28 +1,37 @@
-# auto2 — 자동 트레이딩 봇
+# auto2 — 바이낸스 선물 자동 트레이딩 봇
 
-바이낸스(Binance) 대상 자동 트레이딩 봇. 리서치 → 레짐 감지 → 배분 → 리스크 검증 → Claude 의사결정 → 주문 실행 → 저널링 순서로 동작.
+USDT-M 선물(레버리지 롱/숏)을 **순수 규칙 기반**으로 상시 감시한다(외부 API 판단 없음):
+신호 탐지 → 리스크 검증 → 진입 + 손절/익절 브라켓 → 저널링 → 대시보드/텔레그램.
+데모 계좌와 실계좌를 독립 프로세스로 동시에 운영한다.
 
 새 세션을 시작할 때는 `UPDATE_LOG.md`의 최근(위쪽) 항목 몇 개를 먼저 읽을 것 — 최근 발견된 실전 버그,
 진행 중이던 전략 실험, 사용자에게 아직 전달 안 한 후속 조치 등이 여기 시간순으로 기록되어 있다.
 
+**2026-09-12에 안 쓰는 계열 3개를 삭제했다**(현물 리밸런싱 전체, Claude 기반 선물 파이프라인,
+대안 전략 실험 모듈 4종과 일회성 스윕 스크립트). 지금 이 저장소에 Claude API 호출은 없고
+`anthropic` 의존도 없다. 옛 코드가 필요하면 git 이력에 그대로 있다(`git log -- src/pipeline.py`).
+
 ## 규칙
-- 기본값은 항상 테스트넷(`USE_TESTNET=true`). 실거래 전환은 사용자 명시적 승인 필요.
+- 기본은 항상 데모 계좌(`env="demo"`). 실계좌 전환은 사용자 명시적 승인 필요.
 - API 키는 `.env`에만 저장, 절대 커밋하지 않음.
-- 리스크 관리(`src/core/risk.py`)를 거치지 않은 주문은 실행 금지.
+- 리스크 관리(`src/core/risk.py`의 서킷브레이커, `futures_risk.py`의 사이징/청산가 검증)를 거치지
+  않은 주문은 실행 금지.
 - 새 모듈 추가 시 `tests/`에 대응 테스트 작성.
-- **선물 규칙봇/대시보드는 데모와 실계좌를 동시에 운영한다**(2026-08-22) — 아래 "데모/실계좌 동시
-  운영" 절 참고. 전역 `USE_TESTNET`이 아니라 함수마다 명시적으로 넘기는 `env: "demo"|"live"`가
-  이제 진짜 계정 여부를 결정한다.
+- **데모와 실계좌를 동시에 운영한다**(2026-08-22) — 아래 "데모/실계좌 동시 운영" 절 참고.
+  전역 설정이 아니라 함수마다 명시적으로 넘기는 `env: "demo"|"live"`가 계정을 결정한다
+  (옛 현물 시절의 `USE_TESTNET`은 2026-09-12에 제거됨).
 
 ## 구조
-- `src/data/` — 거래소 연동, 시세/지표 수집 (`exchange.py`=현물, `futures_exchange.py`=선물)
-- `src/core/` — 레짐 감지, 포트폴리오 배분, 리스크 로직 (`risk.py`=현물, `futures_risk.py`=레버리지)
-- `src/core/decision.py` / `futures_decision.py` — Claude 의사결정 (현물 리밸런싱 / 선물 롱숏)
-- `src/pipeline.py` — 현물 리밸런싱 파이프라인 (BTC/ETH 다중 종목)
-- `src/futures_pipeline.py` — 선물 롱숏, Claude가 매 사이클 판단 (구버전 경로, 현재는 미사용 — 아래 참고)
-- `src/futures_rule_bot.py` — 선물 롱숏, **순수 규칙 기반 상시 감시** (현재 쓰는 경로, Claude 미사용)
-- `src/core/futures_strategy.py` — 규칙 기반 신호 탐지(ADX+SMA20돌파+RSI), 손절/익절가 계산
-- `src/execution/` — 주문 실행, 포지션 추적 (`orders.py`=현물, `futures_orders.py`=선물)
+- `src/data/futures_exchange.py` — 거래소 연동(클라이언트 생성, 잔고/포지션/레버리지 조회) +
+  캔들 조회(`fetch_ohlcv_df`, `OHLCV_COLUMNS`). **마지막 봉은 아직 마감 안 된 봉이다**(아래 주의).
+- `src/core/` — 전략/리스크 로직. `futures_strategy.py`(신호·필터·브라켓가), `futures_risk.py`
+  (레버리지 사이징·청산가), `risk.py`(서킷브레이커 임계치), `indicators.py`(ADX/RSI/SMA/ATR),
+  `config.py`(.env 설정), `signal_status.py`(조건 근접도), `state.py`(연속손실·일일손익)
+- `src/futures_rule_bot.py` — 감시 루프 본체(테스트 가능한 핵심 로직), `scripts/run_futures_bot.py`는
+  얇은 무한루프 진입점. 이 2계층 패턴을 텔레그램 봇도 같이 쓴다.
+- `src/backtest/` — 백테스트 하네스(`engine`/`data`/`report`/`optimize`). 실거래와 **같은**
+  `futures_strategy`를 호출한다 — 전략 조건을 여기 따로 적지 말 것.
+- `src/execution/futures_orders.py` — 주문 실행(브라켓 동시 발주, 고아 주문 정리)
 - `dashboard/app.py` — 선물 봇 상태를 보여주는 Flask 웹 대시보드 (http://127.0.0.1:5055)
 - `src/core/signal_status.py` — "진입 조건에 지금 얼마나 가까운지" 계산. 대시보드
   `/api/conditions`와 텔레그램 `/conditions`가 **같은 함수**를 쓴다(조건을 두 군데 적으면
@@ -42,11 +51,11 @@
   읽기 캐시**를 들고 있다(2026-09-12) — 사이클 하나가 같은 저널을 10~20번 다시 훑는 구조라
   저널이 커질수록 그 비용만 늘었다. 돌려주는 리스트는 캐시와 같은 객체이므로 **호출자는 읽기만
   할 것**(값을 바꿔야 하면 `performance.resolve_closed_trades`처럼 `dict(entry)`로 복사한다).
-- `journal/trades.jsonl` — 현물, `journal/futures_trades.jsonl` — 선물(Claude), `journal/futures_rule_trades.jsonl` — 선물(규칙기반)
+- `journal/futures_rule_trades.jsonl` — 데모 저널, `.live.jsonl` — 실계좌 저널(전부 `.live.` 인픽스로 분리).
+  `journal/trades.jsonl`과 `futures_trades.jsonl`은 2026-09-12에 삭제한 현물/Claude 경로가 남긴 과거
+  기록이라 읽는 코드가 더는 없다 — 이력 보존용으로만 남겨뒀다(gitignore 대상).
 
 ## 선물(레버리지) 관련 특히 주의할 것
-- **현재 쓰는 건 `futures_rule_bot.py`(규칙 기반)다.** `futures_pipeline.py`/`futures_decision.py`(Claude 기반)는
-  사용자 요청으로 순수 규칙 기반으로 전환하면서 남겨둔 이전 경로 — 새 기능은 `futures_rule_bot.py` 쪽에 추가할 것.
 - 손절폭은 `STOP_LOSS_PCT`, 익절은 손절폭×`TAKE_PROFIT_RR`로 코드가 고정 결정한다.
 - 포지션 진입은 항상 반대방향 reduceOnly STOP_MARKET(손절) + TAKE_PROFIT_MARKET(익절) 주문을 동시에 건다
   (`futures_orders.open_position_with_bracket`).

@@ -1,108 +1,94 @@
-# auto2 — 바이낸스 자동 트레이딩 봇
+# auto2 — 바이낸스 선물 자동 트레이딩 봇
 
-리서치 → 레짐 감지 → 포트폴리오 배분 → 리스크 게이트 → Claude 의사결정 → 주문 실행 → 저널링 순서로 동작하는 자동 트레이딩 봇. 기본값은 항상 바이낸스 **테스트넷**(가상 자금).
+USDT-M 선물(레버리지 롱/숏)을 **순수 규칙 기반**으로 상시 감시하다가 조건이 맞으면 손절+익절을
+동시에 걸고 진입하는 봇. 외부 API(Claude 등) 호출이 없어 운영 비용이 들지 않는다.
+데모 트레이딩 계좌와 실계좌를 **완전히 독립된 프로세스로 동시에** 운영한다.
 
-## 수동 실행
+구성은 네 덩어리다.
+
+| 프로세스 | 하는 일 | 실행 |
+|---|---|---|
+| 감시 봇 | 신호 탐지 → 리스크 검증 → 진입/브라켓 주문 → 저널링 | `scripts/run_futures_bot.py --env demo\|live` |
+| 웹 대시보드 | 포지션/성과/조건 근접도/차단 통계 조회, 봇 시작·중지 | `dashboard/app.py` (http://127.0.0.1:5055) |
+| 텔레그램 봇 | 진입·청산·경보 푸시, 폰에서 원격 시작·중지 | `scripts/run_telegram_bot.py` |
+| 백테스트 | 전략/파라미터/심볼 검증(OOS·워크포워드) | `scripts/run_*_backtest.py` 등 |
+
+> 2026-09-12에 현물 리밸런싱 계열과 Claude 기반 선물 파이프라인(둘 다 2026-08 이후 미사용),
+> 대안 전략 실험 모듈을 전부 걷어냈다. 이력은 git에 남아 있다(`git log -- src/pipeline.py`).
+
+## 빠른 시작
 
 ```
-./venv/Scripts/python.exe scripts/scheduled_run.py
+./venv/Scripts/python.exe -m pip install -r requirements.txt
+copy .env.example .env                                  # 키 입력 (아래 "키 발급" 참고)
+./venv/Scripts/python.exe scripts/futures_check_connection.py --env demo   # 연결 확인
+./venv/Scripts/python.exe scripts/run_futures_bot.py --env demo            # 감시 시작
+start_dashboard.bat                                     # 대시보드 (별도 창)
 ```
 
-1회 사이클(리서치 → 배분 → Claude 검토 → 필요시 테스트넷 주문)을 실행하고 `logs/scheduler.log`에 기록을 남긴다.
+## 전략 (순수 규칙, `src/core/futures_strategy.py`)
 
-## 자동화(스케줄러) 등록 — 아직 비활성화 상태
+진입 판단은 **반드시 마감된 캔들만** 쓴다 — 바이낸스가 돌려주는 마지막 봉은 아직 진행 중이라
+그 값으로 판단하면 백테스트가 검증한 적 없는 일시적 스파이크에 반응한다.
 
-준비는 되어 있지만 사용자 요청으로 아직 등록하지 않았다. 등록하려면 PowerShell(관리자 권한 불필요)에서:
+**신호** (`RULE_TIMEFRAME`, 기본 1시간봉)
+- ADX(14) ≥ `RULE_ADX_THRESHOLD`(기본 30) — 추세가 확인된 구간에서만
+- 종가가 SMA(`RULE_SMA_PERIOD`, 기본 10)를 **돌파하는 순간**(레벨이 아니라 크로스) + RSI(14)가 50 기준 같은 방향
+- 롱: 상향 돌파 + RSI≥50 / 숏: 하향 돌파 + RSI≤50
 
-```powershell
-$action = New-ScheduledTaskAction -Execute "<프로젝트 경로>\venv\Scripts\python.exe" -Argument "<프로젝트 경로>\scripts\scheduled_run.py"
-$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Hours 1) -RepetitionDuration ([TimeSpan]::MaxValue)
-Register-ScheduledTask -TaskName "AutoTradingBot" -Action $action -Trigger $trigger -Description "1시간마다 트레이딩 봇 사이클 실행"
+**진입을 막는 필터** (전부 백테스트·워크포워드로 검증해서 넣은 것들 — 근거는 `UPDATE_LOG.md`)
+- 상승 레짐 숏 차단: 종가가 SMA(`RULE_REGIME_SMA_PERIOD`, 기본 400) 위면 숏 신호를 버린다
+- 저변동 차단: ATR이 손절폭의 `MIN_ATR_TO_STOP_RATIO`(기본 0.64)배 미만이면 건너뛴다
+- 같은 신호 봉 재진입 잠금 — 한 봉으로는 한 번만 진입한다(백테스트와 의미를 맞춤)
+- 진입가 괴리 검사: 현재가가 신호 봉 종가에서 손절폭의 `MAX_ENTRY_PRICE_DRIFT_R`(기본 0.5)배 넘게 벌어지면 건너뛴다
+
+**손절/익절** — 코드가 고정 결정한다(판단 여지 없음)
+- 손절: 진입가 대비 `STOP_LOSS_PCT`(기본 1.25%)
+- 익절: 손절폭 × `TAKE_PROFIT_RR`(기본 2.0배)
+- 진입과 **동시에** 반대방향 reduceOnly STOP_MARKET + TAKE_PROFIT_MARKET을 건다. 바이낸스 선물엔
+  네이티브 OCO가 없어 하나가 체결되면 나머지가 고아로 남으므로, 감시 루프가 포지션이 없을 때마다
+  `cleanup_stale_orders()`로 정리한다.
+- 진입 전 `check_stop_before_liquidation()`으로 손절가가 청산가 대비 충분히 여유 있는지 검증한다.
+
+**리스크 한도**
+- 거래당 리스크 `FUTURES_RISK_PER_TRADE`(마진 자산 대비), 동시보유 `MAX_CONCURRENT_POSITIONS`
+- 서킷브레이커: 일일 손실 `MAX_DAILY_LOSS_PCT`(5%) 또는 연속손실 `MAX_CONSECUTIVE_LOSSES`(5회)
+- 손절 주문이 없는 포지션이 감지되면 저널에 남기고 대시보드 배너 + 텔레그램으로 즉시 알린다
+
+## 백테스트 / 검증
+
+```
+./venv/Scripts/python.exe scripts/run_backtest.py                      # 현재 설정 그대로
+./venv/Scripts/python.exe scripts/run_symbol_screen_backtest.py        # 종목 스크리닝
+./venv/Scripts/python.exe scripts/run_symbol_oos_backtest.py           # 종목 아웃오브샘플
+./venv/Scripts/python.exe scripts/run_oos_backtest.py                  # 전·후반 분할
+./venv/Scripts/python.exe scripts/run_regime_filter_walkforward.py     # 4분할 워크포워드
+./venv/Scripts/python.exe scripts/run_hyperopt.py                      # 파라미터 그리드서치
 ```
 
-등록 후 PC가 켜져 있는 동안 1시간마다 자동 실행되며, 그때마다 Claude API 호출 비용이 발생한다(월 예산 관련 계산은 대화 기록 참고). 중단하려면:
+**설정을 바꿔 실거래에 반영할 땐 워크포워드를 통과한 것만 쓸 것.** 봇이 시작할 때 그 시점의 설정을
+저널에 `config_changed`로 남기므로(2026-09-12), 나중에 대시보드 자산곡선에서 "어떤 규칙으로 낸
+구간인지"를 경계선으로 확인할 수 있다.
 
-```powershell
-Unregister-ScheduledTask -TaskName "AutoTradingBot" -Confirm:$false
-```
-
-## 실거래 전환 (현물)
-
-`.env`의 `USE_TESTNET=false`로 바꾸면 실거래 모드가 되지만, `src/execution/orders.py`의 `execute_order`는 `confirm_live=True`를 명시적으로 넘기지 않으면 주문을 차단하도록 이중 안전장치가 걸려 있다. 실거래 전환은 충분한 테스트넷 검증 후 별도로 진행할 것.
-
----
-
-## 선물(BTC/USDT, 10x 레버리지 롱/숏)
-
-현물 리밸런싱 봇과는 완전히 별개의 파이프라인이다. `src/futures_pipeline.py` / `scripts/scheduled_futures_run.py`.
-
-### 안전장치 요약
-
-- 손절폭은 `.env`의 `STOP_LOSS_PCT`(기본 1.25%)로 **코드가 고정**한다 — Claude는 방향(LONG/SHORT/CLOSE/HOLD)과 확신도만 판단하고 손절가는 건드릴 수 없다.
-- 포지션을 열 때마다 반대방향 `reduceOnly` STOP_MARKET 주문을 동시에 걸어, 손절 없는 레버리지 포지션이 존재할 수 없게 한다.
-- 진입 전 `check_stop_before_liquidation()`으로 손절가가 청산가 대비 최소 20% 이상 여유가 있는지 검증하고, 부족하면 진입 자체를 거부한다.
-- `src/execution/futures_orders.py`도 이 파이프라인이 `env="live"`로 호출될 때 `confirm_live=True` 없이는 주문을 차단한다(아래 "상시 감시 봇" 절의 데모/실계좌 동시 운영과 같은 안전장치를 공유).
-- 청산가 추정치는 근사값이다 — 격리마진·단일 티어 가정이며, 실제 청산가는 포지션 진입 후 거래소가 돌려주는 값(`liquidationPrice`)을 기준으로 삼아야 한다.
-
-### 선물 데모 트레이딩 키 발급 (2026년 기준, 현물 테스트넷과 별개!)
+## 선물 데모 트레이딩 키 발급 (현물 테스트넷과 별개!)
 
 바이낸스가 예전 독립 테스트넷(GitHub 로그인 방식의 testnet.binancefuture.com)을 폐지하고, 실제
 계정으로 로그인해서 쓰는 "Demo Trading"으로 통합했다. `testnet.binancefuture.com`으로 들어가면
 이제 로그인 화면 없이 `demo.binance.com`으로 리다이렉트된다.
 
-1. https://accounts.binance.com 에서 **실제 바이낸스 계정으로 로그인**(또는 가입) — 이메일/전화번호, Google, Apple, Telegram 로그인 지원
+1. https://accounts.binance.com 에서 **실제 바이낸스 계정으로 로그인**(또는 가입)
 2. https://demo.binance.com/en/my/settings/api-management 접속 → 데모 트레이딩 전용 API 키 발급
    (실거래 키와는 별개, demo-fapi.binance.com에서만 동작함)
-3. `.env`에 추가:
-   ```
-   BINANCE_FUTURES_API_KEY=...
-   BINANCE_FUTURES_API_SECRET=...
-   ```
+3. `.env`에 `BINANCE_FUTURES_API_KEY` / `BINANCE_FUTURES_API_SECRET` 입력
 
-코드에서는 `client.enable_demo_trading(True)`로 이 데모 환경에 연결한다(현물처럼 `set_sandbox_mode`가 아님) — `src/data/futures_exchange.py` 참고.
-
-### 연결 확인 및 1회 실행
-
-```
-./venv/Scripts/python.exe scripts/futures_check_connection.py
-./venv/Scripts/python.exe scripts/scheduled_futures_run.py
-```
-
-### 실거래 전환 (선물) — 특히 신중히
-
-이 파이프라인(`futures_pipeline.py`)은 현재 미사용 경로다(아래 "상시 감시 봇" 참고, 실제로 쓰는 건
-그쪽). `get_futures_client()`는 이제 `env` 인자로 데모/실계좌를 명시적으로 구분한다(2026-08-22,
-예전처럼 `USE_TESTNET=false`만으로는 더 이상 실계좌로 안 붙는다) — 이 파이프라인을 실거래로 쓰려면
-`get_futures_client(env="live")`와 `open_position(..., env="live", confirm_live=True)`처럼 코드에서
-직접 `env="live"`를 넘기도록 고쳐야 한다. 10배 레버리지는 진입가 대비 약 9~10% 역행 시 청산되므로,
-데모에서 최소 며칠~몇 주간 롱/숏 전환·손절 체결·청산가 계산이 의도대로 동작하는지 충분히 지켜본 뒤
-전환할 것을 강력히 권한다.
+코드에서는 `client.enable_demo_trading(True)`로 이 데모 환경에 연결한다(현물처럼
+`set_sandbox_mode`가 아님) — `src/data/futures_exchange.py` 참고.
 
 ---
 
-## 상시 감시 봇 (규칙 기반, Claude 미사용) + 웹 대시보드
+## 운영
 
-`src/futures_pipeline.py`(Claude가 매 사이클 판단)와는 다른 별도 경로다. 이쪽은 **로컬 규칙만으로**
-가격을 계속 감시하다가 조건이 맞으면 즉시 손절+익절을 동시에 걸고 진입한다 — API 호출(Claude) 없이
-동작하므로 비용이 들지 않는다.
-
-### 진입 규칙
-
-- ADX(14) ≥ `RULE_ADX_THRESHOLD`(기본 25): 추세가 확인된 구간에서만
-- 종가가 SMA20을 막 상향/하향 **돌파하는 순간**(레벨이 아니라 크로스) + RSI(14)가 50 기준 같은 방향
-- 롱: ADX≥25 + SMA20 상향 돌파 + RSI≥50 / 숏: ADX≥25 + SMA20 하향 돌파 + RSI≤50
-- 기본 캔들 주기는 `RULE_TIMEFRAME`(기본 1시간), 감시 주기는 `POLL_INTERVAL_SECONDS`(기본 30초)
-
-### 손절/익절
-
-- 손절: 진입가 대비 `STOP_LOSS_PCT`(기본 1.25%)
-- 익절: 손절폭 × `TAKE_PROFIT_RR`(기본 2.0배, 즉 2.5%) — 진입과 동시에 반대방향 reduceOnly
-  STOP_MARKET + TAKE_PROFIT_MARKET 주문을 함께 건다
-- 바이낸스 선물엔 스팟 같은 네이티브 OCO가 없어서, 둘 중 하나가 체결되면 나머지 하나가 고아로 남는다.
-  감시 루프는 매 사이클마다 포지션이 없으면 `cleanup_stale_orders()`를 호출해 이걸 자동 정리한다
-  (실제로 고아 주문을 인위로 만들어서 자동 정리되는 것까지 검증 완료).
-
-### 실행
+### 감시 봇 실행
 
 ```
 ./venv/Scripts/python.exe scripts/run_futures_bot.py --env demo   # 기본값, --env 생략 가능

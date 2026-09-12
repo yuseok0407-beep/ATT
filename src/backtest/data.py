@@ -2,7 +2,7 @@ import time
 
 import pandas as pd
 
-from src.data.exchange import OHLCV_COLUMNS
+from src.data.futures_exchange import OHLCV_COLUMNS
 
 
 def fetch_historical_ohlcv(client, symbol: str, timeframe: str = "1h", days: int = 365) -> pd.DataFrame:

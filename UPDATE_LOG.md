@@ -4,6 +4,47 @@
 
 ---
 
+## 2026-09-12 (2) — 안 쓰는 계열 3개 삭제 + 문서 전면 갱신
+
+선물 규칙봇만 운영하는 동안 쌓인 미사용 코드를 걷어냈다. **파일 41개 삭제, 테스트 469 → 403개**
+(줄어든 66개는 전부 삭제된 모듈의 테스트다 — 남은 코드의 커버리지는 그대로). 실행 경로에서
+도달 가능한 파일을 import 그래프로 뽑아 판정했고, 삭제 전 커밋+GitHub 백업을 먼저 했다.
+
+### 지운 것
+| 계열 | 파일 | 마지막 실사용 |
+|---|---|---|
+| 현물 리밸런싱 전체 | `pipeline.py`, `core/decision.py`(Claude 판단), `allocation.py`, `regime.py`, `execution/orders.py`, `data/research.py`, `monitoring/`, 스크립트 4개, 테스트 6개 | 2026-08-08 (`logs/scheduler.log`) |
+| Claude 기반 선물 파이프라인 | `futures_pipeline.py`, `core/futures_decision.py`, `scheduled_futures_run.py`, 테스트 2개 | 규칙봇 전환 후 미사용 |
+| 대안 전략 실험 | breakout/divergence/ma_cross/reversion 전략 4개 + 그 백테스트 스크립트 + 일회성 스윕 6개(combo/entry/exit_sweep/partial_tp/5m_15m/lower_timeframe) + 테스트 4개 | 결론은 전부 이 로그에 있음 |
+
+**백테스트 하네스(`src/backtest/*`)와 검증 스크립트(run_backtest / symbol_screen / symbol_oos /
+oos / regime_filter_walkforward / hyperopt / recent_shift_diagnostic)는 그대로 뒀다** — 지금도
+설정을 바꿀 때마다 쓰는 도구이고, 외부 리뷰가 지적한 과최적화 검증의 유일한 수단이다.
+
+### 따라온 정리
+- **`src/data/exchange.py`(현물)가 통째로 사라졌다.** 살아남은 건 `fetch_ohlcv_df`/`OHLCV_COLUMNS`
+  둘뿐이라 `futures_exchange.py`로 옮겼다 — 이제 "현물 모듈"이라는 개념 자체가 없다.
+- `config.py`에서 아무도 안 읽는 상수 제거: `BINANCE_API_KEY/SECRET`, **`USE_TESTNET`**,
+  `ANTHROPIC_API_KEY`, `CLAUDE_MODEL`, `CONFIDENCE_THRESHOLD`, `FUTURES_SYMBOL`(단수형).
+  `.env.example`도 같이 정리(사용자 `.env`에 남아있어도 무해하다 — 읽는 코드가 없다).
+- `requirements.txt`에서 `anthropic`, `apscheduler` 제거. **이제 이 저장소에 LLM 의존이 없다.**
+- `futures_check_connection.py`가 `--env demo|live`를 받는다. 예전엔 선물과 아무 상관 없는
+  `USE_TESTNET` 값을 "Testnet mode:"로 찍고 있어서 어느 계좌를 보고 있는지 오해할 수 있었다.
+- `CURRENT_TASK.md` 삭제 — "0단계 환경 셋업 완료. 다음: 1단계 테스트넷 연동"에서 멈춰 있었다.
+- `README.md` 전면 재작성(현물/Claude 절 삭제, 진입 규칙을 실제 값으로 갱신 — 문서엔 아직
+  ADX≥25·SMA20으로 적혀 있었는데 실제는 30·SMA10에 레짐/저변동 필터까지 붙어 있었다).
+  `CLAUDE.md`의 구조/규칙 절도 현재 코드에 맞게 갱신.
+
+### 덤: 테스트가 실제 저널을 오염시키고 있었다
+`journal/trades.jsonl`이 어제·오늘 날짜로 갱신돼 있어 확인해보니, `tests/test_pipeline.py`가
+`journal.DEFAULT_PATH`를 monkeypatch했지만 `append_entry(path=DEFAULT_PATH)`의 기본값은 **함수
+정의 시점에 바인딩**되므로 패치가 안 먹혔다 — 테스트를 돌릴 때마다 가짜 BTC 65000달러 거래가
+실제 저널에 쌓이고 있었다. 해당 테스트가 삭제되면서 같이 해결됐지만, **경로 기본값을 인자
+디폴트로 두는 모듈은 monkeypatch로 격리되지 않는다**는 건 기억해둘 것(그래서 `conftest.py`는
+`filter_stats`/`excursion`을 모듈 속성 교체로 격리한다).
+
+---
+
 ## 2026-09-12 — 외부 코드 리뷰(IMPROVEMENT_RECOMMENDATIONS.md) 검토와 반영
 
 GitHub Copilot이 저장소를 분석해 준 개선 권고 3건을 하나씩 실제 코드와 대조했다. **결론부터:

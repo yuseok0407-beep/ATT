@@ -20,8 +20,8 @@ from src.core.config import (
 from src.core.risk import MAX_CONSECUTIVE_LOSSES, MAX_DAILY_LOSS_PCT
 from src.core.signal_status import collect_conditions
 from src.core.state import compute_consecutive_losses, get_daily_pnl_pct
-from src.data.exchange import fetch_ohlcv_df
-from src.data.futures_exchange import LiveKeysNotConfiguredError, get_futures_balance, get_futures_client, get_position
+from src.data.futures_exchange import (LiveKeysNotConfiguredError, fetch_ohlcv_df, get_futures_balance,
+                                        get_futures_client, get_position)
 from src.data.public_ip import get_public_ip
 from src.execution import bot_process, excursion, filter_stats
 from src.execution.futures_orders import close_position, get_bracket_prices

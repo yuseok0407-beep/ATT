@@ -1,9 +1,7 @@
 ccxt
 requests
-anthropic
 python-dotenv
 pandas
 numpy
-apscheduler
 flask
 psutil

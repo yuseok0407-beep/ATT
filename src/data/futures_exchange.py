@@ -1,4 +1,5 @@
 import ccxt
+import pandas as pd
 
 from src.core.config import (
     BINANCE_FUTURES_API_KEY,
@@ -119,3 +120,18 @@ def set_margin_mode(client: ccxt.binance, symbol: str, mode: str = MARGIN_MODE) 
     except ccxt.ExchangeError as exc:
         if not any(msg in str(exc) for msg in _MARGIN_MODE_ALREADY_OK_MESSAGES):
             raise
+
+
+# 캔들 조회는 원래 현물 모듈(src/data/exchange.py)에 있었다 — 현물 리밸런싱 계열을 걷어내면서
+# 살아남은 건 이 두 개뿐이라 선물 쪽으로 옮겼다(2026-09-12). 클라이언트를 인자로 받으므로
+# 시세 조회용 무키 클라이언트(get_futures_market_data_client)와 계좌 클라이언트 둘 다 쓸 수 있다.
+OHLCV_COLUMNS = ["timestamp", "open", "high", "low", "close", "volume"]
+
+
+def fetch_ohlcv_df(client: ccxt.binance, symbol: str, timeframe: str = "1h", limit: int = 100) -> pd.DataFrame:
+    """캔들을 DataFrame으로. **마지막 행은 아직 마감되지 않은(진행 중인) 봉이다** — 신호 계산에
+    쓰기 전에 반드시 버릴 것(futures_rule_bot._evaluate_symbol의 df.iloc[:-1] 참고)."""
+    ohlcv = client.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+    df = pd.DataFrame(ohlcv, columns=OHLCV_COLUMNS)
+    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+    return df
