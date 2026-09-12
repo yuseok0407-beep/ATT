@@ -603,3 +603,36 @@ def test_help_text_does_not_advertise_commands_that_do_not_exist():
     import re
     advertised = set(re.findall(r"/[a-z_]+", tb._HELP_TEXT))
     assert advertised - set(tb._COMMANDS) == set()
+
+
+# ---------- 설정 변경 알림 ----------
+
+def test_config_change_notification_names_what_changed(monkeypatch):
+    """설정을 바꾸고 재시작했을 때 "그 값으로 실제로 떴는지"를 폰에서 확인할 수 있어야 한다."""
+    entries = [
+        {"timestamp": "2026-09-12T00:00:00+00:00", "event": "entered", "symbol": "BTC/USDT:USDT"},
+        {"timestamp": "2026-09-12T01:00:00+00:00", "event": "config_changed", "first_record": False,
+         "changes": {"regime_sma_period": {"from": 0, "to": 400},
+                     "symbols": {"from": ["BTC/USDT:USDT"], "to": ["BTC/USDT:USDT", "SUI/USDT:USDT"]}}},
+    ]
+    monkeypatch.setattr(tb, "read_entries", lambda path=None: entries)
+
+    messages = tb.check_new_journal_entries("live", {"live": {"last_entry_ts": "2026-09-12T00:30:00+00:00"}})
+
+    assert len(messages) == 1
+    assert "레짐SMA 0→400" in messages[0]
+    assert "추가 SUI" in messages[0]  # 심볼 목록은 12종목을 다 찍지 않고 차이만
+
+
+def test_first_config_snapshot_says_tracking_started(monkeypatch):
+    entries = [
+        {"timestamp": "2026-09-12T00:00:00+00:00", "event": "closed", "symbol": "BTC/USDT:USDT"},
+        {"timestamp": "2026-09-12T01:00:00+00:00", "event": "config_changed", "first_record": True,
+         "changes": {}},
+    ]
+    monkeypatch.setattr(tb, "read_entries", lambda path=None: entries)
+
+    messages = tb.check_new_journal_entries("demo", {"demo": {"last_entry_ts": "2026-09-12T00:30:00+00:00"}})
+
+    assert len(messages) == 1
+    assert "설정 변경 추적 시작" in messages[0]

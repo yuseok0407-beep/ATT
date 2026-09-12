@@ -13,8 +13,12 @@ from src.core.config import (
     MAX_CONCURRENT_POSITIONS,
     MAX_ENTRY_PRICE_DRIFT_R,
     MIN_ATR_TO_STOP_RATIO,
+    RULE_ADX_THRESHOLD,
     RULE_REGIME_SMA_PERIOD,
+    RULE_SMA_PERIOD,
     RULE_TIMEFRAME,
+    STOP_LOSS_PCT,
+    TAKE_PROFIT_RR,
 )
 from src.core.futures_risk import check_stop_before_liquidation, estimate_liquidation_price, leveraged_position_size
 from src.core.futures_strategy import (
@@ -25,7 +29,7 @@ from src.core.futures_strategy import (
     is_above_long_sma,
     passes_volatility_floor,
 )
-from src.core.risk import check_circuit_breaker
+from src.core.risk import MAX_CONSECUTIVE_LOSSES, MAX_DAILY_LOSS_PCT, check_circuit_breaker
 from src.core.state import compute_consecutive_losses, get_daily_pnl_pct
 from src.data.exchange import fetch_ohlcv_df
 from src.data.futures_exchange import (
@@ -68,6 +72,67 @@ logger = logging.getLogger(__name__)
 # (2026-09-09) — 필터가 백테스트대로 도는지 확인할 유일한 수단이라.
 _SILENT_EVENTS = ("no_signal", "holding_position", "skipped_max_positions", "skipped_regime",
                   "skipped_same_signal_bar", "skipped_price_drift", "skipped_low_volatility")
+
+
+# 저널에 기록해두는 "이 거래들이 어떤 규칙으로 나왔는지" — 진입 판단에 실제로 영향을 주는
+# 설정만 넣는다(알림 주기 같은 운영 설정은 뺀다). 값이 바뀌면 log_config_change가 봇 시작 시
+# 저널에 한 줄 남기므로, 나중에 성과를 볼 때 "이 구간은 어떤 규칙이었나"를 저널만으로 알 수 있다.
+def current_strategy_config() -> dict:
+    """지금 이 프로세스가 들고 있는 전략/리스크 설정. 저널에 남길 형태 그대로."""
+    return {
+        "timeframe": RULE_TIMEFRAME,
+        "adx_threshold": RULE_ADX_THRESHOLD,
+        "sma_period": RULE_SMA_PERIOD,
+        "regime_sma_period": RULE_REGIME_SMA_PERIOD,
+        "min_atr_to_stop_ratio": MIN_ATR_TO_STOP_RATIO,
+        "max_entry_price_drift_r": MAX_ENTRY_PRICE_DRIFT_R,
+        "stop_loss_pct": STOP_LOSS_PCT,
+        "take_profit_rr": TAKE_PROFIT_RR,
+        "leverage": LEVERAGE,
+        "risk_per_trade": FUTURES_RISK_PER_TRADE,
+        "max_concurrent_positions": MAX_CONCURRENT_POSITIONS,
+        "max_daily_loss_pct": MAX_DAILY_LOSS_PCT,
+        "max_consecutive_losses": MAX_CONSECUTIVE_LOSSES,
+        "symbols": sorted(FUTURES_SYMBOLS),
+    }
+
+
+def _last_logged_config(journal_path: str) -> dict | None:
+    for entry in reversed(read_entries(path=journal_path)):
+        if entry.get("event") == "config_changed":
+            return entry.get("config")
+    return None
+
+
+def log_config_change(journal_path: str = None, config: dict = None) -> dict | None:
+    """지금 설정이 저널에 마지막으로 기록된 설정과 다르면 config_changed를 한 줄 남긴다.
+    같으면 아무것도 안 한다(봇을 하루에 몇 번씩 재시작해도 저널이 안 더러워진다).
+
+    있으면 좋은 기록이 아니라 **성과 해석에 필요한 기록**이다. 지금 저널에는 거래만 있고 그
+    거래가 어떤 규칙으로 나왔는지가 없어서, 화면의 "총 -3.18R"이 레짐 필터/저변동 필터가 있던
+    구간인지 없던 구간인지 섞여 있는지조차 알 수 없다 — 실거래와 백테스트를 비교하려면
+    "같은 규칙으로 낸 거래"만 봐야 하는데 그 경계가 사람 기억(UPDATE_LOG.md)에만 있었다.
+    설정 변경일을 저널에 박아두면 대시보드가 자산곡선 위에 그 경계를 그릴 수 있다(2026-09-12).
+
+    심볼 목록도 같이 남긴다 — 종목 추가는 파라미터 변경만큼이나 성과 구간을 갈라놓는다."""
+    journal_path = journal_path or JOURNAL_PATH
+    config = current_strategy_config() if config is None else config
+    previous = _last_logged_config(journal_path)
+    if previous == config:
+        return None
+
+    # 첫 기록은 "무엇이 바뀌었나"가 없다(비교 대상이 없으므로) — 전 항목을 from=None으로
+    # 채우면 알림도 화면도 14줄짜리 잡음이 된다. 값 전체는 config에 그대로 들어있다.
+    changes = {}
+    if previous is not None:
+        for key, value in config.items():
+            if previous.get(key) != value:
+                changes[key] = {"from": previous.get(key), "to": value}
+
+    entry = {"event": "config_changed", "config": config, "changes": changes,
+              "first_record": previous is None}
+    append_entry(entry, path=journal_path)
+    return entry
 
 
 def _load_last_trade_ids(path: str = LAST_TRADE_STATE_PATH) -> dict:

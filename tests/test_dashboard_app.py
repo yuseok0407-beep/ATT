@@ -341,3 +341,16 @@ def test_api_performance_includes_r_metrics(client, monkeypatch):
     assert body["num_trades"] == 1              # 기존 달러 요약은 그대로
     assert body["r"]["total_r"] == pytest.approx(2.0)
     assert len(body["r"]["equity_curve"]) == 1
+
+
+def test_api_status_config_comes_from_the_single_strategy_config(client, monkeypatch):
+    """화면의 설정과 저널에 기록되는 설정 스냅샷이 갈라지면 둘 중 뭘 믿을지 알 수 없다 —
+    둘 다 futures_rule_bot.current_strategy_config() 하나에서 나온다."""
+    monkeypatch.setattr(dashboard_app, "get_futures_balance", lambda client: {"USDT": {"total": 1000.0}})
+    monkeypatch.setattr(dashboard_app, "get_position", lambda client, symbol: None)
+
+    config = client.get("/api/status").get_json()["config"]
+
+    assert config == dashboard_app.current_strategy_config()
+    # 진입 판단에 실제로 쓰이는 필터들이 화면에 빠져 있으면 "왜 진입을 안 하지"를 화면만 보고 알 수 없다
+    assert "regime_sma_period" in config and "min_atr_to_stop_ratio" in config

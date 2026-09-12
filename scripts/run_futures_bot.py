@@ -40,6 +40,7 @@ if __name__ == "__main__":
         LIVE_LAST_TRADE_STATE_PATH,
         LIVE_STATE_PATH,
         initialize,
+        log_config_change,
         run_once,
     )
     from src.futures_rule_bot import JOURNAL_PATH as DEMO_JOURNAL_PATH
@@ -64,6 +65,14 @@ if __name__ == "__main__":
                         ", ".join(skipped))
     logger.info("leverage/margin mode set — entering monitoring loop. Ctrl+C to stop. %s",
                 ", ".join(f"{s}={lev}x" for s, lev in leverage_by_symbol.items()))
+
+    # 이 프로세스가 어떤 규칙으로 도는지를 저널에 남긴다(직전 기록과 같으면 아무것도 안 남긴다).
+    # 나중에 성과를 볼 때 설정이 바뀐 경계를 저널만으로 알 수 있게 하려는 것 — 사람 기억이나
+    # UPDATE_LOG.md에만 있으면 "이 구간은 어떤 규칙이었나"를 화면에서 대조할 수 없다.
+    config_change = log_config_change(journal_path=journal_path)
+    if config_change is not None:
+        logger.info("strategy config recorded to journal: %s",
+                    config_change["changes"] if not config_change["first_record"] else "(first record)")
 
     # 신호가 없으면 로그를 안 남기는 게 기본 동작이라, "봇이 조용한 것"과 "봇이 멈춘 것"을
     # 로그만 보고는 구분할 수 없었다 — 주기적 하트비트로 생존 여부를 항상 확인 가능하게 한다.

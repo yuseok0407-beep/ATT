@@ -13,12 +13,7 @@ from src.core.config import (
     FUTURES_SYMBOLS,
     LEVERAGE,
     MAX_CONCURRENT_POSITIONS,
-    RULE_ADX_THRESHOLD,
-    RULE_REGIME_SMA_PERIOD,
-    RULE_SMA_PERIOD,
     RULE_TIMEFRAME,
-    STOP_LOSS_PCT,
-    TAKE_PROFIT_RR,
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
 )
@@ -45,6 +40,7 @@ from src.futures_rule_bot import (
     JOURNAL_PATH,
     LAST_TRADE_STATE_PATH,
     STATE_PATH,
+    current_strategy_config,
     record_manual_close,
     reset_consecutive_losses,
 )
@@ -214,12 +210,9 @@ def api_status():
             "max_consecutive_losses": MAX_CONSECUTIVE_LOSSES,
             "consecutive_losses": consecutive_losses,
         },
-        "config": {
-            "adx_threshold": RULE_ADX_THRESHOLD,
-            "sma_period": RULE_SMA_PERIOD,
-            "stop_loss_pct": STOP_LOSS_PCT,
-            "take_profit_rr": TAKE_PROFIT_RR,
-        },
+        # 전략 설정은 futures_rule_bot.current_strategy_config() 한 곳에서만 정의한다 —
+        # 저널에 기록되는 설정 스냅샷과 화면에 뜨는 설정이 다르면 둘 중 뭘 믿을지 알 수 없다.
+        "config": current_strategy_config(),
     })
 
 

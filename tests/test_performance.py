@@ -2,6 +2,7 @@ import pytest
 
 from datetime import datetime, timedelta, timezone
 
+from src.execution import performance
 from src.execution.performance import (
     _local_day,
     resolve_closed_trades,
@@ -333,3 +334,60 @@ def test_summarize_day_counts_rejections_and_circuit_breakers():
     assert stats["trades"] == 0
     assert stats["rejections"] == 1
     assert stats["circuit_breakers"] == 1
+
+
+# --- 설정 변경 경계 --------------------------------------------------------------
+
+def test_config_changes_lists_snapshots_in_order():
+    entries = [
+        {"timestamp": "2026-09-01T00:00:00+00:00", "event": "config_changed",
+         "config": {"regime_sma_period": 0}, "changes": {}, "first_record": True},
+        {"timestamp": "2026-09-05T00:00:00+00:00", "event": "closed", "realized_pnl": 1.0},
+        {"timestamp": "2026-09-07T00:00:00+00:00", "event": "config_changed",
+         "config": {"regime_sma_period": 400},
+         "changes": {"regime_sma_period": {"from": 0, "to": 400}}, "first_record": False},
+    ]
+
+    changes = performance.config_changes(entries)
+
+    assert [c["timestamp"] for c in changes] == ["2026-09-01T00:00:00+00:00", "2026-09-07T00:00:00+00:00"]
+    assert changes[0]["first_record"] is True
+    assert changes[1]["changes"]["regime_sma_period"]["to"] == 400
+
+
+def test_r_performance_reports_only_the_trades_since_the_last_config_change():
+    """필터를 넣기 전후가 한 숫자로 뭉뚱그려지면 지금 규칙이 통하는지 알 수 없다 — 마지막
+    설정 변경 이후 구간을 따로 센다."""
+    entries = [
+        {"timestamp": "2026-09-01T00:00:00+00:00", "event": "entered", "symbol": "BTC/USDT:USDT",
+         "signal": "LONG", "entry_price": 100.0, "stop_loss_price": 99.0},
+        {"timestamp": "2026-09-02T00:00:00+00:00", "event": "closed", "symbol": "BTC/USDT:USDT",
+         "reason": "stop_loss", "exit_price": 99.0, "realized_pnl": -10.0},
+        {"timestamp": "2026-09-03T00:00:00+00:00", "event": "config_changed",
+         "config": {"regime_sma_period": 400},
+         "changes": {"regime_sma_period": {"from": 0, "to": 400}}, "first_record": False},
+        {"timestamp": "2026-09-04T00:00:00+00:00", "event": "entered", "symbol": "BTC/USDT:USDT",
+         "signal": "LONG", "entry_price": 100.0, "stop_loss_price": 99.0},
+        {"timestamp": "2026-09-05T00:00:00+00:00", "event": "closed", "symbol": "BTC/USDT:USDT",
+         "reason": "take_profit", "exit_price": 102.0, "realized_pnl": 20.0},
+    ]
+
+    result = performance.summarize_r_performance(entries)
+
+    assert result["num_trades"] == 2  # 전체는 그대로 둘 다 센다
+    assert result["since_config_change"]["trades"] == 1
+    assert result["since_config_change"]["total_r"] == pytest.approx(2.0)
+    assert result["since_config_change"]["realized_pnl"] == pytest.approx(20.0)
+    assert result["since_config_change"]["changes"]["regime_sma_period"]["to"] == 400
+
+
+def test_r_performance_has_no_config_span_before_the_first_snapshot():
+    entries = [
+        {"timestamp": "2026-09-01T00:00:00+00:00", "event": "closed", "symbol": "BTC/USDT:USDT",
+         "reason": "stop_loss", "realized_pnl": -10.0},
+    ]
+
+    result = performance.summarize_r_performance(entries)
+
+    assert result["config_changes"] == []
+    assert result["since_config_change"] is None

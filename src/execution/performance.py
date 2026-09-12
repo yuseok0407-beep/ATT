@@ -204,6 +204,34 @@ def _drawdown(values: list[float]) -> float:
     return worst
 
 
+def config_changes(entries: list[dict]) -> list[dict]:
+    """저널의 config_changed 기록을 시간순으로 돌려준다(futures_rule_bot.log_config_change가
+    봇 시작 시 설정이 바뀌었을 때만 남긴다).
+
+    성과 곡선 위에 "여기서 규칙이 바뀌었다"를 그리기 위한 것 — 레짐 필터나 저변동 필터가
+    들어가기 전후의 거래가 한 줄의 총R로 뭉뚱그려지면, 그 숫자로는 지금 규칙이 통하는지를
+    판단할 수 없다."""
+    return [
+        {"timestamp": e.get("timestamp"),
+          "changes": e.get("changes") or {},
+          "first_record": bool(e.get("first_record"))}
+        for e in entries if e.get("event") == "config_changed"
+    ]
+
+
+def _summarize_trades_since(trades: list[dict], since: str | None) -> dict:
+    """since(저널 타임스탬프) 이후 청산된 거래만 골라 건수/총R/실현손익을 센다."""
+    recent = [t for t in trades if since is None or (t.get("timestamp") or "") > since]
+    with_r = [t for t in recent if t.get("realized_r") is not None]
+    return {
+        "trades": len(recent),
+        "trades_with_r": len(with_r),
+        "total_r": sum(t["realized_r"] for t in with_r) if with_r else None,
+        "realized_pnl": sum(t.get("realized_pnl") or 0.0 for t in recent),
+        "win_rate": (sum(1 for t in recent if (t.get("realized_pnl") or 0) > 0) / len(recent)) if recent else None,
+    }
+
+
 def summarize_r_performance(entries: list[dict], max_points: int = 400) -> dict:
     """R배수 기준 성과 + 자산곡선. 달러 기준 요약(summarize_performance)과 별개로 두는 이유는
     묻는 질문이 다르기 때문 — 달러는 "실제로 얼마 벌었나", R은 "계획 대비 잘하고 있나"이고
@@ -212,6 +240,7 @@ def summarize_r_performance(entries: list[dict], max_points: int = 400) -> dict:
     max_points: 자산곡선이 길어지면 응답만 커지고 화면에선 구분이 안 되므로 최근 것만 보낸다."""
     trades = resolve_closed_trades(entries)
     with_r = [t for t in trades if t.get("realized_r") is not None]
+    changes = config_changes(entries)
 
     curve = []
     cumulative_pnl, cumulative_r = 0.0, 0.0
@@ -248,6 +277,12 @@ def summarize_r_performance(entries: list[dict], max_points: int = 400) -> dict:
         "max_drawdown_usd": _drawdown([p["cumulative_pnl"] for p in curve]),
         "by_side": by_side,
         "equity_curve": curve[-max_points:],
+        # 설정 변경 경계와 "현재 설정으로만" 낸 성과 — 필터를 추가하기 전후가 한 숫자로
+        # 뭉뚱그려지면 지금 규칙이 통하는지 알 수 없다(2026-09-12).
+        "config_changes": changes,
+        "since_config_change": ({**_summarize_trades_since(trades, changes[-1]["timestamp"]),
+                                  "timestamp": changes[-1]["timestamp"],
+                                  "changes": changes[-1]["changes"]} if changes else None),
         "mfe": {
             "losers_measured": len(losers),
             "losers_reaching_1r": len(near_misses),

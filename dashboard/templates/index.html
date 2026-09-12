@@ -39,6 +39,7 @@
   .badge.holding_position { background: rgba(96,165,250,.15); color: var(--blue); }
   .badge.skipped_max_positions { background: rgba(251,191,36,.15); color: var(--amber); }
   .badge.circuit_breaker_blocked, .badge.rejected_unsafe_stop, .badge.rejected_zero_quantity { background: rgba(248,113,113,.15); color: var(--red); }
+  .badge.config_changed { background: rgba(139,147,167,.15); color: var(--muted); }
   .close-btn {
     background: rgba(248,113,113,.15); color: var(--red); border: 1px solid rgba(248,113,113,.4);
     border-radius: 6px; padding: 4px 10px; font-size: 12px; font-weight: 600; cursor: pointer;
@@ -315,6 +316,7 @@
       </span>
     </div>
     <div class="curve-wrap"><svg id="equity-curve" viewBox="0 0 600 150" preserveAspectRatio="none"></svg></div>
+    <div class="mfe-note" id="perf-config-note"></div>
     <div class="mfe-note" id="perf-mfe"></div>
     <table class="subtable side-table" id="perf-side-table" style="display:none;margin-top:12px">
       <thead><tr><th>방향</th><th>거래수</th><th>승률</th><th>총R</th></tr></thead>
@@ -452,12 +454,52 @@ function drawEquityCurve(points) {
   const last = values[values.length - 1];
   const color = last >= 0 ? 'var(--green)' : 'var(--red)';
 
+  // 설정이 바뀐 지점에 세로선을 긋는다 — 필터를 넣기 전후의 거래가 한 곡선에 섞여 있으면
+  // 기울기가 달라진 게 시장 때문인지 규칙 때문인지 구분할 수 없다. 라벨은 SVG가 아니라 아래
+  // HTML 줄에 쓴다(viewBox가 preserveAspectRatio="none"이라 SVG 텍스트는 가로로 늘어난다).
+  const marks = ((lastRData && lastRData.config_changes) || []).map(ch => {
+    const idx = points.findIndex(p => (p.timestamp || '') > (ch.timestamp || ''));
+    if (idx === 0) return null;                       // 곡선에 보이는 구간보다 이전 — 표시 안 함
+    // 경계는 "직전 거래와 다음 거래 사이"라 두 점의 중간에 긋는다. -1이면 변경 이후 청산이
+    // 아직 없다는 뜻이라 곡선 맨 오른쪽에 긋는다.
+    return idx === -1 ? x(points.length - 1) : x(idx - 0.5);
+  }).filter(v => v !== null);
+
   svg.innerHTML = `
     <polygon points="${area}" fill="${color}" opacity="0.12"></polygon>
     <line x1="${PAD}" y1="${y(0).toFixed(1)}" x2="${W - PAD}" y2="${y(0).toFixed(1)}"
           stroke="#8b93a7" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"></line>
+    ${marks.map(mx => `<line x1="${mx.toFixed(1)}" y1="${PAD}" x2="${mx.toFixed(1)}" y2="${H - PAD}"
+          stroke="var(--amber)" stroke-width="1" stroke-dasharray="4 3" opacity="0.75"></line>`).join('')}
     <polyline points="${line}" fill="none" stroke="${color}" stroke-width="1.6"
               vector-effect="non-scaling-stroke"></polyline>`;
+}
+
+const CONFIG_LABELS = {
+  timeframe: '타임프레임', adx_threshold: 'ADX 임계값', sma_period: 'SMA 기간',
+  regime_sma_period: '레짐 SMA', min_atr_to_stop_ratio: '최소 변동성', max_entry_price_drift_r: '진입 괴리 한도',
+  stop_loss_pct: '손절폭', take_profit_rr: '손익비', leverage: '레버리지', risk_per_trade: '거래당 리스크',
+  max_concurrent_positions: '최대 동시 포지션', max_daily_loss_pct: '일일 손실 한도',
+  max_consecutive_losses: '연속 손실 한도', symbols: '감시 종목',
+};
+
+function renderConfigNote(r) {
+  const note = document.getElementById('perf-config-note');
+  const since = r.since_config_change;
+  if (!since) {
+    // 설정 스냅샷은 봇이 시작할 때 기록된다 — 아직 한 번도 없으면 이 곡선 전체가 어떤 규칙으로
+    // 나온 건지 저널만으로는 알 수 없다는 뜻이라, 그 사실을 숨기지 않고 그대로 적는다.
+    note.textContent = '설정 기록이 아직 없습니다 — 봇을 다시 시작하면 지금 설정이 저널에 남고, 그 이후 구간이 여기 표시됩니다.';
+    return;
+  }
+  const when = new Date(since.timestamp).toLocaleString('ko-KR', { dateStyle: 'short', timeStyle: 'short' });
+  const changed = Object.entries(since.changes || {})
+    .map(([k, v]) => `${CONFIG_LABELS[k] || k} ${Array.isArray(v.from) ? '변경' : `${v.from ?? '–'}→${v.to}`}`)
+    .join(', ');
+  const head = changed ? `설정 변경(${when}): ${changed}` : `설정 기록(${when})`;
+  note.textContent = since.trades
+    ? `${head} · 이후 ${since.trades}건, ${since.total_r === null ? 'R 없음' : fmtR(since.total_r)} (${fmtUsd(since.realized_pnl)})`
+    : `${head} · 이후 아직 청산된 거래가 없습니다`;
 }
 
 function renderRPerformance(r) {
@@ -475,6 +517,7 @@ function renderRPerformance(r) {
       <div class="value red">${fmtUsd(r.max_drawdown_usd)}</div></div>`;
 
   drawEquityCurve(r.equity_curve || []);
+  renderConfigNote(r);
 
   // 위 달러 줄과 모수가 다를 수 있다 — 진입가가 청산과 안 맞아 R을 못 믿는 거래는 R 통계에서만
   // 빠진다. 설명 없이 두 줄의 거래수가 다르면 어느 쪽이 틀린 건지 알 수 없다.
@@ -1018,6 +1061,14 @@ async function refresh() {
       <div class="config-item"><div class="k">손익비(RR)</div><div class="v">${c.take_profit_rr}</div></div>
       <div class="config-item"><div class="k">레버리지</div><div class="v">${data.leverage}x</div></div>
       <div class="config-item"><div class="k">최대 동시 포지션</div><div class="v">${data.max_concurrent}</div></div>
+      <div class="config-item"><div class="k">레짐 SMA (숏 차단)</div>
+        <div class="v">${c.regime_sma_period ? c.regime_sma_period : '꺼짐'}</div></div>
+      <div class="config-item"><div class="k">최소 변동성 (ATR/손절폭)</div>
+        <div class="v">${c.min_atr_to_stop_ratio ? c.min_atr_to_stop_ratio : '꺼짐'}</div></div>
+      <div class="config-item"><div class="k">진입 괴리 한도</div>
+        <div class="v">${c.max_entry_price_drift_r}R</div></div>
+      <div class="config-item"><div class="k">거래당 리스크</div>
+        <div class="v">${fmtPct(c.risk_per_trade)}</div></div>
     `;
   }
 

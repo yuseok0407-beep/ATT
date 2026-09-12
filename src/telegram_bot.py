@@ -45,13 +45,22 @@ STATE_PATH = "state/telegram_bot_state.json"
 # unprotected_position/position_protected는 매 사이클 반복되지 않고(futures_rule_bot이 상태
 # 전이에서만 남긴다) 손절 없는 레버리지 포지션은 즉시 알아야 하는 사고라 알림 대상이다.
 _NOTIFY_EVENTS = ("entered", "closed", "circuit_breaker_blocked",
-                  "unprotected_position", "position_protected")
+                  "unprotected_position", "position_protected", "config_changed")
 
 _REASON_LABELS = {
     "stop_loss": "손절", "take_profit": "익절", "manual": "수동청산",
     "breakeven_stop": "손익분기청산", "unknown": "기타",
 }
 _SIGNAL_LABELS = {"LONG": "롱", "SHORT": "숏"}
+# 설정 변경 알림에서 쓰는 이름 — 대시보드 index.html의 CONFIG_LABELS와 같은 항목을 한글로.
+_CONFIG_LABELS = {
+    "timeframe": "타임프레임", "adx_threshold": "ADX", "sma_period": "SMA기간",
+    "regime_sma_period": "레짐SMA", "min_atr_to_stop_ratio": "최소변동성",
+    "max_entry_price_drift_r": "진입괴리한도", "stop_loss_pct": "손절폭", "take_profit_rr": "손익비",
+    "leverage": "레버리지", "risk_per_trade": "거래당리스크",
+    "max_concurrent_positions": "동시보유상한", "max_daily_loss_pct": "일일손실한도",
+    "max_consecutive_losses": "연속손실한도", "symbols": "감시종목",
+}
 
 # 여기 목록과 _COMMANDS는 항상 같아야 한다 — 안 그러면 동작하는데 아무도 모르는 명령이 생긴다
 # (실제로 /conditions가 그랬다). tests/test_telegram_bot.py가 둘이 어긋나면 실패시킨다.
@@ -133,6 +142,23 @@ def _fmt_price(value) -> str:
     return f"{value:,.{digits}f}"
 
 
+def _fmt_config_change(change: dict) -> str:
+    """설정 하나의 변경을 "이전→이후"로. 심볼 목록처럼 리스트인 값은 그대로 찍으면 12종목이
+    한 줄을 다 먹으므로 추가/제거만 적는다."""
+    before, after = change.get("from"), change.get("to")
+    if isinstance(before, list) or isinstance(after, list):
+        before_set, after_set = set(before or []), set(after or [])
+        added = sorted(x.split("/")[0] for x in after_set - before_set)
+        removed = sorted(x.split("/")[0] for x in before_set - after_set)
+        parts = []
+        if added:
+            parts.append("추가 " + ",".join(added))
+        if removed:
+            parts.append("제외 " + ",".join(removed))
+        return " / ".join(parts) or "변경"
+    return f"{before}→{after}"
+
+
 def _format_entry(env: str, entry: dict) -> str | None:
     label = "LIVE" if env == "live" else "DEMO"
     symbol = entry.get("symbol")
@@ -161,6 +187,18 @@ def _format_entry(env: str, entry: dict) -> str | None:
     if event == "position_protected":
         return (f"🛡 [{label}] {short_symbol} 손절 주문이 복구됐습니다"
                 f" (손절 {_fmt_price(entry.get('stop_loss_price'))}).")
+
+    if event == "config_changed":
+        # 설정을 바꾸고 봇을 다시 띄웠을 때 "실제로 그 값으로 떴는지"를 폰에서 바로 확인할 수
+        # 있게 한다 — .env를 고쳤는데 재시작을 안 했거나 엉뚱한 env를 재시작한 경우가 이 한 통으로
+        # 드러난다(값이 그대로면 봇이 아예 이 기록을 안 남기므로 재시작만으로는 알림이 안 온다).
+        changes = entry.get("changes") or {}
+        if entry.get("first_record"):
+            return f"⚙️ [{label}] 봇이 현재 설정을 저널에 기록했습니다 (설정 변경 추적 시작)."
+        summary = ", ".join(f"{_CONFIG_LABELS.get(k, k)} {_fmt_config_change(v)}"
+                            for k, v in list(changes.items())[:6])
+        more = f" 외 {len(changes) - 6}개" if len(changes) > 6 else ""
+        return f"⚙️ [{label}] 설정이 바뀐 채로 봇이 시작됐습니다 — {summary}{more}"
 
     return None
 

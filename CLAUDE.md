@@ -38,6 +38,10 @@
   `check_and_log_closed_trade`가 꺼내서 청산 기록에 옮겨 적는다.
 - `src/telegram_bot.py` / `scripts/run_telegram_bot.py` — 텔레그램 알림 + 원격 시작/중지 (아래
   "텔레그램 알림" 절 참고), `src/data/public_ip.py` — 공인 IP 조회(대시보드와 공유)
+- `src/execution/journal.py` — 저널 읽기/쓰기. `read_entries`는 **파일의 (mtime, 크기)로 무효화되는
+  읽기 캐시**를 들고 있다(2026-09-12) — 사이클 하나가 같은 저널을 10~20번 다시 훑는 구조라
+  저널이 커질수록 그 비용만 늘었다. 돌려주는 리스트는 캐시와 같은 객체이므로 **호출자는 읽기만
+  할 것**(값을 바꿔야 하면 `performance.resolve_closed_trades`처럼 `dict(entry)`로 복사한다).
 - `journal/trades.jsonl` — 현물, `journal/futures_trades.jsonl` — 선물(Claude), `journal/futures_rule_trades.jsonl` — 선물(규칙기반)
 
 ## 선물(레버리지) 관련 특히 주의할 것
@@ -114,6 +118,16 @@
   `resolve_closed_trades`는 **R과 실현손익의 부호가 모순되면 그 R을 버린다**(달러 통계에는 그대로
   남는다) — 손절/익절 판정에 이미 쓰던 것과 같은 기준이다. 그래서 화면의 달러 거래수와 R 거래수가
   다를 수 있고, 대시보드는 그 차이를 곡선 위에 명시한다.
+- **거래가 어떤 설정으로 나왔는지는 저널이 스스로 들고 있어야 한다**(2026-09-12,
+  `current_strategy_config()` / `log_config_change()`). 봇이 시작할 때 진입 판단에 영향을 주는
+  설정(ADX/SMA·레짐SMA·최소변동성·손절폭/손익비·레버리지·동시보유 상한·**감시 종목 목록** 등)이
+  직전 기록과 다르면 `config_changed`를 한 줄 남긴다. 이유: 저널에 거래만 있으면 화면의 총R이
+  레짐/저변동 필터 전후를 섞은 숫자인지 알 수 없어 백테스트와 비교 자체가 불가능하다 — 그 경계가
+  사람 기억과 UPDATE_LOG에만 있었다. 대시보드는 자산곡선에 그 경계를 세로선으로 긋고 "현재 설정
+  이후 N건/총R"을 적으며(`performance.config_changes` / `since_config_change`), 텔레그램도
+  알린다(.env만 고치고 재시작을 안 했거나 엉뚱한 env를 재시작한 게 이 한 통으로 드러난다).
+  **새 전략 파라미터를 만들면 `current_strategy_config()`에도 넣을 것** — 대시보드 설정 표시도
+  같은 함수에서 나오므로 한 곳만 고치면 된다.
 - 선물은 현물과 달리 `enable_demo_trading(True)`로 연결한다(구 testnet.binancefuture.com 방식인
   `set_sandbox_mode`가 아님). 키는 실제 바이낸스 계정 로그인 후 demo.binance.com/en/my/settings/api-management 에서 발급.
 - `client.fetch_my_trades(symbol, limit=N)`을 `since` 없이 부르면 "최신 N개"가 아니라 계좌에 쌓인

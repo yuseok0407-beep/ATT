@@ -1410,3 +1410,50 @@ def test_run_once_uses_live_state_paths_for_live_env(tmp_path, monkeypatch):
         _stop(patches)
 
     assert captured["excursion_path"] == str(tmp_path / "live_exc.json")
+
+
+# --- 설정 스냅샷(config_changed) -------------------------------------------------
+# 거래가 어떤 규칙으로 나왔는지를 저널 자체에 남겨두려는 것 — 없으면 필터를 넣기 전후의 거래가
+# 한 숫자로 뭉뚱그려져서 "지금 규칙이 통하는지"를 화면에서 판단할 수 없다(2026-09-12).
+
+def test_log_config_change_records_the_first_snapshot(tmp_path):
+    journal = str(tmp_path / "j.jsonl")
+
+    entry = bot.log_config_change(journal_path=journal)
+
+    assert entry["event"] == "config_changed"
+    assert entry["first_record"] is True
+    assert entry["config"] == bot.current_strategy_config()
+
+
+def test_log_config_change_is_silent_when_nothing_changed(tmp_path):
+    """봇을 하루에 몇 번씩 재시작해도 설정이 그대로면 저널에 아무것도 안 남아야 한다."""
+    journal = str(tmp_path / "j.jsonl")
+    bot.log_config_change(journal_path=journal)
+
+    assert bot.log_config_change(journal_path=journal) is None
+    assert len(bot.read_entries(path=journal)) == 1
+
+
+def test_log_config_change_records_only_what_changed(tmp_path):
+    journal = str(tmp_path / "j.jsonl")
+    first = dict(bot.current_strategy_config())
+    bot.log_config_change(journal_path=journal, config=first)
+
+    changed = {**first, "regime_sma_period": 700}
+    entry = bot.log_config_change(journal_path=journal, config=changed)
+
+    assert entry["first_record"] is False
+    assert entry["changes"] == {"regime_sma_period": {"from": first["regime_sma_period"], "to": 700}}
+
+
+def test_config_snapshot_does_not_disturb_position_lifecycle(tmp_path):
+    """설정 기록은 심볼이 없는 이벤트라, 심볼별 "마지막 생애주기 기록" 판정에 끼어들면 안 된다
+    (끼어들면 진입 기록이 매 사이클 중복 백필된다 — unprotected_position 때 겪은 문제)."""
+    journal = str(tmp_path / "j.jsonl")
+    bot.append_entry({"symbol": "BTC/USDT:USDT", "event": "entered", "entry_price": 100}, path=journal)
+    bot.log_config_change(journal_path=journal)
+
+    client = MagicMock()
+    assert bot.check_and_log_untracked_position(
+        client, "BTC/USDT:USDT", {"entryPrice": 100}, journal_path=journal) is None
