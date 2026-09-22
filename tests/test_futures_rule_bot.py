@@ -64,6 +64,8 @@ def test_run_once_blocked_by_circuit_breaker():
         cycle = bot.run_once(MagicMock(), consecutive_losses=0, daily_pnl_pct=-0.10)
         assert cycle["event"] == "circuit_breaker_blocked"
         assert "symbols" not in cycle or cycle["symbols"] == {}
+        # 하트비트가 이 사유를 실어 텔레그램 정지 지속 알림이 쓴다
+        assert "일일 손실 한도" in cycle["reason"]
     finally:
         _stop(patches)
 

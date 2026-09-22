@@ -858,6 +858,7 @@ def run_once(client, env: str = "demo", consecutive_losses: int = None, daily_pn
         if not existing_entries or existing_entries[-1].get("event") != "circuit_breaker_blocked":
             append_entry({"event": "circuit_breaker_blocked", "reason": circuit_breaker.reason}, path=journal_path)
         cycle["event"] = "circuit_breaker_blocked"
+        cycle["reason"] = circuit_breaker.reason
         return cycle
 
     for symbol in symbols:

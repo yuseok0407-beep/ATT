@@ -6,13 +6,19 @@ DEFAULT_PATH = "state/futures_rule_heartbeat.json"
 LIVE_DEFAULT_PATH = "state/futures_rule_heartbeat.live.json"  # 실계좌 봇 전용(2026-08-22)
 
 
-def write_heartbeat(cycle_count: int, open_positions: int, margin_equity: float, path: str = DEFAULT_PATH) -> None:
+def write_heartbeat(cycle_count: int, open_positions: int, margin_equity: float, path: str = DEFAULT_PATH,
+                    breaker_reason: str | None = None) -> None:
     """감시 루프가 사이클을 돌 때마다(매 POLL_INTERVAL_SECONDS) 호출 — 로그 파일과 별개로,
     대시보드가 "봇이 실제로 살아서 사이클을 돌고 있는지"를 파일 하나만 읽어서 바로 확인할 수 있게
-    한다. 로그의 하트비트(10분 주기)보다 훨씬 촘촘해서, 봇이 멈춘 지 몇십 초 만에도 감지 가능."""
+    한다. 로그의 하트비트(10분 주기)보다 훨씬 촘촘해서, 봇이 멈춘 지 몇십 초 만에도 감지 가능.
+
+    breaker_reason은 이번 사이클이 서킷브레이커로 진입을 건너뛰었을 때의 사유다(2026-09-22).
+    저널의 circuit_breaker_blocked는 "막히기 시작했다"는 한 줄뿐이라 "지금도 막혀 있는가"는
+    여기서만 알 수 있다 — 텔레그램의 정지 지속 알림이 이걸 읽는다."""
     record = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "cycle_count": cycle_count, "open_positions": open_positions, "margin_equity": margin_equity,
+        "circuit_breaker_blocked": breaker_reason is not None, "breaker_reason": breaker_reason,
     }
     file_path = Path(path)
     file_path.parent.mkdir(parents=True, exist_ok=True)
