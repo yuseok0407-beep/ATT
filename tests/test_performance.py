@@ -391,3 +391,81 @@ def test_r_performance_has_no_config_span_before_the_first_snapshot():
 
     assert result["config_changes"] == []
     assert result["since_config_change"] is None
+
+
+# ---------------------------------------------- 수수료 차감 순R (2026-09-22)
+# 저널의 realized_r은 가격만으로 재므로 수수료가 안 들어있고, 거래소의 realized_pnl도 수수료를
+# 뺀 값이 아니다(commission이 별개 필드). 손절폭 1.25%에서 왕복 수수료는 0.064R인데 이 전략의
+# 건당 기대값이 +0.02~0.06R이라, 수수료를 넣으면 총R의 부호가 바뀐다.
+
+
+def _closed_with_r(realized_r, *, entry=100.0, stop=98.75, pnl=None, **extra):
+    """손절폭 1.25%(= entry 100, stop 98.75)인 청산 기록."""
+    return {"timestamp": "2026-09-20T01:00:00+00:00", "symbol": "BTC/USDT:USDT", "event": "closed",
+            "reason": "take_profit" if realized_r > 0 else "stop_loss", "side": "long",
+            "entry_price": entry, "stop_loss_price": stop, "exit_price": entry * 1.02,
+            "realized_r": realized_r, "realized_pnl": pnl if pnl is not None else realized_r * 10,
+            **extra}
+
+
+def test_net_r_subtracts_the_configured_round_trip_fee_for_old_records():
+    """2026-09-22 이전 기록에는 실측 수수료가 없다 — 설정 수수료율과 손절폭으로 추정한다.
+    수수료R = 2 x 0.0004 / 0.0125 = 0.064R."""
+    result = summarize_r_performance([_closed_with_r(2.0)])
+
+    assert result["total_r"] == pytest.approx(2.0)
+    assert result["total_net_r"] == pytest.approx(2.0 - 0.064)
+    assert result["net_r_estimated_trades"] == 1
+    assert result["fee_pct_per_side"] == pytest.approx(performance.FEE_PCT_PER_SIDE)
+
+
+def test_net_r_uses_the_actual_recorded_fee_when_the_journal_has_it():
+    """실측이 있으면 추정하지 않고 그 값을 쓰고, 추정 건수에도 세지 않는다."""
+    result = summarize_r_performance([_closed_with_r(2.0, fee_r=0.03)])
+
+    assert result["total_net_r"] == pytest.approx(2.0 - 0.03)
+    assert result["net_r_estimated_trades"] == 0
+
+
+def test_net_r_prefers_net_realized_r_recorded_by_the_bot():
+    result = summarize_r_performance([_closed_with_r(2.0, fee_r=0.03, net_realized_r=1.95)])
+
+    assert result["total_net_r"] == pytest.approx(1.95)
+
+
+def test_fee_can_flip_a_positive_total_r_negative():
+    """이 프로젝트에서 실제로 벌어진 일 — 데모 저널의 총R +2.50이 수수료를 넣으면 음수가 된다.
+    수수료가 오차항이 아니라 기대값과 같은 크기라는 것을 고정한다."""
+    # 건당 +0.02R짜리 거래 40건: 총 +0.8R, 수수료는 40 x 0.064 = 2.56R.
+    entries = [_closed_with_r(0.02) for _ in range(40)]
+
+    result = summarize_r_performance(entries)
+
+    assert result["total_r"] > 0
+    assert result["total_net_r"] < 0
+
+
+def test_equity_curve_carries_both_gross_and_net_r():
+    result = summarize_r_performance([_closed_with_r(2.0), _closed_with_r(-1.0)])
+
+    last = result["equity_curve"][-1]
+    assert last["cumulative_r"] == pytest.approx(1.0)
+    assert last["cumulative_net_r"] == pytest.approx(1.0 - 2 * 0.064)
+
+
+def test_net_r_skips_trades_whose_r_was_discarded():
+    """R을 못 믿어서 버린 거래는 순R에도 안 들어간다(달러 통계에는 그대로 남는다)."""
+    # 가격으로는 +2R인데 실현손익이 음수 -> resolve_closed_trades가 R을 버린다.
+    contradictory = _closed_with_r(2.0, pnl=-1.53)
+    result = summarize_r_performance([contradictory])
+
+    assert result["num_trades"] == 0
+    assert result["total_net_r"] == pytest.approx(0.0)
+
+
+def test_net_drawdown_is_at_least_as_bad_as_gross():
+    entries = [_closed_with_r(1.0), _closed_with_r(-1.0), _closed_with_r(-1.0)]
+
+    result = summarize_r_performance(entries)
+
+    assert result["max_drawdown_net_r"] <= result["max_drawdown_r"]

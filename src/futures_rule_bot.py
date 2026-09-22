@@ -262,10 +262,14 @@ def check_position_protection(client, symbol: str, journal_path: str = None) -> 
 
 
 def _aggregate_closing_trades(client, symbol: str, entry_info: dict,
-                               last_trade_path: str = None) -> tuple[list, float | None, float | None]:
+                               last_trade_path: str = None) -> tuple[list, float | None, float | None, dict]:
     """entry_info(마지막 "entered" 저널 기록) 이후에 일어난 체결들 중 진입 체결 자체를 제외한
     나머지(=청산 체결들)를 모아 수량가중평균 체결가와 합산 실현손익을 계산한다. 청산 체결을
-    못 찾으면 ([], None, None).
+    못 찾으면 ([], None, None, {}).
+
+    네 번째 반환값은 이 왕복 거래의 실제 체결 사실(`fees`) — 진입/청산 수수료와 실제 진입
+    체결가다. 같은 `fetch_my_trades` 응답 안에 이미 다 들어있어서 추가 조회 없이 뽑을 수 있고,
+    이게 없으면 저널의 손익·R이 영구적으로 수수료 이전 값으로만 남는다(아래 _sum_commission 참고).
 
     fetch_my_trades를 since 없이 limit만 주면 "최신 N개"가 아니라 "가장 오래된 N개"가 돌아오는
     거래소 동작 때문에(실전 확인, UPDATE_LOG.md 2026-08-12) 진입 시각을 since로 앵커링해야
@@ -303,7 +307,7 @@ def _aggregate_closing_trades(client, symbol: str, entry_info: dict,
             pass  # 거래ID가 숫자가 아닌 형식이면(구버전 등) 이 필터는 건너뛴다 — 없는 것보다는 필터 없이 진행이 낫다.
 
     if not closing_trades:
-        return [], None, None
+        return [], None, None, {}
 
     total_qty = sum(float(t.get("amount") or 0) for t in closing_trades)
     if total_qty > 0:
@@ -311,11 +315,76 @@ def _aggregate_closing_trades(client, symbol: str, entry_info: dict,
     else:
         exit_price = closing_trades[-1].get("price")
     realized_pnl = sum(float((t.get("info") or {}).get("realizedPnl", 0) or 0) for t in closing_trades)
-    return closing_trades, exit_price, realized_pnl
+
+    # 진입 체결 = 이번 왕복에 속한 체결 중 청산 체결이 아닌 것. 진입 쪽 수수료와 **실제 진입
+    # 체결가**가 여기서만 나온다 — 주문 생성 응답에는 둘 다 안 담겨 온다(avgPrice가 "0.00"으로
+    # 온다, 2026-09-22 확인).
+    closing_ids = {t.get("id") for t in closing_trades}
+    entry_trades = [t for t in trades if t.get("id") not in closing_ids]
+    if last_processed_id is not None:
+        try:
+            entry_trades = [t for t in entry_trades
+                             if t.get("id") is not None and int(t["id"]) > int(last_processed_id)]
+        except (TypeError, ValueError):
+            pass
+
+    entry_fee = _sum_commission(entry_trades)
+    exit_fee = _sum_commission(closing_trades)
+    fees = {}
+    if entry_fee is not None or exit_fee is not None:
+        fees["entry_fee"] = entry_fee
+        fees["exit_fee"] = exit_fee
+        fees["total_fee"] = (entry_fee or 0.0) + (exit_fee or 0.0)
+        assets = _commission_assets(entry_trades) + [
+            a for a in _commission_assets(closing_trades) if a not in _commission_assets(entry_trades)]
+        if assets:
+            fees["fee_assets"] = assets
+    entry_qty = sum(float(t.get("amount") or 0) for t in entry_trades)
+    if entry_qty > 0:
+        fees["actual_entry_price"] = sum(
+            float(t.get("price") or 0) * float(t.get("amount") or 0) for t in entry_trades) / entry_qty
+    return closing_trades, exit_price, realized_pnl, fees
+
+
+def _sum_commission(trades: list) -> float | None:
+    """체결 목록의 수수료 합계(USDT). 수수료 정보가 아예 없으면 None.
+
+    **바이낸스의 `realizedPnl`에는 수수료가 안 들어있다** — `commission`이 별개 필드이고,
+    지금까지 저널의 `realized_pnl`은 앞쪽만 담아왔다(2026-09-22에 실제 계좌 체결 내역으로 확인:
+    CRCL 청산 한 건이 realizedPnl -48.23에 commission 0.80, 진입 쪽 0.81이 따로 있었다).
+    그래서 저널의 손익과 R은 둘 다 수수료 이전의 값이고, 손절폭 1.25%에서 왕복 수수료는
+    약 0.04~0.064R — 이 전략의 건당 기대값과 같은 크기다. 추정하지 않고 실제 값을 남긴다.
+
+    USDT 외의 자산으로 낸 수수료(BNB 할인 등)는 환산 없이 그대로 더한다 — 금액이 작고, 환율을
+    끌어오면 기록 시점에 따라 값이 달라져서 재현이 안 된다. commissionAsset은 같이 남긴다."""
+    if not trades:
+        return None
+    total = 0.0
+    found = False
+    for trade in trades:
+        info = trade.get("info") or {}
+        raw = info.get("commission")
+        if raw is None:
+            continue
+        try:
+            total += float(raw)
+            found = True
+        except (TypeError, ValueError):
+            continue
+    return total if found else None
+
+
+def _commission_assets(trades: list) -> list[str]:
+    assets = []
+    for trade in trades or []:
+        asset = (trade.get("info") or {}).get("commissionAsset")
+        if asset and asset not in assets:
+            assets.append(asset)
+    return assets
 
 
 def _build_closed_entry(symbol: str, reason: str, entry_info: dict, exit_price, realized_pnl,
-                         excursion_path: str = None) -> dict:
+                         excursion_path: str = None, fees: dict = None) -> dict:
     """청산 저널 기록 하나를 만든다. 실현손익($)만 남기던 걸 진입 맥락(방향/손절가/익절가)과
     R배수까지 같이 남기도록 확장했다(2026-09-09).
 
@@ -339,6 +408,26 @@ def _build_closed_entry(symbol: str, reason: str, entry_info: dict, exit_price, 
     }
     if side is not None and exit_price is not None:
         closed_entry["realized_r"] = excursion.to_r(exit_price, entry_price, stop_loss_price, side)
+
+    # 실제 수수료와 실제 진입 체결가(2026-09-22). realized_pnl과 realized_r은 둘 다 수수료
+    # **이전** 값이다 — 거래소의 realizedPnl에 수수료가 안 들어있고, R은 신호 봉 종가를
+    # 진입가로 써서 슬리피지도 안 들어있다. 두 값을 같이 남겨야 사후에 순성과를 낼 수 있다.
+    for key in ("entry_fee", "exit_fee", "total_fee", "fee_assets", "actual_entry_price"):
+        if fees and fees.get(key) is not None:
+            closed_entry[key] = fees[key]
+    if fees and fees.get("total_fee") is not None and realized_pnl is not None:
+        closed_entry["net_realized_pnl"] = realized_pnl - fees["total_fee"]
+    # 수수료의 R 환산 — 사이징과 무관하게 R로 비교하려면 이 값이 필요하다(가격만으로 잰 R에서
+    # 이걸 빼면 백테스트의 fee_pct_per_side 차감과 같은 의미가 된다).
+    risk_per_unit = None
+    if entry_price is not None and stop_loss_price is not None:
+        risk_per_unit = abs(float(entry_price) - float(stop_loss_price))
+    quantity = (entry_info.get("execution") or {}).get("quantity")
+    if (fees and fees.get("total_fee") is not None and risk_per_unit
+            and isinstance(quantity, (int, float)) and quantity > 0):
+        closed_entry["fee_r"] = fees["total_fee"] / (risk_per_unit * quantity)
+        if closed_entry.get("realized_r") is not None:
+            closed_entry["net_realized_r"] = closed_entry["realized_r"] - closed_entry["fee_r"]
 
     record = excursion.pop(symbol, path=excursion_path or EXCURSION_PATH)
     if record is not None:
@@ -367,7 +456,7 @@ def check_and_log_closed_trade(client, symbol: str, journal_path: str = None,
         return None
 
     try:
-        closing_trades, exit_price, realized_pnl = _aggregate_closing_trades(
+        closing_trades, exit_price, realized_pnl, fees = _aggregate_closing_trades(
             client, symbol, entry_info, last_trade_path=last_trade_path)
     except Exception:
         return None
@@ -397,7 +486,7 @@ def check_and_log_closed_trade(client, symbol: str, journal_path: str = None,
             reason = guessed_reason
 
     closed_entry = _build_closed_entry(symbol, reason, entry_info, exit_price, realized_pnl,
-                                        excursion_path=excursion_path)
+                                        excursion_path=excursion_path, fees=fees)
     append_entry(closed_entry, path=journal_path)
     _save_last_trade_id(symbol, last_trade_id, path=last_trade_path)
     return closed_entry
@@ -420,13 +509,13 @@ def record_manual_close(client, symbol: str, journal_path: str = None,
 
     if entry_info is not None:
         try:
-            closing_trades, exit_price, realized_pnl = _aggregate_closing_trades(
+            closing_trades, exit_price, realized_pnl, fees = _aggregate_closing_trades(
                 client, symbol, entry_info, last_trade_path=last_trade_path)
         except Exception:
             closing_trades = []
         if closing_trades:
             closed_entry = _build_closed_entry(symbol, "manual", entry_info, exit_price, realized_pnl,
-                                                excursion_path=excursion_path)
+                                                excursion_path=excursion_path, fees=fees)
             append_entry(closed_entry, path=journal_path)
             last_trade_id = closing_trades[-1].get("id")
             if last_trade_id is not None:

@@ -6,3 +6,5 @@ journal/*.jsonl
 state/
 *.log
 .pytest_cache/
+exports/
+.ohlcv_cache/

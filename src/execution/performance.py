@@ -1,6 +1,8 @@
 import re
 from datetime import datetime, timedelta, timezone
 
+from src.core.config import FEE_PCT_PER_SIDE
+
 
 def summarize_performance(entries: list[dict]) -> dict:
     """저널 항목 목록에서 event=="closed"인 것만 골라 대시보드용 성과 요약을 만든다.
@@ -194,6 +196,45 @@ def _price_r(exit_price, entry_price, stop_loss_price, side) -> float | None:
     return move / risk if side == "long" else -move / risk
 
 
+def _fee_r(trade: dict) -> tuple[float | None, bool]:
+    """이 거래의 왕복 수수료를 R로. (값, 추정여부).
+
+    **저널의 realized_r에는 수수료가 안 들어있다** — 가격만으로 재기 때문이고, 거래소가 주는
+    realized_pnl도 수수료를 뺀 값이 아니다(commission이 별개 필드, 2026-09-22 실계좌 확인).
+    손절폭 1.25%에서 왕복 수수료는 0.04~0.064R이고 이 전략의 건당 기대값이 +0.02~0.06R이라
+    **수수료를 빼면 총R의 부호가 바뀐다** — 그래서 화면에 순R을 같이 내야 한다.
+
+    2026-09-22 이후 청산 기록은 실제 수수료(`fee_r`)를 들고 있다. 그 이전 기록에는 없으므로
+    설정된 수수료율과 그 거래의 손절폭으로 추정한다(수수료R = 2 x 편도율 / 손절폭%, 사이징과
+    무관). 추정치는 그렇다고 표시해서 화면이 실측과 섞어 말하지 않게 한다."""
+    actual = trade.get("fee_r")
+    if isinstance(actual, (int, float)):
+        return float(actual), False
+
+    entry_price, stop_loss_price = trade.get("entry_price"), trade.get("stop_loss_price")
+    try:
+        stop_pct = abs(float(entry_price) - float(stop_loss_price)) / float(entry_price)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None, True
+    if stop_pct <= 0:
+        return None, True
+    return 2 * FEE_PCT_PER_SIDE / stop_pct, True
+
+
+def _net_r(trade: dict) -> tuple[float | None, bool]:
+    """수수료를 뺀 R. realized_r이 없으면(못 믿어서 버린 거래 등) None."""
+    realized_r = trade.get("realized_r")
+    if realized_r is None:
+        return None, False
+    net = trade.get("net_realized_r")
+    if isinstance(net, (int, float)):
+        return float(net), False
+    fee_r, estimated = _fee_r(trade)
+    if fee_r is None:
+        return None, estimated
+    return realized_r - fee_r, estimated
+
+
 def _drawdown(values: list[float]) -> float:
     """누적 곡선의 최대 낙폭(고점 대비 최대 하락폭). 자산 대비 %가 아니라 절대값이다 —
     입출금 이력이 없어서 신뢰할 수 있는 시작 자산을 모르기 때문."""
@@ -242,14 +283,26 @@ def summarize_r_performance(entries: list[dict], max_points: int = 400) -> dict:
     with_r = [t for t in trades if t.get("realized_r") is not None]
     changes = config_changes(entries)
 
-    curve = []
-    cumulative_pnl, cumulative_r = 0.0, 0.0
+    # 순R(수수료 차감)을 같이 굴린다 — 총R만 보면 이 전략이 흑자로 보이지만 수수료를 넣으면
+    # 부호가 바뀐다. 두 곡선을 같이 줘서 화면이 그 차이를 보여줄 수 있게 한다.
+    net_values, net_estimated = [], 0
     for trade in trades:
+        net, estimated = _net_r(trade)
+        net_values.append(net)
+        if net is not None and estimated:
+            net_estimated += 1
+
+    curve = []
+    cumulative_pnl, cumulative_r, cumulative_net_r = 0.0, 0.0, 0.0
+    for trade, net in zip(trades, net_values):
         cumulative_pnl += trade.get("realized_pnl") or 0.0
         if trade.get("realized_r") is not None:
             cumulative_r += trade["realized_r"]
+        if net is not None:
+            cumulative_net_r += net
         curve.append({"timestamp": trade.get("timestamp"), "symbol": trade.get("symbol"),
-                       "cumulative_pnl": cumulative_pnl, "cumulative_r": cumulative_r})
+                       "cumulative_pnl": cumulative_pnl, "cumulative_r": cumulative_r,
+                       "cumulative_net_r": cumulative_net_r})
 
     by_side: dict[str, dict] = {}
     for trade in with_r:
@@ -274,7 +327,17 @@ def summarize_r_performance(entries: list[dict], max_points: int = 400) -> dict:
         "avg_r": (sum(t["realized_r"] for t in with_r) / len(with_r)) if with_r else None,
         "win_rate": (sum(1 for t in with_r if t["realized_r"] > 0) / len(with_r)) if with_r else None,
         "max_drawdown_r": _drawdown([p["cumulative_r"] for p in curve]),
+        "max_drawdown_net_r": _drawdown([p["cumulative_net_r"] for p in curve]),
         "max_drawdown_usd": _drawdown([p["cumulative_pnl"] for p in curve]),
+        # 수수료 차감 후 — 이쪽이 실제 성과다. total_r은 수수료 이전 값이라 백테스트의
+        # 무수수료 결과와만 비교된다.
+        "total_net_r": sum(v for v in net_values if v is not None),
+        "avg_net_r": (sum(v for v in net_values if v is not None) / sum(1 for v in net_values if v is not None)
+                       if any(v is not None for v in net_values) else None),
+        # 실측 수수료가 저널에 없어서 설정값으로 추정한 거래 수 — 화면이 실측과 섞어 말하지
+        # 않도록 몇 건이 추정인지 밝힌다(2026-09-22 이전 청산은 전부 추정이다).
+        "net_r_estimated_trades": net_estimated,
+        "fee_pct_per_side": FEE_PCT_PER_SIDE,
         "by_side": by_side,
         "equity_curve": curve[-max_points:],
         # 설정 변경 경계와 "현재 설정으로만" 낸 성과 — 필터를 추가하기 전후가 한 숫자로
