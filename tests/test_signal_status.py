@@ -4,12 +4,18 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from src.core.config import STOP_LOSS_PCT
 from src.core.signal_status import CROSS_NEAR_PCT, MIN_BARS, evaluate_conditions
 
 SMA_PERIOD = 10
 
 
-def _df(closes, hl_pct=0.005):
+# 봉 폭을 손절폭에 비례시킨다 — 저변동 필터는 ATR/손절폭 비율이라, 고정 폭이면 .env의
+# STOP_LOSS_PCT를 바꾸는 것만으로(2026-09-22, 1.25% -> 1.75%) 이 파일의 시계열이 필터에 걸린다.
+_HL_PCT = 0.005 * STOP_LOSS_PCT / 0.0125
+
+
+def _df(closes, hl_pct=_HL_PCT):
     """고가/저가 폭은 가격 대비 비율로 잡는다 — 고정폭으로 두면 가격이 오를수록 ATR%가 작아져
     저변동 필터(MIN_ATR_TO_STOP_RATIO)에 걸려버린다."""
     closes = np.asarray(closes, dtype=float)
