@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timedelta, timezone
 
 from src.core.state import compute_consecutive_losses, get_daily_pnl_pct
 
@@ -89,3 +90,76 @@ class TestComputeConsecutiveLosses:
     def test_reset_event_with_a_win_immediately_after_still_returns_zero(self):
         entries = [_closed(-5.0), {"event": "consecutive_loss_reset"}, _closed(3.0)]
         assert compute_consecutive_losses(entries) == 0
+
+
+# ------------------------- 연속손실 자동 쿨다운 (2026-09-22)
+# 이 브레이커는 원래 자동 해제가 없는 "걸쇠"였다 — 한도에 닿으면 진입이 막히고, 막히면 새 청산이
+# 안 생기므로 카운터가 저절로 안 내려간다. 포지션이 다 닫힌 뒤 걸리면 사람이 수동 리셋을 누를
+# 때까지 영구 정지한다(2026-09-22에 데모 봇이 실제로 2일간 그 상태였다: 5/5, 마지막 거래 09-20).
+
+
+class TestConsecutiveLossCooldown:
+    NOW = datetime(2026, 9, 22, 12, 0, tzinfo=timezone.utc)
+
+    def _loss(self, hours_ago, pnl=-10.0):
+        when = self.NOW - timedelta(hours=hours_ago)
+        return {"timestamp": when.isoformat(), "event": "closed", "realized_pnl": pnl}
+
+    def test_losses_older_than_the_cooldown_stop_counting(self):
+        """마지막 손실 이후 쿨다운이 지났으면 카운트가 0으로 돌아간다 — 자동 해제."""
+        entries = [self._loss(h) for h in (50, 48, 46, 44, 42)]
+
+        assert compute_consecutive_losses(entries, cooldown_hours=24, now=self.NOW) == 0
+
+    def test_recent_losses_still_count(self):
+        entries = [self._loss(h) for h in (5, 4, 3)]
+
+        assert compute_consecutive_losses(entries, cooldown_hours=24, now=self.NOW) == 3
+
+    def test_window_is_anchored_on_the_most_recent_loss_not_the_oldest(self):
+        """오래된 손실이 섞여 있어도 최근 손실이 창 안이면 그 연속은 유지된다 — 새 손실이
+        닫히면 창이 다시 밀리는 동작(그래서 손실이 계속되는 동안에는 보호가 풀리지 않는다)."""
+        entries = [self._loss(40), self._loss(2), self._loss(1)]
+
+        # 40시간 전 것은 창 밖이라 거기서 멈추고, 최근 2건만 센다.
+        assert compute_consecutive_losses(entries, cooldown_hours=24, now=self.NOW) == 2
+
+    def test_cooldown_zero_keeps_the_old_latch_behaviour(self):
+        """0이면 자동 해제 없음 — 옛 동작을 그대로 쓸 수 있어야 한다(되돌릴 수 있는 변경)."""
+        entries = [self._loss(h) for h in (50, 48, 46, 44, 42)]
+
+        assert compute_consecutive_losses(entries, cooldown_hours=0, now=self.NOW) == 5
+
+    def test_a_win_inside_the_window_still_stops_the_count(self):
+        """쿨다운은 기존 규칙을 대체하는 게 아니라 얹히는 것 — 이익 청산은 그대로 카운트를 끊는다."""
+        entries = [self._loss(5), {"timestamp": (self.NOW - timedelta(hours=4)).isoformat(),
+                                    "event": "closed", "realized_pnl": 20.0},
+                    self._loss(3), self._loss(2)]
+
+        assert compute_consecutive_losses(entries, cooldown_hours=24, now=self.NOW) == 2
+
+    def test_manual_reset_boundary_still_wins(self):
+        entries = [self._loss(5), {"event": "consecutive_loss_reset"}, self._loss(2)]
+
+        assert compute_consecutive_losses(entries, cooldown_hours=24, now=self.NOW) == 1
+
+    def test_records_without_a_timestamp_are_not_treated_as_expired(self):
+        """시각을 모르는 기록을 "오래됐다"고 단정하면 보호가 조용히 풀린다 — 보수적으로 센다."""
+        entries = [{"event": "closed", "realized_pnl": -10.0} for _ in range(5)]
+
+        assert compute_consecutive_losses(entries, cooldown_hours=24, now=self.NOW) == 5
+
+    def test_naive_timestamps_are_read_as_utc(self):
+        """저널은 항상 tz를 붙이지만, 옛 기록이나 손으로 만든 기록이 naive일 수 있다 —
+        비교 자체가 터지면 브레이커 계산이 예외로 죽는다."""
+        naive = (self.NOW - timedelta(hours=50)).replace(tzinfo=None).isoformat()
+        entries = [{"timestamp": naive, "event": "closed", "realized_pnl": -10.0}]
+
+        assert compute_consecutive_losses(entries, cooldown_hours=24, now=self.NOW) == 0
+
+    def test_defaults_to_the_configured_cooldown(self):
+        from src.core import config
+
+        entries = [self._loss(config.CONSECUTIVE_LOSS_COOLDOWN_HOURS + 1)]
+
+        assert compute_consecutive_losses(entries, now=self.NOW) == 0

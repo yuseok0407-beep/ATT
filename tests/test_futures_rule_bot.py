@@ -64,6 +64,8 @@ def test_run_once_blocked_by_circuit_breaker():
         cycle = bot.run_once(MagicMock(), consecutive_losses=0, daily_pnl_pct=-0.10)
         assert cycle["event"] == "circuit_breaker_blocked"
         assert "symbols" not in cycle or cycle["symbols"] == {}
+        # 하트비트가 이 사유를 실어 텔레그램 정지 지속 알림이 쓴다
+        assert "일일 손실 한도" in cycle["reason"]
     finally:
         _stop(patches)
 
@@ -1004,7 +1006,11 @@ def test_evaluate_symbol_skips_entry_when_live_price_drifted_past_the_bracket():
 
 
 def test_evaluate_symbol_enters_when_live_price_drift_is_within_tolerance():
-    df = _signal_df(close=100.0, live_close=100.3)  # 이탈 0.3 < 허용 0.625
+    # 이탈 0.1 < 허용 0.125 (= 손절폭 1.25% x MAX_ENTRY_PRICE_DRIFT_R 0.1).
+    # 허용치는 2026-09-22에 0.5 -> 0.1로 좁혔다 — 이 전략은 편도 0.05R 슬리피지에서 이미
+    # 무너지므로 0.5는 죽는 수준의 10배를 허용하는 값이었다. 그래서 이 테스트의 괴리도
+    # 같이 좁혔다(옛 값 0.3은 이제 skipped_price_drift로 막히는 게 정상이다).
+    df = _signal_df(close=100.0, live_close=100.1)
 
     patches = _base_patches()
     _start(patches)
@@ -1457,3 +1463,114 @@ def test_config_snapshot_does_not_disturb_position_lifecycle(tmp_path):
     client = MagicMock()
     assert bot.check_and_log_untracked_position(
         client, "BTC/USDT:USDT", {"entryPrice": 100}, journal_path=journal) is None
+
+
+class TestClosedTradeRecordsRealCosts:
+    """저널의 realized_pnl/realized_r은 둘 다 **수수료 이전** 값이었다(2026-09-22).
+
+    거래소의 realizedPnl에 수수료가 안 들어있고(commission이 별개 필드), R은 신호 봉 종가를
+    진입가로 써서 슬리피지도 안 들어있다. 손절폭 1.25%에서 왕복 수수료는 약 0.04~0.064R인데
+    이 전략의 건당 기대값이 +0.02~0.06R이라 **수수료가 기대값과 같은 크기**다 — 실제 값을
+    저널에 남겨야 사후에 순성과를 낼 수 있다.
+    """
+
+    SYMBOL = "ETH/USDT:USDT"
+
+    def _paths(self, tmp_path, monkeypatch):
+        journal_path = str(tmp_path / "journal.jsonl")
+        monkeypatch.setattr(bot, "JOURNAL_PATH", journal_path)
+        monkeypatch.setattr(bot, "LAST_TRADE_STATE_PATH", str(tmp_path / "last_trade.json"))
+        return journal_path
+
+    def _entered(self, journal_path, quantity=10.0):
+        bot.append_entry({
+            "symbol": self.SYMBOL, "event": "entered", "signal": "LONG", "entry_price": 100.0,
+            "stop_loss_price": 99.0, "take_profit_price": 102.0,
+            "execution": {"quantity": quantity, "entry_order": {"id": "entry-order"}},
+        }, path=journal_path)
+
+    def test_records_entry_and_exit_commission_separately_and_nets_pnl(self, tmp_path, monkeypatch):
+        journal_path = self._paths(tmp_path, monkeypatch)
+        self._entered(journal_path)
+
+        client = MagicMock()
+        client.fetch_my_trades.return_value = [
+            {"id": "1", "price": 100.0, "amount": 10.0,
+             "info": {"orderId": "entry-order", "realizedPnl": "0", "commission": "0.40",
+                       "commissionAsset": "USDT"}},
+            {"id": "2", "price": 99.0, "amount": 10.0,
+             "info": {"orderId": "stop-order", "realizedPnl": "-10.0", "commission": "0.396",
+                       "commissionAsset": "USDT"}},
+        ]
+
+        result = bot.check_and_log_closed_trade(client, self.SYMBOL)
+
+        assert result["entry_fee"] == pytest.approx(0.40)
+        assert result["exit_fee"] == pytest.approx(0.396)
+        assert result["total_fee"] == pytest.approx(0.796)
+        assert result["fee_assets"] == ["USDT"]
+        # 거래소가 준 realizedPnl은 수수료 이전 값이라 그대로 남기고, 순손익을 따로 계산한다.
+        assert result["realized_pnl"] == pytest.approx(-10.0)
+        assert result["net_realized_pnl"] == pytest.approx(-10.796)
+
+    def test_records_fee_in_r_so_it_can_be_compared_with_the_backtest(self, tmp_path, monkeypatch):
+        """R로 환산해 둬야 백테스트의 fee_pct_per_side 차감과 같은 의미로 비교된다."""
+        journal_path = self._paths(tmp_path, monkeypatch)
+        self._entered(journal_path, quantity=10.0)
+
+        client = MagicMock()
+        client.fetch_my_trades.return_value = [
+            {"id": "1", "price": 100.0, "amount": 10.0,
+             "info": {"orderId": "entry-order", "realizedPnl": "0", "commission": "0.40"}},
+            {"id": "2", "price": 102.0, "amount": 10.0,
+             "info": {"orderId": "tp-order", "realizedPnl": "20.0", "commission": "0.408"}},
+        ]
+
+        result = bot.check_and_log_closed_trade(client, self.SYMBOL)
+
+        # 리스크 금액 = |100 - 99| x 10주 = 10 USDT. 수수료 0.808 / 10 = 0.0808R.
+        assert result["fee_r"] == pytest.approx(0.0808)
+        assert result["realized_r"] == pytest.approx(2.0)
+        assert result["net_realized_r"] == pytest.approx(2.0 - 0.0808)
+
+    def test_records_the_actual_entry_fill_price_which_the_order_response_lacks(self, tmp_path, monkeypatch):
+        """주문 생성 응답에는 체결가가 안 담겨 온다(avgPrice가 "0.00") — 진입 체결에서 뽑는다.
+        저널의 entry_price는 신호 봉 종가이므로, 이 둘의 차이가 실제 진입 슬리피지다."""
+        journal_path = self._paths(tmp_path, monkeypatch)
+        self._entered(journal_path)
+
+        client = MagicMock()
+        client.fetch_my_trades.return_value = [
+            {"id": "1", "price": 100.5, "amount": 4.0,
+             "info": {"orderId": "entry-order", "realizedPnl": "0", "commission": "0.16"}},
+            {"id": "2", "price": 100.7, "amount": 6.0,
+             "info": {"orderId": "entry-order", "realizedPnl": "0", "commission": "0.24"}},
+            {"id": "3", "price": 99.0, "amount": 10.0,
+             "info": {"orderId": "stop-order", "realizedPnl": "-15.0", "commission": "0.396"}},
+        ]
+
+        result = bot.check_and_log_closed_trade(client, self.SYMBOL)
+
+        # 부분 체결의 수량가중평균: (100.5*4 + 100.7*6)/10 = 100.62
+        assert result["actual_entry_price"] == pytest.approx(100.62)
+        assert result["entry_price"] == pytest.approx(100.0)  # 신호 봉 종가는 그대로 남는다
+        assert result["entry_fee"] == pytest.approx(0.40)
+
+    def test_omits_cost_fields_when_the_exchange_reports_no_commission(self, tmp_path, monkeypatch):
+        """옛 기록이나 수수료 정보가 없는 응답에서 0을 지어내면 "수수료가 없었다"로 읽힌다 —
+        없으면 칼럼 자체를 안 남긴다."""
+        journal_path = self._paths(tmp_path, monkeypatch)
+        self._entered(journal_path)
+
+        client = MagicMock()
+        client.fetch_my_trades.return_value = [
+            {"id": "2", "price": 99.0, "amount": 10.0,
+             "info": {"orderId": "stop-order", "realizedPnl": "-10.0"}},
+        ]
+
+        result = bot.check_and_log_closed_trade(client, self.SYMBOL)
+
+        assert "total_fee" not in result
+        assert "net_realized_pnl" not in result
+        assert "fee_r" not in result
+        assert result["realized_pnl"] == pytest.approx(-10.0)

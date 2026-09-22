@@ -25,10 +25,9 @@ for _stream in (sys.stdout, sys.stderr):
 from src.backtest.data import fetch_historical_ohlcv
 from src.backtest.engine import run_backtest
 from src.backtest.report import summarize
-from src.core.config import RULE_SMA_PERIOD
+from src.core.config import FEE_PCT_PER_SIDE, RULE_SMA_PERIOD
 from src.data.futures_exchange import get_futures_client, get_futures_market_data_client
 
-FEE_PCT_PER_SIDE = 0.0004
 TIMEFRAME = "1h"
 DAYS = 365
 TOP_N_BY_VOLUME = 25

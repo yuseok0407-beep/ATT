@@ -84,8 +84,9 @@ if __name__ == "__main__":
         try:
             cycle = run_once(client, env=env, symbols=symbols, leverage_by_symbol=leverage_by_symbol,
                               journal_path=journal_path, state_path=state_path, last_trade_path=last_trade_path)
+            blocked = cycle.get("event") == "circuit_breaker_blocked"
             write_heartbeat(cycle_count, cycle.get("open_position_count", 0), cycle["margin_equity"],
-                             path=heartbeat_path)
+                             path=heartbeat_path, breaker_reason=(cycle.get("reason") or "사유 미상") if blocked else None)
 
             if cycle.get("event") == "circuit_breaker_blocked":
                 logger.info("circuit_breaker_blocked margin_equity=%.2f", cycle["margin_equity"])

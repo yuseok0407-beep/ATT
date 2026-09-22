@@ -4,6 +4,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from src.core.config import (
+    BREAKER_HALT_ALERT_HOURS,
+    CONSECUTIVE_LOSS_COOLDOWN_HOURS,
     FUTURES_SYMBOLS,
     HEARTBEAT_STALE_SECONDS,
     TELEGRAM_DAILY_SUMMARY_HOUR,
@@ -271,6 +273,53 @@ def check_heartbeat_stall(env: str, state: dict) -> str | None:
     if was_stalled and not stalled:
         return f"✅ [{label}] 사이클이 다시 정상적으로 돌고 있습니다."
     return None
+
+
+def check_breaker_halt(env: str, state: dict, now: datetime = None) -> str | None:
+    """서킷브레이커 정지가 BREAKER_HALT_ALERT_HOURS 넘게 계속되면 한 번 알리고, 풀리면 한 번 더
+    알린다(2026-09-22 추가, check_heartbeat_stall과 같은 상태 전이 패턴).
+
+    저널의 circuit_breaker_blocked 알림은 "막히기 시작했다"는 한 통뿐이라 "아직도 막혀 있다"로
+    읽히지 않았다 — 데모 봇이 연속손실 5/5로 2일간 멈춰 있는 걸 아무도 몰랐다. "지금도 막혀
+    있는가"는 저널에 없고 봇이 매 사이클 쓰는 하트비트에만 있다.
+
+    정지 시작 시각은 이 프로세스가 처음 목격한 시각이다 — 텔레그램 봇을 재시작하면 다시 센다
+    (늦게 알리는 쪽으로만 틀린다). 봇이 꺼졌거나 하트비트가 낡았으면 판단하지 않는다(다른 알림이
+    이미 맡는다). 하트비트에 필드가 없으면(재시작 전 옛 봇 코드) 알 수 없으므로 아무것도 안 바꾼다."""
+    if BREAKER_HALT_ALERT_HOURS <= 0:
+        return None
+    label = "LIVE" if env == "live" else "DEMO"
+    env_state = state.setdefault(env, {})
+    now = now or datetime.now().astimezone()
+
+    if not bot_process.get_status(env)["running"]:
+        env_state.pop("breaker_blocked_since", None)
+        env_state["breaker_halt_alerted"] = False
+        return None
+
+    heartbeat = read_heartbeat(path=_heartbeat_path(env))
+    if (not heartbeat or "circuit_breaker_blocked" not in heartbeat
+            or heartbeat.get("age_seconds", 0) > HEARTBEAT_STALE_SECONDS):
+        return None
+
+    if not heartbeat["circuit_breaker_blocked"]:
+        was_alerted = env_state.get("breaker_halt_alerted", False)
+        env_state.pop("breaker_blocked_since", None)
+        env_state["breaker_halt_alerted"] = False
+        return f"✅ [{label}] 서킷브레이커 정지가 풀려 신규 진입을 다시 평가합니다." if was_alerted else None
+
+    since_raw = env_state.get("breaker_blocked_since")
+    if since_raw is None:
+        env_state["breaker_blocked_since"] = now.isoformat()
+        return None
+    hours = (now - datetime.fromisoformat(since_raw)).total_seconds() / 3600
+    if hours < BREAKER_HALT_ALERT_HOURS or env_state.get("breaker_halt_alerted"):
+        return None
+
+    env_state["breaker_halt_alerted"] = True
+    return (f"⏸ [{label}] 서킷브레이커로 {hours:.0f}시간째 신규 진입이 멈춰 있습니다"
+            f" — {heartbeat.get('breaker_reason')}.\n연속손실은 마지막 손실 {CONSECUTIVE_LOSS_COOLDOWN_HOURS:g}시간 뒤,"
+            f" 일일손실은 날짜가 바뀌면 자동 재개됩니다. 연속손실을 바로 풀려면 /reset_streak_{env}")
 
 
 def check_ip_change(state: dict) -> str | None:
@@ -546,6 +595,9 @@ def run_once(state: dict, chat_id: str, token: str) -> dict:
         stall_message = check_heartbeat_stall(env, state)
         if stall_message:
             send_message(stall_message, chat_id=chat_id, token=token)
+        halt_message = check_breaker_halt(env, state)
+        if halt_message:
+            send_message(halt_message, chat_id=chat_id, token=token)
 
     summary_message = check_daily_summary(state)
     if summary_message:

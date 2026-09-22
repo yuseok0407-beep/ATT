@@ -21,14 +21,14 @@ for _stream in (sys.stdout, sys.stderr):
 from src.backtest.data import fetch_historical_ohlcv
 from src.backtest.engine import run_backtest
 from src.backtest.report import summarize
-from src.core.config import FUTURES_SYMBOLS, RULE_ADX_THRESHOLD, RULE_SMA_PERIOD, RULE_TIMEFRAME, STOP_LOSS_PCT, TAKE_PROFIT_RR
+from src.core.config import (FEE_PCT_PER_SIDE, FUTURES_SYMBOLS, RULE_ADX_THRESHOLD, RULE_SMA_PERIOD,
+                             RULE_TIMEFRAME, STOP_LOSS_PCT, TAKE_PROFIT_RR)
 from src.data.futures_exchange import get_futures_market_data_client
 
 BACKTEST_DAYS = 365
 BREAKEVEN_AT_R = 1.0
 MAX_HOLD_BARS = 72  # 1시간봉 기준 3일
 ATR_MULTIPLIER = 2.0
-FEE_PCT_PER_SIDE = 0.0004  # 바이낸스 선물 테이커 수수료(편도) 기본값
 
 VARIANTS = {
     "baseline(현재)": dict(stop_mode="fixed", use_breakeven=False, use_max_hold=False),

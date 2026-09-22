@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import pytest
@@ -636,3 +637,99 @@ def test_first_config_snapshot_says_tracking_started(monkeypatch):
 
     assert len(messages) == 1
     assert "설정 변경 추적 시작" in messages[0]
+
+
+# ---------- 서킷브레이커 정지 지속 알림 (2026-09-22) ----------
+
+_T0 = datetime(2026, 9, 22, 12, 0, tzinfo=timezone.utc)
+
+
+def _breaker_heartbeat(monkeypatch, blocked, age=20, reason="연속 손실 5회로 임계치 도달"):
+    record = {"age_seconds": age, "circuit_breaker_blocked": blocked,
+              "breaker_reason": reason if blocked else None}
+    monkeypatch.setattr(tb, "read_heartbeat", lambda path=None: record)
+
+
+def test_breaker_halt_is_quiet_until_the_threshold_then_warns_once(monkeypatch):
+    """막힌 걸 처음 본 순간이 아니라 BREAKER_HALT_ALERT_HOURS가 지나서야 한 통 — 시작 알림은
+    저널의 circuit_breaker_blocked가 이미 보낸다."""
+    _running(monkeypatch)
+    monkeypatch.setattr(tb, "BREAKER_HALT_ALERT_HOURS", 6)
+    _breaker_heartbeat(monkeypatch, blocked=True)
+    state = {}
+
+    assert tb.check_breaker_halt("demo", state, now=_T0) is None
+    assert tb.check_breaker_halt("demo", state, now=_T0 + timedelta(hours=5)) is None
+    warned = tb.check_breaker_halt("demo", state, now=_T0 + timedelta(hours=6))
+    assert warned is not None and "6시간째" in warned and "연속 손실 5회" in warned
+    assert "/reset_streak_demo" in warned
+    assert tb.check_breaker_halt("demo", state, now=_T0 + timedelta(hours=12)) is None
+
+
+def test_breaker_halt_reports_recovery_only_after_it_warned(monkeypatch):
+    _running(monkeypatch)
+    monkeypatch.setattr(tb, "BREAKER_HALT_ALERT_HOURS", 6)
+    state = {}
+
+    # 경고 전에 풀리면 조용하다 — 짧은 정지까지 "풀렸다"를 쏘면 노이즈다
+    _breaker_heartbeat(monkeypatch, blocked=True)
+    tb.check_breaker_halt("live", state, now=_T0)
+    _breaker_heartbeat(monkeypatch, blocked=False)
+    assert tb.check_breaker_halt("live", state, now=_T0 + timedelta(hours=1)) is None
+
+    _breaker_heartbeat(monkeypatch, blocked=True)
+    tb.check_breaker_halt("live", state, now=_T0 + timedelta(hours=2))
+    assert tb.check_breaker_halt("live", state, now=_T0 + timedelta(hours=8)) is not None
+    _breaker_heartbeat(monkeypatch, blocked=False)
+    recovered = tb.check_breaker_halt("live", state, now=_T0 + timedelta(hours=9))
+    assert recovered is not None and "LIVE" in recovered and "풀려" in recovered
+    assert tb.check_breaker_halt("live", state, now=_T0 + timedelta(hours=10)) is None
+
+
+def test_breaker_halt_clock_restarts_after_it_clears(monkeypatch):
+    """정지 -> 해제 -> 재정지면 새 정지의 시간만 센다(앞 정지 시간을 이어 붙이지 않는다)."""
+    _running(monkeypatch)
+    monkeypatch.setattr(tb, "BREAKER_HALT_ALERT_HOURS", 6)
+    state = {}
+    _breaker_heartbeat(monkeypatch, blocked=True)
+    tb.check_breaker_halt("demo", state, now=_T0)
+    _breaker_heartbeat(monkeypatch, blocked=False)
+    tb.check_breaker_halt("demo", state, now=_T0 + timedelta(hours=5))
+    _breaker_heartbeat(monkeypatch, blocked=True)
+    tb.check_breaker_halt("demo", state, now=_T0 + timedelta(hours=5, minutes=1))
+
+    assert tb.check_breaker_halt("demo", state, now=_T0 + timedelta(hours=7)) is None
+
+
+def test_breaker_halt_says_nothing_when_the_bot_is_stopped(monkeypatch):
+    _running(monkeypatch, running=False)
+    monkeypatch.setattr(tb, "BREAKER_HALT_ALERT_HOURS", 6)
+    _breaker_heartbeat(monkeypatch, blocked=True)
+    state = {"demo": {"breaker_blocked_since": (_T0 - timedelta(hours=48)).isoformat()}}
+
+    assert tb.check_breaker_halt("demo", state, now=_T0) is None
+    assert "breaker_blocked_since" not in state["demo"]  # 재시작 후 옛 정지 시간을 이어 세지 않는다
+
+
+def test_breaker_halt_ignores_a_stale_or_old_format_heartbeat(monkeypatch):
+    """낡은 하트비트는 check_heartbeat_stall 담당이고, 필드가 없는 건 재시작 전 옛 봇 코드다 —
+    둘 다 '지금 막혀 있는가'를 알 수 없으므로 판단을 바꾸지 않는다."""
+    _running(monkeypatch)
+    monkeypatch.setattr(tb, "BREAKER_HALT_ALERT_HOURS", 6)
+    since = (_T0 - timedelta(hours=1)).isoformat()
+    state = {"demo": {"breaker_blocked_since": since}}
+
+    _breaker_heartbeat(monkeypatch, blocked=False, age=99999)
+    assert tb.check_breaker_halt("demo", state, now=_T0 + timedelta(hours=10)) is None
+    monkeypatch.setattr(tb, "read_heartbeat", lambda path=None: {"age_seconds": 20})
+    assert tb.check_breaker_halt("demo", state, now=_T0 + timedelta(hours=10)) is None
+    assert state["demo"]["breaker_blocked_since"] == since
+
+
+def test_breaker_halt_can_be_disabled(monkeypatch):
+    _running(monkeypatch)
+    monkeypatch.setattr(tb, "BREAKER_HALT_ALERT_HOURS", 0)
+    _breaker_heartbeat(monkeypatch, blocked=True)
+    state = {"demo": {"breaker_blocked_since": (_T0 - timedelta(hours=48)).isoformat()}}
+
+    assert tb.check_breaker_halt("demo", state, now=_T0) is None

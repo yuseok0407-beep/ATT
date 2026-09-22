@@ -16,12 +16,11 @@ for _stream in (sys.stdout, sys.stderr):
 from src.backtest.data import fetch_historical_ohlcv
 from src.backtest.engine import run_backtest
 from src.backtest.report import summarize
-from src.core.config import RULE_SMA_PERIOD
+from src.core.config import FEE_PCT_PER_SIDE, RULE_SMA_PERIOD
 from src.data.futures_exchange import get_futures_market_data_client
 
 TIMEFRAME = "1h"
 DAYS = 365
-FEE_PCT_PER_SIDE = 0.0004
 MIN_BARS = 400  # 반으로 쪼갰을 때 한쪽이 최소 200봉은 되도록
 
 # 2026-08-12 스크리닝에서 총R 양수 + 거래 30건 이상이었던 후보(SPCX/QQQ/SPY/KORU는 기간이
