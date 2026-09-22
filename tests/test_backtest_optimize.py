@@ -26,7 +26,11 @@ def _flat_segment(n=61):
     return pd.DataFrame({"close": closes, "high": closes + 0.1, "low": closes - 0.1})
 
 
-FIXED = dict(stop_mode="fixed", stop_loss_pct=0.01, take_profit_rr=2.0)
+# 이 파일은 그리드서치/워크포워드의 **집계와 판정**을 검증한다 — 합성 데이터가 짧아서 실거래
+# 진입 게이트(레짐 SMA400·저변동)와 수수료를 켜면 진입이 안 생겨 판정 자체를 볼 수 없다.
+# 게이트가 실제로 걸리는지는 tests/test_backtest_engine.py의 "진입 게이트" 절에서 본다.
+FIXED = dict(stop_mode="fixed", stop_loss_pct=0.01, take_profit_rr=2.0,
+             regime_sma_period=0, min_atr_to_stop_ratio=0.0, fee_pct_per_side=0.0)
 
 
 def test_run_grid_search_always_includes_baseline_even_when_not_in_grid():

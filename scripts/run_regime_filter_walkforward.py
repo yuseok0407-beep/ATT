@@ -27,14 +27,13 @@ for _stream in (sys.stdout, sys.stderr):
 
 from src.backtest.data import fetch_historical_ohlcv
 from src.backtest.optimize import BASELINE_LABEL, aggregate_stats, run_walk_forward
-from src.core.config import (FUTURES_SYMBOLS, RULE_ADX_THRESHOLD, RULE_SMA_PERIOD,
-                             STOP_LOSS_PCT, TAKE_PROFIT_RR)
+from src.core.config import (FEE_PCT_PER_SIDE, FUTURES_SYMBOLS, RULE_ADX_THRESHOLD,
+                             RULE_SMA_PERIOD, STOP_LOSS_PCT, TAKE_PROFIT_RR)
 from src.core.futures_strategy import detect_signal, make_regime_filtered_signal_fn
 from src.data.futures_exchange import get_futures_market_data_client
 
 TIMEFRAME = "1h"
 BACKTEST_DAYS = 365
-FEE_PCT_PER_SIDE = 0.0004
 N_SPLITS = 4
 MIN_BARS = 800  # 4분할 시 한 구간이 최소 200봉은 되도록
 WORKERS = 6
@@ -48,6 +47,10 @@ PARAM_GRID = {"take_profit_rr": [TAKE_PROFIT_RR]}
 FIXED_PARAMS = dict(
     stop_loss_pct=STOP_LOSS_PCT, adx_threshold=RULE_ADX_THRESHOLD, sma_period=RULE_SMA_PERIOD,
     require_rsi_confirm=True, fee_pct_per_side=FEE_PCT_PER_SIDE,
+    # 이 스크립트는 레짐 필터 길이 자체가 비교 대상이라 signal_fn으로 직접 주입한다 — 엔진의
+    # 레짐 게이트(기본값 = config의 실거래값)까지 켜지면 "필터 없음" 팔에도 필터가 걸려서
+    # 비교가 무의미해지므로 여기서만 끈다(2026-09-22에 엔진이 이 게이트를 갖게 됨).
+    regime_sma_period=0,
 )
 
 

@@ -2,8 +2,21 @@ from typing import Callable
 
 import pandas as pd
 
-from src.core.config import RULE_ADX_THRESHOLD, STOP_LOSS_PCT, TAKE_PROFIT_RR
-from src.core.futures_strategy import compute_bracket_prices, detect_signal
+from src.core.config import (
+    FEE_PCT_PER_SIDE,
+    MIN_ATR_TO_STOP_RATIO,
+    RULE_ADX_THRESHOLD,
+    RULE_REGIME_SMA_PERIOD,
+    RULE_SMA_PERIOD,
+    STOP_LOSS_PCT,
+    TAKE_PROFIT_RR,
+)
+from src.core.futures_strategy import (
+    apply_regime_filter,
+    compute_bracket_prices,
+    detect_signal,
+    passes_volatility_floor,
+)
 from src.core.indicators import atr
 
 # detect_signal 자체가 요구하는 최소 워밍업(35봉)
@@ -111,6 +124,84 @@ def _check_exit_partial(bar: pd.Series, position: dict, fee_pct_per_side: float,
     return None, None, None
 
 
+def entry_start_bar(df_len: int, regime_sma_period: int) -> int:
+    """진입 판단을 시작할 봉 위치.
+
+    레짐 필터가 켜져 있으면 그 SMA가 확정된 뒤부터다 — 실거래 봇은 항상 SMA기간+2봉을 조회해서
+    **모든 판단에 필터가 적용된 상태**인데, warm-up 구간(필터 미적용)부터 돌면 그 구간만 다른
+    전략이 되어 비교가 깨진다."""
+    start = MIN_WARMUP_BARS
+    if regime_sma_period > 0:
+        start = max(start, regime_sma_period)
+    return min(start, df_len)
+
+
+def gated_signals(
+    df: pd.DataFrame,
+    *,
+    stop_loss_pct: float = STOP_LOSS_PCT,
+    atr_period: int = 14,
+    adx_threshold: float = RULE_ADX_THRESHOLD,
+    regime_sma_period: int = RULE_REGIME_SMA_PERIOD,
+    min_atr_to_stop_ratio: float = MIN_ATR_TO_STOP_RATIO,
+    sma_period: int = RULE_SMA_PERIOD,
+    rsi_period: int = 14,
+    rsi_threshold: float = 50.0,
+    require_rsi_confirm: bool = True,
+    signal_fn: Callable[[pd.DataFrame], str | None] | None = None,
+) -> dict[int, str]:
+    """봉 위치 -> 진입 게이트를 모두 통과한 신호("LONG"/"SHORT"). 통과 못 한 봉은 아예 없다.
+
+    **포지션 상태와 무관하게** 계산한다 — 그래서 단일 종목 백테스트(`run_backtest`)와 포트폴리오
+    시뮬레이션(`portfolio.simulate_portfolio`)이 이 함수 하나를 공유할 수 있다. 동시보유 한도
+    때문에 어떤 진입이 버려지는지는 포트폴리오 쪽에서 결정할 일이고, "그 봉에 진입 후보가
+    있었는가"는 그 결정과 무관하게 같아야 한다.
+
+    순서는 실거래 봇 `_evaluate_symbol`과 같다: 신호 -> 레짐 게이트 -> 저변동 게이트. 판정은
+    `futures_strategy`의 같은 함수를 그대로 부른다(조건을 두 군데 적지 않기 위함).
+
+    각 시점의 레짐 SMA와 ATR은 그 시점까지의 종가만으로 계산되므로 미래 정보를 쓰지 않는다."""
+    regime_above = regime_valid = None
+    if regime_sma_period > 0:
+        regime_sma = df["close"].rolling(regime_sma_period).mean()
+        regime_above = df["close"] > regime_sma
+        regime_valid = ~regime_sma.isna()
+
+    vol_ratio = None
+    if min_atr_to_stop_ratio > 0 and stop_loss_pct > 0:
+        # atr_to_stop_ratio()와 같은 정의(ATR / 종가 / 손절폭%)를 시리즈로 한 번에 계산한다 —
+        # 봉마다 그 함수를 부르면 매번 ATR 전체를 다시 계산해서 종목당 수만 번이 된다.
+        vol_ratio = atr(df, atr_period) / df["close"] / stop_loss_pct
+
+    out: dict[int, str] = {}
+    for i in range(entry_start_bar(len(df), regime_sma_period), len(df)):
+        window = df.iloc[max(0, i - SIGNAL_LOOKBACK_BARS + 1):i + 1]
+        if signal_fn is not None:
+            signal = signal_fn(window)
+        else:
+            signal = detect_signal(
+                window, adx_threshold=adx_threshold, sma_period=sma_period, rsi_period=rsi_period,
+                rsi_threshold=rsi_threshold, require_rsi_confirm=require_rsi_confirm,
+            )
+        if signal is None:
+            continue
+
+        if regime_above is not None:
+            above = bool(regime_above.iloc[i]) if regime_valid.iloc[i] else None
+            signal = apply_regime_filter(signal, above)
+            if signal is None:
+                continue
+
+        if vol_ratio is not None:
+            ratio = vol_ratio.iloc[i]
+            ratio = None if pd.isna(ratio) else float(ratio)
+            if not passes_volatility_floor(ratio, min_atr_to_stop_ratio):
+                continue
+
+        out[i] = signal
+    return out
+
+
 def run_backtest(
     df: pd.DataFrame,
     *,
@@ -124,8 +215,11 @@ def run_backtest(
     use_max_hold: bool = False,
     max_hold_bars: int = 72,
     adx_threshold: float = RULE_ADX_THRESHOLD,
-    fee_pct_per_side: float = 0.0,
-    sma_period: int = 20,
+    fee_pct_per_side: float = FEE_PCT_PER_SIDE,
+    slippage_r_per_side: float = 0.0,
+    regime_sma_period: int = RULE_REGIME_SMA_PERIOD,
+    min_atr_to_stop_ratio: float = MIN_ATR_TO_STOP_RATIO,
+    sma_period: int = RULE_SMA_PERIOD,
     rsi_period: int = 14,
     rsi_threshold: float = 50.0,
     require_rsi_confirm: bool = True,
@@ -146,14 +240,47 @@ def run_backtest(
     adx_threshold/sma_period/rsi_period/rsi_threshold/require_rsi_confirm은 무시된다 — 청산
     시뮬레이션(손절/익절/손익분기/최대보유) 로직은 전략과 무관하게 그대로 재사용된다.
 
-    fee_pct_per_side: 편도 수수료율(예: 바이낸스 선물 테이커 0.0004=0.04%). 왕복 비용을 진입가
-    기준 노셔널로 근사해 R배수에서 차감한다 — 0으로 두면(기본값) 수수료 없는 이상적인 결과.
+    fee_pct_per_side: 편도 수수료율. 왕복 비용을 진입가 기준 노셔널로 근사해 R배수에서
+    차감한다. **기본값은 config의 FEE_PCT_PER_SIDE**(2026-09-22 이전에는 0.0이었다) — 손절폭
+    1.25%에서 왕복 수수료는 0.064R이고 이 전략의 건당 기대값과 같은 크기라, 기본값이 0이면
+    엔진을 직접 부르는 모든 코드가 조용히 낙관적인 결과를 낸다. 수수료 없는 결과를 일부러
+    보려면 명시적으로 0을 넘길 것.
+
+    slippage_r_per_side: 진입/청산 각각에 **손절폭의 몇 배**만큼 불리한 체결을 가정한다
+    (0.1이면 편도 0.1R씩, 왕복 0.2R). R로 받는 이유는 수수료와 같은 단위로 더해서 "이 전략이
+    비용을 얼마까지 감당하는지"를 한 축으로 볼 수 있기 때문.
+
+    **왜 필요한가:** 백테스트는 신호 봉 **종가에 즉시** 체결된다고 보지만 실거래 봇은 그 봉이
+    마감된 뒤 최대 `POLL_INTERVAL_SECONDS`만큼 지나서 시장가로 들어가고, 신호가에서 현재가가
+    `MAX_ENTRY_PRICE_DRIFT_R`(기본 0.5R)까지 벌어져도 진입을 허용한다 — 즉 **구조적으로 최대
+    0.5R까지 불리한 체결이 허용된다.** 이 전략의 백테스트 건당 기대값이 +0.12R이므로 그 절반의
+    괴리만 있어도 기대값이 사라진다. 손절/익절 가격은 실거래와 같이 **신호 봉 종가 기준**으로
+    두고 체결가만 불리하게 옮기므로, 이 값이 재는 것은 정확히 그 구조적 괴리다.
+
+    수수료와 달리 기본값이 0인 이유: 관측값이 없다. 저널의 `realized_r`은 신호 봉 종가를
+    진입가로 써서 진입 슬리피지를 애초에 못 재고 있었다(2026-09-22부터 실제 체결가를 같이
+    남기기 시작했으므로, 표본이 쌓이면 그 실측으로 기본값을 정할 수 있다).
+
+    regime_sma_period / min_atr_to_stop_ratio: **실거래 봇이 detect_signal 뒤에 거는 두 개의
+    진입 게이트**(레짐 숏차단·저변동 차단)를 백테스트에서도 그대로 적용한다. 기본값은 config의
+    실거래값이라, 인자를 안 넘기면 백테스트가 실거래와 같은 규칙을 돈다. 0으로 두면 그 게이트만
+    꺼진다.
+
+    2026-09-22 이전에는 이 두 게이트가 엔진에 아예 없었다 — 레짐 필터는 `signal_fn`을 손으로
+    주입하는 스크립트 하나(`run_regime_filter_walkforward.py`)만 썼고 **저변동 필터는 어떤
+    백테스트 경로에도 없었다.** 그래서 `run_backtest`/`run_grid_search`/`run_walk_forward`의
+    기본 경로는 실거래가 거부하는 진입을 포함한 다른 전략을 측정하고 있었다.
+
+    두 게이트는 `futures_strategy.apply_regime_filter`/`passes_volatility_floor`를 그대로 부른다
+    (실거래 봇과 같은 함수 — 조건을 두 군데 적지 않기 위함). 각 시점의 레짐 SMA와 ATR은 그
+    시점까지의 종가만으로 계산되므로 미래 정보를 쓰지 않는다.
 
     target_series: 주어지면 각 봉의 값을 그 시점의 익절 목표가로 쓴다(예: 볼린저밴드 중간선) —
     df와 같은 인덱스를 가져야 한다. stop_mode로 계산된 target_price는 이 경우 무시되고 손절가만
     그대로 쓰인다.
 
-    use_partial_tp: True면 부분 익절(스케일 아웃)을 시뮬레이션한다 — partial_at_r(원래 리스크의
+    use_partial_tp: True면 부분 익절(스케일 아웃)을 시뮬레이션한다. **이 경로는
+    slippage_r_per_side를 반영하지 않는다** — 실거래 봇에 부분 익절이 없어서 비교 대상이 없다. — partial_at_r(원래 리스크의
     몇 배)에 도달하면 포지션의 partial_fraction만큼 청산해서 그만큼의 R을 확정하고,
     breakeven_after_partial=True(기본값)면 나머지 물량의 손절을 진입가로 옮긴 뒤, 나머지는
     (stop_mode로 계산된) 최종 target_price까지 계속 보유한다. use_breakeven/target_series와는
@@ -163,10 +290,19 @@ def run_backtest(
 
     atr_series = atr(df, atr_period) if stop_mode == "atr" else None
 
+    # 진입 후보를 한 번에 계산한다 — 포트폴리오 시뮬레이터(`portfolio.simulate_portfolio`)가
+    # **같은 함수**를 쓰므로 단일 종목 결과와 포트폴리오 결과의 진입 규칙이 어긋날 수 없다.
+    signals = gated_signals(
+        df, stop_loss_pct=stop_loss_pct, atr_period=atr_period, adx_threshold=adx_threshold,
+        regime_sma_period=regime_sma_period, min_atr_to_stop_ratio=min_atr_to_stop_ratio,
+        sma_period=sma_period, rsi_period=rsi_period, rsi_threshold=rsi_threshold,
+        require_rsi_confirm=require_rsi_confirm, signal_fn=signal_fn,
+    )
+
     trades: list[dict] = []
     position: dict | None = None
 
-    for i in range(MIN_WARMUP_BARS, len(df)):
+    for i in range(entry_start_bar(len(df), regime_sma_period), len(df)):
         bar = df.iloc[i]
 
         if position is not None:
@@ -189,11 +325,22 @@ def run_backtest(
                 if reason is None and use_max_hold and (i - position["entry_index"]) >= max_hold_bars:
                     reason, exit_price = "max_hold", float(bar["close"])
                 if reason is not None:
-                    pnl_r = _pnl_r(position["entry_price"], position["original_stop_price"], position["side"], exit_price)
-                    if fee_pct_per_side:
-                        risk = abs(position["entry_price"] - position["original_stop_price"])
-                        fee_r = (2 * fee_pct_per_side * position["entry_price"]) / risk if risk else 0.0
-                        pnl_r -= fee_r
+                    # R의 분모는 **신호가~손절가**다(실거래 realized_r과 같은 기준) — 체결이
+                    # 나빠진 것은 분모를 키우는 게 아니라 손익을 깎는 것으로 나타나야 한다.
+                    signal_price = position["signal_price"]
+                    risk = abs(signal_price - position["original_stop_price"])
+                    fill_exit = exit_price
+                    if slippage_r_per_side and risk:
+                        # 청산도 불리한 쪽으로 옮긴다 — 롱은 트리거보다 낮게, 숏은 높게 체결된
+                        # 것으로 본다(STOP_MARKET/TAKE_PROFIT_MARKET은 둘 다 시장가로 나간다).
+                        slip = slippage_r_per_side * risk
+                        fill_exit = exit_price - slip if position["side"] == "long" else exit_price + slip
+                    move = fill_exit - position["entry_price"]
+                    if position["side"] == "short":
+                        move = -move
+                    pnl_r = move / risk if risk else 0.0
+                    if fee_pct_per_side and risk:
+                        pnl_r -= (2 * fee_pct_per_side * position["entry_price"]) / risk
 
             if reason is not None:
                 trades.append({
@@ -204,18 +351,12 @@ def run_backtest(
                 position = None
             continue
 
-        window = df.iloc[max(0, i - SIGNAL_LOOKBACK_BARS + 1):i + 1]
-        if signal_fn is not None:
-            signal = signal_fn(window)
-        else:
-            signal = detect_signal(
-                window, adx_threshold=adx_threshold, sma_period=sma_period, rsi_period=rsi_period,
-                rsi_threshold=rsi_threshold, require_rsi_confirm=require_rsi_confirm,
-            )
+        signal = signals.get(i)
         if signal is None:
             continue
 
-        entry_price = float(bar["close"])
+        signal_price = float(bar["close"])
+        entry_price = signal_price
         side = "long" if signal == "LONG" else "short"
 
         if stop_mode == "fixed":
@@ -233,10 +374,20 @@ def run_backtest(
                 stop_price = entry_price + stop_distance
                 target_price = entry_price - take_profit_distance
 
+        # 손절/익절 가격은 신호 봉 종가 기준으로 확정한 뒤(실거래와 동일), 체결가만 불리하게
+        # 옮긴다 — 실거래에서 벌어지는 일이 정확히 이것이다(브라켓은 신호가로 계산되는데
+        # 시장가 진입은 그보다 늦게, 최대 MAX_ENTRY_PRICE_DRIFT_R만큼 벌어진 가격에 된다).
+        if slippage_r_per_side:
+            drift = slippage_r_per_side * abs(signal_price - stop_price)
+            entry_price = signal_price + drift if side == "long" else signal_price - drift
+
         position = {
             "side": side, "entry_price": entry_price, "entry_index": i,
             "stop_price": stop_price, "target_price": target_price,
-            "original_stop_price": stop_price, "breakeven_moved": False,
+            # R의 기준 리스크는 **신호가~손절가**다(실거래의 realized_r과 같은 분모) — 체결이
+            # 나빠진 것은 분모를 키우는 게 아니라 손익을 깎는 것으로 나타나야 한다.
+            "original_stop_price": stop_price, "signal_price": signal_price,
+            "breakeven_moved": False,
         }
         if use_partial_tp:
             original_risk = abs(entry_price - stop_price)
