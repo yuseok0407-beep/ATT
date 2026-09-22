@@ -224,6 +224,16 @@ USDT-M 선물(레버리지 롱/숏)을 **순수 규칙 기반**으로 상시 감
   알린다(.env만 고치고 재시작을 안 했거나 엉뚱한 env를 재시작한 게 이 한 통으로 드러난다).
   **새 전략 파라미터를 만들면 `current_strategy_config()`에도 넣을 것** — 대시보드 설정 표시도
   같은 함수에서 나오므로 한 곳만 고치면 된다.
+- **전략 버전**(2026-09-22, `src/execution/strategy_versions.py`). 위 `config_changed` 경계에
+  번호(v1, v2 …)를 붙이고 버전별 성과를 낸다 — 대시보드 성과 섹션의 버전 표, CSV의
+  `strategy_version` 칼럼과 `versions_{env}.csv`, 텔레그램 설정 변경 알림이 전부 여기서 나온다.
+  - `config_changed` 기록 이전(09-12 전)의 규칙 변경은 `HISTORICAL_VERSIONS`에 복원해 뒀다(v1~v4,
+    경계 시각은 저널 흔적/UPDATE_LOG 기반 추정). **새 변경을 거기 적지 말 것** — 자동으로 버전이 된다.
+  - 버전을 올리지 않는 기록: `first_record`(추적 시작)와 바뀐 항목이 전부 `from=None`인 기록
+    (`current_strategy_config()`에 추적 항목을 새로 추가한 것).
+  - 거래는 **진입 시각**으로 버전에 배정한다(청산이 재시작 뒤여도 진입 때의 규칙이 만든 거래다).
+  - **설정값이 아니라 코드로 적힌 진입/청산 규칙을 바꾸면 `futures_strategy.STRATEGY_LOGIC_REVISION`을
+    1 올릴 것.** 안 그러면 config가 같아서 새 버전이 안 생긴다(마감봉 신호 전환 같은 변경이 그랬다).
 - 선물은 현물과 달리 `enable_demo_trading(True)`로 연결한다(구 testnet.binancefuture.com 방식인
   `set_sandbox_mode`가 아님). 키는 실제 바이낸스 계정 로그인 후 demo.binance.com/en/my/settings/api-management 에서 발급.
 - `client.fetch_my_trades(symbol, limit=N)`을 `since` 없이 부르면 "최신 N개"가 아니라 계좌에 쌓인

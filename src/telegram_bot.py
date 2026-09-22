@@ -19,7 +19,7 @@ from src.data.futures_exchange import (
     get_position,
 )
 from src.data.public_ip import get_public_ip
-from src.execution import bot_process, excursion, filter_stats
+from src.execution import bot_process, excursion, filter_stats, strategy_versions
 from src.execution.futures_orders import get_bracket_prices
 from src.execution.heartbeat import DEFAULT_PATH as HEARTBEAT_DEMO_PATH
 from src.execution.heartbeat import LIVE_DEFAULT_PATH as HEARTBEAT_LIVE_PATH
@@ -61,7 +61,8 @@ _CONFIG_LABELS = {
     "max_entry_price_drift_r": "진입괴리한도", "stop_loss_pct": "손절폭", "take_profit_rr": "손익비",
     "leverage": "레버리지", "risk_per_trade": "거래당리스크",
     "max_concurrent_positions": "동시보유상한", "max_daily_loss_pct": "일일손실한도",
-    "max_consecutive_losses": "연속손실한도", "symbols": "감시종목",
+    "max_consecutive_losses": "연속손실한도", "consecutive_loss_cooldown_hours": "연속손실쿨다운",
+    "symbols": "감시종목", "logic_revision": "규칙코드개정",
 }
 
 # 여기 목록과 _COMMANDS는 항상 같아야 한다 — 안 그러면 동작하는데 아무도 모르는 명령이 생긴다
@@ -200,7 +201,13 @@ def _format_entry(env: str, entry: dict) -> str | None:
         summary = ", ".join(f"{_CONFIG_LABELS.get(k, k)} {_fmt_config_change(v)}"
                             for k, v in list(changes.items())[:6])
         more = f" 외 {len(changes) - 6}개" if len(changes) > 6 else ""
-        return f"⚙️ [{label}] 설정이 바뀐 채로 봇이 시작됐습니다 — {summary}{more}"
+        if not any((v or {}).get("from") is not None for v in changes.values()):
+            # 추적 항목을 새로 추가한 기록 — 규칙이 바뀐 게 아니라 전략 버전도 안 올라간다.
+            return f"⚙️ [{label}] 설정 기록 항목이 추가됐습니다(규칙 변경 아님) — {summary}{more}"
+        version = strategy_versions.version_at(
+            strategy_versions.version_timeline(read_entries(path=_journal_path(env))), entry.get("timestamp"))
+        tag = f" → 전략 {version['label']}" if version else ""
+        return f"⚙️ [{label}] 설정이 바뀐 채로 봇이 시작됐습니다{tag} — {summary}{more}"
 
     return None
 

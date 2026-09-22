@@ -80,6 +80,12 @@
   .subtable { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 6px; }
   .subtable th, .subtable td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
   .subtable th { color: var(--muted); font-weight: 500; }
+  .subtable td.green { color: var(--green); }
+  .subtable td.red { color: var(--red); }
+  .version-head { margin-top: 14px; font-size: 13px; }
+  .version-head b { font-size: 15px; }
+  .subtable tr.current-version td { background: rgba(139,147,167,.10); font-weight: 600; }
+  .subtable td.version-detail { color: var(--muted); font-size: 12px; max-width: 340px; }
   .reason-chips { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
   .reason-chip {
     background: rgba(139,147,167,.12); border: 1px solid var(--border); border-radius: 999px;
@@ -322,6 +328,11 @@
       <thead><tr><th>방향</th><th>거래수</th><th>승률</th><th>총R</th></tr></thead>
       <tbody id="perf-side-body"></tbody>
     </table>
+    <div class="version-head" id="perf-version-head"></div>
+    <table class="subtable" id="perf-version-table" style="display:none;margin-top:6px">
+      <thead><tr><th>버전</th><th>시작</th><th>내용</th><th>거래수</th><th>승률</th><th>순R</th><th>건당 순R</th></tr></thead>
+      <tbody id="perf-version-body"></tbody>
+    </table>
     <div class="reason-chips" id="perf-reasons" style="margin-top:12px"></div>
     <table class="subtable" id="perf-symbol-table" style="display:none">
       <thead><tr><th>종목</th><th>거래수</th><th>승률</th><th>총손익</th></tr></thead>
@@ -484,7 +495,8 @@ const CONFIG_LABELS = {
   regime_sma_period: '레짐 SMA', min_atr_to_stop_ratio: '최소 변동성', max_entry_price_drift_r: '진입 괴리 한도',
   stop_loss_pct: '손절폭', take_profit_rr: '손익비', leverage: '레버리지', risk_per_trade: '거래당 리스크',
   max_concurrent_positions: '최대 동시 포지션', max_daily_loss_pct: '일일 손실 한도',
-  max_consecutive_losses: '연속 손실 한도', symbols: '감시 종목',
+  max_consecutive_losses: '연속 손실 한도', consecutive_loss_cooldown_hours: '연속손실 쿨다운(시간)',
+  symbols: '감시 종목', logic_revision: '규칙 코드 개정',
 };
 
 function renderConfigNote(r) {
@@ -504,6 +516,32 @@ function renderConfigNote(r) {
   note.textContent = since.trades
     ? `${head} · 이후 ${since.trades}건, ${since.total_r === null ? 'R 없음' : fmtR(since.total_r)} (${fmtUsd(since.realized_pnl)})`
     : `${head} · 이후 아직 청산된 거래가 없습니다`;
+}
+
+// 전략 버전별 성과 — 규칙이 바뀐 전후 거래를 나눠서 본다. 거래는 진입 시각으로 버전에 배정되고
+// (청산이 재시작 뒤여도 진입 때의 규칙이 만든 거래다), 과거 버전 경계는 복원한 추정 시각이다.
+function renderVersions(v) {
+  const head = document.getElementById('perf-version-head');
+  const table = document.getElementById('perf-version-table');
+  const body = document.getElementById('perf-version-body');
+  const versions = v.versions || [];
+  if (!versions.length) { head.textContent = ''; table.style.display = 'none'; return; }
+  head.innerHTML = `현재 전략 <b>${v.current}</b> · 지금까지 <b>${v.revisions}</b>회 개정`
+    + (v.unassigned_trades ? ` · 버전 이전 거래 ${v.unassigned_trades}건` : '');
+  body.innerHTML = versions.slice().reverse().map(row => {
+    const start = new Date(row.start).toLocaleString('ko-KR', { dateStyle: 'short', timeStyle: 'short' });
+    const changed = Object.entries(row.changes || {}).filter(([, c]) => c && c.from !== null && c.from !== undefined)
+      .map(([k, c]) => `${CONFIG_LABELS[k] || k} ${Array.isArray(c.from) ? '변경' : `${c.from}→${c.to}`}`).join(', ');
+    const detail = row.reconstructed ? `${row.title} — ${row.detail} (경계 시각 추정)` : (changed || row.detail || row.title);
+    const net = row.trades_with_r ? fmtR(row.total_net_r) : '–';
+    const cls = (row.total_net_r || 0) >= 0 ? 'green' : 'red';
+    return `<tr class="${row.label === v.current ? 'current-version' : ''}">
+      <td>${row.label}</td><td>${start}</td><td class="version-detail">${detail}</td>
+      <td>${row.trades}</td><td>${row.trades_with_r ? fmtPct(row.win_rate) : '–'}</td>
+      <td class="${row.trades_with_r ? cls : ''}">${net}</td>
+      <td>${row.trades_with_r ? fmtR(row.avg_net_r) : '–'}</td></tr>`;
+  }).join('');
+  table.style.display = 'table';
 }
 
 function renderRPerformance(r) {
@@ -857,6 +895,7 @@ async function fetchPerformance() {
   document.getElementById('perf-avg-pnl').textContent = fmtUsd(data.avg_realized_pnl);
 
   renderRPerformance(data.r || {});
+  renderVersions(data.versions || {});
 
   document.getElementById('perf-reasons').innerHTML = Object.entries(data.reason_counts || {}).map(
     ([reason, count]) => `<span class="reason-chip">${REASON_LABELS[reason] || reason} <b>${count}</b></span>`

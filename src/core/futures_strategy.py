@@ -13,6 +13,13 @@ from src.core.indicators import adx, atr, rsi, sma
 
 VALID_SIDES = ("long", "short")
 
+# 설정값이 아니라 **코드로 적힌 진입/청산 규칙**이 바뀌면 이 숫자를 1 올린다(2026-09-22).
+# 저널의 config_changed는 설정값만 비교하므로, 이게 없으면 "마감봉으로만 신호 계산" 같은 코드
+# 변경은 전략 버전(`execution.strategy_versions`)에 안 잡힌다. 올리고 봇을 재시작하면
+# config_changed에 logic_revision N→N+1이 남고 그게 새 버전이 된다.
+# 1: 규칙 봇 개시 / 2: 마감봉 신호(08-25) / 3: 같은 신호봉 재진입 잠금 + 진입가 괴리 검사(09-08)
+STRATEGY_LOGIC_REVISION = 3
+
 
 def detect_signal(
     df: pd.DataFrame,

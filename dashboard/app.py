@@ -24,6 +24,7 @@ from src.data.futures_exchange import (LiveKeysNotConfiguredError, fetch_ohlcv_d
                                         get_futures_client, get_position)
 from src.data.public_ip import get_public_ip
 from src.execution import bot_process, excursion, filter_stats
+from src.execution.strategy_versions import summarize_by_version
 from src.execution.futures_orders import close_position, get_bracket_prices
 from src.execution.heartbeat import DEFAULT_PATH as HEARTBEAT_DEMO_PATH
 from src.execution.heartbeat import LIVE_DEFAULT_PATH as HEARTBEAT_LIVE_PATH
@@ -224,7 +225,10 @@ def api_performance():
     entries = read_entries(path=_paths_for(env)["journal"])
     # 달러 요약과 R 요약을 같이 내려보낸다 — 묻는 질문이 다르다. 달러는 "실제로 얼마 벌었나",
     # R은 "계획 대비 잘하고 있나"이고 백테스트 기대치와 비교 가능한 건 후자뿐이다.
-    return jsonify({**summarize_performance(entries), "r": summarize_r_performance(entries)})
+    # 전략 버전별 성과도 같이 — 규칙이 바뀐 전후의 거래가 한 숫자로 섞이면 지금 규칙이 통하는지
+    # 판단할 수 없다(execution.strategy_versions).
+    return jsonify({**summarize_performance(entries), "r": summarize_r_performance(entries),
+                    "versions": summarize_by_version(entries)})
 
 
 @app.route("/api/chart/<path:symbol>")

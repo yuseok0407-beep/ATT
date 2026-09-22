@@ -6,6 +6,7 @@ from pathlib import Path
 import ccxt
 
 from src.core.config import (
+    CONSECUTIVE_LOSS_COOLDOWN_HOURS,
     FUTURES_RISK_PER_TRADE,
     FUTURES_SYMBOLS,
     LEVERAGE,
@@ -22,6 +23,7 @@ from src.core.config import (
 )
 from src.core.futures_risk import check_stop_before_liquidation, estimate_liquidation_price, leveraged_position_size
 from src.core.futures_strategy import (
+    STRATEGY_LOGIC_REVISION,
     apply_regime_filter,
     atr_to_stop_ratio,
     compute_bracket_prices,
@@ -93,7 +95,10 @@ def current_strategy_config() -> dict:
         "max_concurrent_positions": MAX_CONCURRENT_POSITIONS,
         "max_daily_loss_pct": MAX_DAILY_LOSS_PCT,
         "max_consecutive_losses": MAX_CONSECUTIVE_LOSSES,
+        "consecutive_loss_cooldown_hours": CONSECUTIVE_LOSS_COOLDOWN_HOURS,
         "symbols": sorted(FUTURES_SYMBOLS),
+        # 코드 규칙 개정 번호 — 설정이 그대로여도 규칙 코드가 바뀌면 새 전략 버전이 되게 한다.
+        "logic_revision": STRATEGY_LOGIC_REVISION,
     }
 
 

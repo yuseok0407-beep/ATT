@@ -157,6 +157,9 @@ def resolve_closed_trades(entries: list[dict]) -> list[dict]:
             trade["stop_loss_price"] = source.get("stop_loss_price")
         if trade.get("entry_price") is None:
             trade["entry_price"] = source.get("entry_price")
+        if trade.get("entry_timestamp") is None:
+            # 옛 청산 기록엔 진입 시각이 없다 — 전략 버전은 진입 시각으로 배정하므로 채워둔다.
+            trade["entry_timestamp"] = source.get("timestamp")
         if trade.get("realized_r") is None:
             trade["realized_r"] = _price_r(trade.get("exit_price"), trade.get("entry_price"),
                                             trade.get("stop_loss_price"), trade.get("side"))

@@ -8,3 +8,4 @@ state/
 .pytest_cache/
 exports/
 .ohlcv_cache/
+.ohlcv_cache_3y/

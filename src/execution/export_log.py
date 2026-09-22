@@ -22,7 +22,7 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
-from src.execution import journal
+from src.execution import journal, strategy_versions
 from src.execution.performance import _net_r, _price_r, resolve_closed_trades
 
 DEFAULT_OUT_DIR = "exports"
@@ -47,7 +47,7 @@ TRADE_COLUMNS = [
     "total_fee", "entry_fee", "exit_fee", "fee_r", "fee_estimated", "actual_entry_price",
     "entry_slippage_r", "max_favorable_r", "max_adverse_r",
     "signal", "signal_bar_timestamp", "atr_to_stop_ratio",
-    "quantity", "notional", "stop_loss_pct", "config_timestamp",
+    "quantity", "notional", "stop_loss_pct", "config_timestamp", "strategy_version",
 ]
 
 EVENT_COLUMNS = [
@@ -116,6 +116,7 @@ def build_trade_rows(entries: list[dict], env: str) -> list[dict]:
             context.append(last_entry.get(symbol, {}))
 
     timeline = _config_timeline(entries)
+    versions = strategy_versions.version_timeline(entries)
     rows = []
     for i, trade in enumerate(resolved):
         source = context[i] if i < len(context) else {}
@@ -192,6 +193,8 @@ def build_trade_rows(entries: list[dict], env: str) -> list[dict]:
             "notional": _round(notional, 4),
             "stop_loss_pct": _round(stop_loss_pct, 6),
             "config_timestamp": _config_at(timeline, trade.get("timestamp")),
+            # 진입 시각 기준 — 그 거래를 만든 판단은 진입 때의 규칙이 내렸다.
+            "strategy_version": (strategy_versions.version_at(versions, entry_timestamp) or {}).get("label"),
         })
     return rows
 
@@ -223,6 +226,18 @@ def build_config_rows(entries: list[dict], env: str) -> list[dict]:
             row[key] = ",".join(map(str, value)) if isinstance(value, list) else value
         rows.append(row)
     return rows
+
+
+def build_version_rows(entries: list[dict], env: str) -> list[dict]:
+    """전략 버전 한 줄 = 그 버전으로 진입한 거래의 성과(`strategy_versions.summarize_by_version`)."""
+    summary = strategy_versions.summarize_by_version(entries)
+    return [{
+        "env": env, "version": v["label"], "start": v["start"], "reconstructed": v["reconstructed"],
+        "title": v["title"], "detail": v["detail"], "trades": v["trades"],
+        "trades_with_r": v["trades_with_r"], "win_rate": _round(v["win_rate"], 4),
+        "total_r": _round(v["total_r"], 4), "total_net_r": _round(v["total_net_r"], 4),
+        "avg_net_r": _round(v["avg_net_r"], 4), "realized_pnl": _round(v["realized_pnl"], 4),
+    } for v in summary["versions"]]
 
 
 def write_csv(rows: list[dict], path: str | Path, columns: list[str] | None = None) -> Path:
@@ -263,6 +278,7 @@ def export_env(env: str, out_dir: str | Path = DEFAULT_OUT_DIR,
         "events": str(write_csv(build_event_rows(entries, env),
                                 out / f"events_{env}.csv", EVENT_COLUMNS)),
         "configs": str(write_csv(build_config_rows(entries, env), out / f"configs_{env}.csv")),
+        "versions": str(write_csv(build_version_rows(entries, env), out / f"versions_{env}.csv")),
     }
     for key, path in (("raw", journal_path), ("filter_stats", FILTER_STATS.get(env, ""))):
         copied = _copy_into(path, out / "raw")
