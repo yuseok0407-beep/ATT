@@ -7,9 +7,6 @@
 
 ## 0. 먼저 할 일 (코드 아님)
 
-- [ ] **브랜치 병합** — 이 사이클 작업은 `fix/measure-real-trading-costs`에 커밋 3개로 올려뒀다
-      (`1d7a3a2` 비용 기록 / `5c977c6` 백테스트 정합 / `bcf17c7` 문서화). 확인 후
-      `git checkout master && git merge fix/measure-real-trading-costs`.
 - [ ] **봇 재시작 + 텔레그램 봇 재시작** — 정지 지속 알림(P3)은 봇이 새 하트비트 필드를 써야
       동작하고, 텔레그램 봇도 새 코드로 떠야 한다. `.env`의 `MAX_ENTRY_PRICE_DRIFT_R=0.1`과 새 쿨다운은 프로세스가
       재시작돼야 적용된다. 재시작하면 저널에 `config_changed`가 남고 텔레그램 알림이 오는데,
