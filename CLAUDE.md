@@ -36,6 +36,15 @@ USDT-M 선물(레버리지 롱/숏)을 **순수 규칙 기반**으로 상시 감
   실거래 설정이다(수수료·레짐 필터·저변동 필터 전부, 2026-09-22) — 인자를 안 넘기면 실거래와
   같은 규칙을 돈다. `report.portfolio_stats`는 종목별 거래를 청산 시각 순으로 한 곡선에 합쳐
   **포트폴리오 낙폭**을 낸다(`aggregate_stats`의 `max_drawdown_r`은 종목별 최악값일 뿐이다).
+- `docs/BACKTEST_PROTOCOL.md` + `src/backtest/gate.py` + `scripts/run_experiment.py` +
+  `docs/experiments.tsv` — **실험 프로토콜**(2026-09-24, 로드맵 Phase 0). 파라미터를 바꿔 보는
+  일은 전부 이 경로로 한다. 문서가 규칙, `gate.py`가 **탐색 중에 고치지 않는 심판**,
+  실행기가 한 건을 판정, `experiments.tsv`가 지워지지 않는 원장이다. 존재 이유: 스윕 표에는
+  "그 결론이 몇 번째 시도인지"가 안 남고, 30칸에서 최고를 고르는 것은 30번의 시도라 잡음에서도
+  그럴듯한 칸이 나온다. 세 가지를 코드가 강제한다 — 선언 안 된 파라미터 거부, **최근 90일
+  홀드아웃 봉인**(탐색 구간 PASS + `--confirm-holdout` 없이는 안 열림), 20회 초과 시 다중비교
+  경고. 기준값은 문서와 `gate.py` 두 곳에 있고 `test_backtest_gate.py`가 일치를 고정한다 —
+  **기준을 바꾸려면 `GATE_VERSION`을 올리고 버전이 다른 원장 행끼리 비교하지 말 것.**
 - `src/execution/export_log.py` / `scripts/export_trade_log.py` — 저널을 분석용 CSV로 내보낸다
   (`exports/`). 결합은 `performance.resolve_closed_trades`를 그대로 불러서 하므로 CSV와 대시보드가
   같은 수를 말한다.

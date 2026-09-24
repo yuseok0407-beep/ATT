@@ -1,0 +1,2 @@
+run_id	utc	commit	gate_version	window	days	seeds	breaker_reset	params	trades	total_r_median	total_r_p5	mdd_r_median	oos_pass_rate	recovery_factor	top2_share	positive_symbol_share	stress_total_r	verdict	failed	note
+E0001	2026-09-24T00:55:59Z	1aeb95c	1	search	365	20	daily	{"adx_threshold":30.0,"max_concurrent_positions":8,"min_atr_to_stop_ratio":0.64,"regime_sma_period":400,"sma_period":10,"stop_loss_pct":0.0175,"take_profit_rr":2.0}	563.0	89.3	89.3	-35.1	0.0	2.54	0.67	0.82	33.0	FAIL	oos_pass_rate,top2_share	현재 .env 설정 v6 기준선 (손절1.75/RR2.0)

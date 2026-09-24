@@ -31,12 +31,10 @@ for _stream in (sys.stdout, sys.stderr):
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-import pandas as pd  # noqa: E402
-
-from src.backtest.data import fetch_historical_ohlcv  # noqa: E402
+from src.backtest import gate  # noqa: E402
+from src.backtest.data import load_cached_ohlcv  # noqa: E402
 from src.backtest.engine import SIGNAL_LOOKBACK_BARS, entry_start_bar, gated_signals  # noqa: E402
-from src.backtest.portfolio import simulate_many, trades_by_symbol  # noqa: E402
-from src.backtest.report import portfolio_stats  # noqa: E402
+from src.backtest.portfolio import simulate_many  # noqa: E402
 from src.core.config import (  # noqa: E402
     FEE_PCT_PER_SIDE,
     FUTURES_SYMBOLS,
@@ -53,54 +51,9 @@ from src.data.futures_exchange import get_futures_market_data_client  # noqa: E4
 
 TIMEFRAME = "1h"
 MIN_BARS = 900          # 4분할 시 한 구간이 최소 200봉은 되도록
-N_SPLITS = 4
+N_SPLITS = gate.N_SPLITS
 CONCURRENCY = [2, 4, 6, 8, 10, 12]
 MIN_ATR = [0.0, 0.4, 0.64, 0.8, 1.2]
-
-
-def _load(client, symbol: str, days: int, cache_dir: Path | None) -> pd.DataFrame:
-    if cache_dir is not None:
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        path = cache_dir / f"{symbol.replace('/', '_').replace(':', '-')}.json"
-        if path.exists():
-            return pd.read_json(path)
-    df = fetch_historical_ohlcv(client, symbol, timeframe=TIMEFRAME, days=days)
-    if cache_dir is not None:
-        df.to_json(path)
-    return df
-
-
-def _split_bounds(df_by_symbol: dict[str, pd.DataFrame], i: int) -> dict[str, tuple[int, int]]:
-    """종목별로 봉 수를 N등분한 i번째 구간의 (시작, 끝) 인덱스."""
-    out = {}
-    for symbol, df in df_by_symbol.items():
-        n = len(df)
-        out[symbol] = (round(n * i / N_SPLITS), round(n * (i + 1) / N_SPLITS))
-    return out
-
-
-def _stats_for(result: dict, df_by_symbol: dict[str, pd.DataFrame]) -> dict:
-    by_symbol = trades_by_symbol(result)
-    port = portfolio_stats(by_symbol)
-    splits = []
-    for i in range(N_SPLITS):
-        bounds = _split_bounds(df_by_symbol, i)
-        part = {s: [t for t in trades if bounds[s][0] <= t["exit_index"] < bounds[s][1]]
-                 for s, trades in by_symbol.items()}
-        splits.append(portfolio_stats(part)["total_r"])
-    per_symbol_r = {s: sum(t["pnl_r"] for t in trades) for s, trades in by_symbol.items()}
-    ranked = sorted(per_symbol_r.values(), reverse=True)
-    return {
-        "total_r": port["total_r"],
-        "mdd_r": port["max_drawdown_r"],
-        "trades": port["num_trades"],
-        "splits": splits,
-        "all_splits_positive": all(s > 0 for s in splits),
-        "positive_symbols": sum(1 for v in per_symbol_r.values() if v > 0),
-        "symbols": len(per_symbol_r),
-        "top2_r": sum(ranked[:2]),
-        "blocked": result["blocked"],
-    }
 
 
 def main() -> int:
@@ -124,7 +77,8 @@ def main() -> int:
 
     df_by_symbol = {}
     for symbol in symbols:
-        df = _load(client, symbol, args.days, args.cache_dir)
+        df = load_cached_ohlcv(client, symbol, timeframe=TIMEFRAME,
+                               days=args.days, cache_dir=args.cache_dir)
         if len(df) >= MIN_BARS:
             df_by_symbol[symbol] = df
         else:
@@ -188,7 +142,7 @@ def main() -> int:
                 fee_pct_per_side=FEE_PCT_PER_SIDE, slippage_r_per_side=args.slippage,
                 regime_sma_period=RULE_REGIME_SMA_PERIOD, min_atr_to_stop_ratio=min_atr,
             )
-            stats = [_stats_for(r, df_by_symbol) for r in results]
+            stats = [gate.run_metrics(r, df_by_symbol, N_SPLITS) for r in results]
             totals = sorted(s["total_r"] for s in stats)
             pass_rate = sum(1 for s in stats if s["all_splits_positive"]) / len(stats)
             median = st.median(totals)
