@@ -15,6 +15,7 @@ import pandas as pd
 
 from src.core.config import (
     MIN_ATR_TO_STOP_RATIO,
+    RULE_DIRECTION_FILTER,
     RULE_ADX_THRESHOLD,
     RULE_REGIME_SMA_PERIOD,
     RULE_SMA_PERIOD,
@@ -49,6 +50,35 @@ def _safe(value):
     return float(value)
 
 
+def _direction_check(candidate_side, direction_filter, rsi_value, rsi_threshold,
+                      rsi_ok, plus_di, minus_di):
+    """방향 확인의 **유일한 표시 정의** — (통과여부, 근접도 점수, 화면 문구).
+
+    실제 진입 판정은 `detect_signal`이 하고 여기서는 그 판정을 화면용으로 재현한다. 두 곳이
+    갈라지지 않도록 분기 조건은 `futures_strategy.detect_signal`과 같은 모양으로 적는다
+    (2026-09-24: RSI에서 +DI/-DI로 전환하면서 대시보드가 옛 지표를 계속 보여주던 문제).
+    """
+    if direction_filter == "none":
+        return True, 1.0, "방향 확인 없음"
+
+    if direction_filter == "di":
+        if plus_di is None or minus_di is None:
+            return False, 0.0, "DI 워밍업 중"
+        if candidate_side == "LONG":
+            ok = plus_di > minus_di
+            score = min(1.0, plus_di / minus_di) if minus_di else 1.0
+        else:
+            ok = minus_di > plus_di
+            score = min(1.0, minus_di / plus_di) if plus_di else 1.0
+        return ok, score, f"+DI {plus_di:.1f} / -DI {minus_di:.1f}"
+
+    if candidate_side == "LONG":
+        score = min(1.0, rsi_value / rsi_threshold) if rsi_threshold > 0 else 1.0
+    else:
+        score = min(1.0, (100 - rsi_value) / rsi_threshold) if rsi_threshold > 0 else 1.0
+    return rsi_ok, score, f"RSI {rsi_value:.1f}"
+
+
 def evaluate_conditions(
     df: pd.DataFrame,
     symbol: str = "",
@@ -58,6 +88,7 @@ def evaluate_conditions(
     regime_sma_period: int = RULE_REGIME_SMA_PERIOD,
     rsi_period: int = 14,
     rsi_threshold: float = 50.0,
+    direction_filter: str = RULE_DIRECTION_FILTER,
     min_atr_ratio: float = MIN_ATR_TO_STOP_RATIO,
     stop_loss_pct: float = STOP_LOSS_PCT,
 ) -> dict:
@@ -79,6 +110,12 @@ def evaluate_conditions(
         "distance_pct": None, "candidate_side": None,
         "adx": None, "adx_threshold": adx_threshold, "adx_ok": False,
         "rsi": None, "rsi_threshold": rsi_threshold, "rsi_ok": False,
+        # 방향 확인은 설정(direction_filter)에 따라 RSI일 수도 +DI/-DI일 수도 있다.
+        # 화면은 이 세 값만 보면 되도록 **여기서** 사람이 읽을 문구까지 만든다 — 대시보드와
+        # 텔레그램이 각자 지표 이름을 적으면 설정을 바꿀 때마다 두 곳이 어긋난다.
+        "direction_filter": direction_filter, "direction_ok": False, "direction_label": None,
+        "direction_score": 0.0,
+        "plus_di": None, "minus_di": None,
         "regime_sma": None, "regime_sma_period": regime_sma_period,
         "above_regime": None, "regime_blocks_short": False,
         "atr_ratio": None, "min_atr_ratio": min_atr_ratio, "atr_ok": False,
@@ -91,14 +128,18 @@ def evaluate_conditions(
     close = df["close"]
     latest_close = float(close.iloc[-1])
     sma_value = _safe(sma(close, sma_period).iloc[-1])
-    adx_value = _safe(adx(df, 14)["adx"].iloc[-1])
+    adx_frame = adx(df, 14)
+    adx_value = _safe(adx_frame["adx"].iloc[-1])
+    plus_di = _safe(adx_frame["plus_di"].iloc[-1])
+    minus_di = _safe(adx_frame["minus_di"].iloc[-1])
     rsi_value = _safe(rsi(close, rsi_period).iloc[-1])
     above_regime = is_above_long_sma(df, regime_sma_period)
     regime_sma_value = _safe(close.rolling(regime_sma_period).mean().iloc[-1]) if regime_sma_period > 0 else None
 
     # 실제 진입 판정은 실거래와 완전히 같은 함수로 얻는다(여기서 조건을 다시 구현하지 않는다).
     raw_signal = detect_signal(df, adx_threshold=adx_threshold, sma_period=sma_period,
-                               rsi_period=rsi_period, rsi_threshold=rsi_threshold)
+                               rsi_period=rsi_period, rsi_threshold=rsi_threshold,
+                               direction_filter=direction_filter)
     signal = apply_regime_filter(raw_signal, above_regime)
     atr_ratio = atr_to_stop_ratio(df, stop_loss_pct)
     atr_ok = passes_volatility_floor(atr_ratio, min_atr_ratio)
@@ -108,6 +149,7 @@ def evaluate_conditions(
     result.update({
         "close": latest_close, "sma": sma_value, "adx": adx_value, "rsi": rsi_value,
         "regime_sma": regime_sma_value, "above_regime": above_regime,
+        "plus_di": plus_di, "minus_di": minus_di,
         "atr_ratio": atr_ratio, "atr_ok": atr_ok,
         "signal": signal, "ready": signal is not None,
     })
@@ -123,15 +165,19 @@ def evaluate_conditions(
 
     adx_ok = adx_value >= adx_threshold
     rsi_ok = (rsi_value >= rsi_threshold) if candidate_side == "LONG" else (rsi_value <= (100 - rsi_threshold))
+    direction_ok, direction_score, direction_label = _direction_check(
+        candidate_side, direction_filter, rsi_value, rsi_threshold, rsi_ok, plus_di, minus_di)
     regime_blocks_short = bool(candidate_side == "SHORT" and above_regime)
-    result.update({"adx_ok": adx_ok, "rsi_ok": rsi_ok, "regime_blocks_short": regime_blocks_short})
+    result.update({"adx_ok": adx_ok, "rsi_ok": rsi_ok, "regime_blocks_short": regime_blocks_short,
+                    "direction_ok": direction_ok, "direction_label": direction_label,
+                    "direction_score": round(direction_score, 4)})
 
     blockers = []
     if not adx_ok:
         blockers.append(f"ADX {adx_value:.1f} < {adx_threshold:.0f}")
-    if not rsi_ok:
+    if not direction_ok:
         side_label = "롱" if candidate_side == "LONG" else "숏"
-        blockers.append(f"RSI {rsi_value:.1f} ({side_label} 방향 아님)")
+        blockers.append(f"{direction_label} ({side_label} 방향 아님)")
     if regime_blocks_short:
         blockers.append(f"상승 레짐 (SMA{regime_sma_period} 위) — 숏 차단")
     if not atr_ok:
@@ -142,15 +188,12 @@ def evaluate_conditions(
 
     adx_score = min(1.0, adx_value / adx_threshold) if adx_threshold > 0 else 1.0
     cross_score = max(0.0, 1.0 - abs(distance_pct) / CROSS_NEAR_PCT)
-    if candidate_side == "LONG":
-        rsi_score = min(1.0, rsi_value / rsi_threshold) if rsi_threshold > 0 else 1.0
-    else:
-        rsi_score = min(1.0, (100 - rsi_value) / rsi_threshold) if rsi_threshold > 0 else 1.0
     # 저변동도 레짐 차단과 같이 0으로 둔다 — 가격이 조금 움직인다고 풀리는 조건이 아니라서
     # "가깝다"고 표시하면 오해를 준다(ATR은 봉이 여러 개 쌓여야 바뀐다).
     atr_score = min(1.0, atr_ratio / min_atr_ratio) if (min_atr_ratio > 0 and atr_ratio) else 1.0
     blocked = regime_blocks_short or not atr_ok
-    result["proximity"] = 0.0 if blocked else round(adx_score * cross_score * rsi_score * atr_score, 4)
+    result["proximity"] = (0.0 if blocked
+                          else round(adx_score * cross_score * direction_score * atr_score, 4))
     return result
 
 

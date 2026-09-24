@@ -493,6 +493,7 @@ function drawEquityCurve(points) {
 const CONFIG_LABELS = {
   timeframe: '타임프레임', adx_threshold: 'ADX 임계값', sma_period: 'SMA 기간',
   regime_sma_period: '레짐 SMA', min_atr_to_stop_ratio: '최소 변동성', max_entry_price_drift_r: '진입 괴리 한도',
+  direction_filter: '방향 확인',
   stop_loss_pct: '손절폭', take_profit_rr: '손익비', leverage: '레버리지', risk_per_trade: '거래당 리스크',
   max_concurrent_positions: '최대 동시 포지션', max_daily_loss_pct: '일일 손실 한도',
   max_consecutive_losses: '연속 손실 한도', consecutive_loss_cooldown_hours: '연속손실 쿨다운(시간)',
@@ -1109,6 +1110,7 @@ async function refresh() {
     document.getElementById('config-grid').innerHTML = `
       <div class="config-item"><div class="k">ADX 임계값</div><div class="v">${c.adx_threshold}</div></div>
       <div class="config-item"><div class="k">SMA 기간</div><div class="v">${c.sma_period}</div></div>
+      <div class="config-item"><div class="k">방향 확인</div><div class="v">${c.direction_filter || 'rsi'}</div></div>
       <div class="config-item"><div class="k">손절폭</div><div class="v">${fmtPct(c.stop_loss_pct)}</div></div>
       <div class="config-item"><div class="k">손익비(RR)</div><div class="v">${c.take_profit_rr}</div></div>
       <div class="config-item"><div class="k">레버리지</div><div class="v">${data.leverage}x</div></div>
@@ -1250,7 +1252,10 @@ function renderConditions(data) {
     // SMA까지의 거리: cross_near_pct 이내면 꽉 찬 막대(가까울수록 길게)
     const crossRatio = 1 - Math.min(1, Math.abs(r.distance_pct) / data.cross_near_pct);
     const adxRatio = r.adx_threshold ? r.adx / r.adx_threshold : 1;
-    const rsiRatio = isLong ? r.rsi / r.rsi_threshold : (100 - r.rsi) / r.rsi_threshold;
+    // 방향 확인 지표는 설정(direction_filter)에 따라 RSI일 수도 +DI/-DI일 수도 있다 —
+    // 이름과 문구는 서버(signal_status)가 만들어 보내므로 여기서 지표를 가정하지 않는다.
+    const dirRatio = typeof r.direction_score === 'number' ? r.direction_score : 0;
+    const dirName = r.direction_filter === 'di' ? 'DI' : (r.direction_filter === 'none' ? '방향' : 'RSI');
 
     let rowClass = 'cond-row';
     if (r.ready) rowClass += ' ready';
@@ -1264,9 +1269,8 @@ function renderConditions(data) {
                    r.distance_pct.toFixed(2) + '%', r.ready ? 'ok' : '') +
         condMetric('ADX', adxRatio, r.adx.toFixed(1) + ' / ' + r.adx_threshold,
                    r.adx_ok ? 'ok' : 'no') +
-        condMetric('RSI', rsiRatio,
-                   r.rsi.toFixed(1) + (isLong ? ' ≥ ' : ' ≤ ') + r.rsi_threshold,
-                   r.rsi_ok ? 'ok' : 'no') +
+        condMetric(dirName, dirRatio, r.direction_label || '–',
+                   r.direction_ok ? 'ok' : 'no') +
       '</div>' +
       '<div class="cond-score"><div class="pct">' + Math.round(r.proximity * 100) + '%</div>' +
       '<div class="cap">' + (r.regime_blocks_short ? '숏 차단' : '근접도') + '</div></div>' +

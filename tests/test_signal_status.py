@@ -273,3 +273,46 @@ def test_volatility_gate_passes_when_atr_clears_the_floor():
 def test_volatility_gate_off_when_ratio_is_zero():
     result = evaluate_conditions(_df(_trend(), hl_pct=0.0005), regime_sma_period=0, min_atr_ratio=0)
     assert result["atr_ok"] is True
+
+
+def _direction_frame():
+    """상승 추세 위의 평범한 프레임 — 방향 확인 분기만 보려는 것이므로 ADX 문턱은 호출부에서 낮춘다."""
+    return _df(_trend(n=500))
+
+
+# ---------- 방향 확인 지표가 설정을 따라가는가 (2026-09-24) ----------
+# 실거래 규칙을 RSI에서 +DI/-DI로 바꿨는데 **조건 근접도 화면은 계속 RSI를 재고 있었다.**
+# 사용자가 대시보드에서 발견한 버그이고, 조건을 두 군데 적으면 갈라진다는 이 저장소의
+# 반복되는 실패 유형이다(CLAUDE.md의 signal_status 항목).
+
+def test_direction_metric_follows_the_configured_filter():
+    from src.core.signal_status import evaluate_conditions
+
+    df = _direction_frame()
+    rsi_view = evaluate_conditions(df, adx_threshold=1, direction_filter="rsi")
+    di_view = evaluate_conditions(df, adx_threshold=1, direction_filter="di")
+
+    assert rsi_view["direction_filter"] == "rsi"
+    assert rsi_view["direction_label"].startswith("RSI")
+    assert di_view["direction_filter"] == "di"
+    assert di_view["direction_label"].startswith("+DI")
+    # DI 모드에서는 DI 값이 실려야 화면이 막대를 그릴 수 있다.
+    assert di_view["plus_di"] is not None and di_view["minus_di"] is not None
+
+
+def test_direction_none_never_blocks():
+    from src.core.signal_status import evaluate_conditions
+
+    view = evaluate_conditions(_direction_frame(), adx_threshold=1, direction_filter="none")
+    assert view["direction_ok"] is True
+    assert not any("방향 아님" in b for b in view["blockers"])
+
+
+def test_blocker_text_names_the_indicator_actually_used():
+    """막힌 이유에 'RSI'라고 적혀 있는데 실제 판정은 DI가 했다면 화면이 거짓말을 하는 것이다."""
+    from src.core.signal_status import evaluate_conditions
+
+    for mode, expected in (("rsi", "RSI"), ("di", "DI")):
+        view = evaluate_conditions(_direction_frame(), adx_threshold=1, direction_filter=mode)
+        wrong = [b for b in view["blockers"] if "방향 아님" in b and expected not in b]
+        assert not wrong, f"{mode} 모드인데 블로커가 다른 지표를 말한다: {wrong}"

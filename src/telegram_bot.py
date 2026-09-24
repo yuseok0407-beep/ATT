@@ -58,7 +58,8 @@ _SIGNAL_LABELS = {"LONG": "롱", "SHORT": "숏"}
 # 설정 변경 알림에서 쓰는 이름 — 대시보드 index.html의 CONFIG_LABELS와 같은 항목을 한글로.
 _CONFIG_LABELS = {
     "timeframe": "타임프레임", "adx_threshold": "ADX", "sma_period": "SMA기간",
-    "regime_sma_period": "레짐SMA", "min_atr_to_stop_ratio": "최소변동성",
+    "regime_sma_period": "레짐SMA", "direction_filter": "방향확인",
+    "min_atr_to_stop_ratio": "최소변동성",
     "max_entry_price_drift_r": "진입괴리한도", "stop_loss_pct": "손절폭", "take_profit_rr": "손익비",
     "leverage": "레버리지", "risk_per_trade": "거래당리스크",
     "max_concurrent_positions": "동시보유상한", "max_daily_loss_pct": "일일손실한도",
@@ -409,7 +410,8 @@ def format_conditions(limit: int = 6) -> str:
         lines.append(
             f"\n▸ {name} {side} 대기  {_proximity_bar(row['proximity'])} {row['proximity'] * 100:.0f}%"
             f"\n  SMA{row['sma_period']}까지 {row['distance_pct']:+.2f}%"
-            f" · ADX {row['adx']:.1f}/{row['adx_threshold']:.0f} · RSI {row['rsi']:.1f}"
+            f" · ADX {row['adx']:.1f}/{row['adx_threshold']:.0f}"
+            f" · {row.get('direction_label') or ''}"
             f"\n  {' · '.join(row['blockers'])}"
         )
 
