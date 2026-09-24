@@ -2,7 +2,7 @@ import pytest
 
 from dashboard import app as dashboard_app
 from src import futures_rule_bot
-from src.execution import excursion, filter_stats
+from src.execution import equity_log, excursion, filter_stats
 
 # futures_rule_bot의 상태 파일 경로는 모듈 전역이고 호출 시점에 읽히므로, 여기서 tmp_path로
 # 갈아끼우면 테스트가 실제 파일을 절대 못 건드린다.
@@ -20,6 +20,10 @@ _ISOLATED_PATHS = [
     (filter_stats, "LIVE_DEFAULT_PATH", "filter_stats.live.json"),
     (excursion, "DEFAULT_PATH", "excursion.json"),
     (excursion, "LIVE_DEFAULT_PATH", "excursion.live.json"),
+    # 자산 기록도 같은 이유로 격리한다 — 텔레그램 일일 요약이 모듈 기본 경로로 읽으므로,
+    # 격리를 안 하면 테스트가 실제 계좌 자산 이력을 읽고 그 값으로 문자열을 만든다.
+    (equity_log, "DEFAULT_PATH", "equity_log.json"),
+    (equity_log, "LIVE_DEFAULT_PATH", "equity_log.live.json"),
 ]
 
 

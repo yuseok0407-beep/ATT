@@ -238,6 +238,30 @@ def _net_r(trade: dict) -> tuple[float | None, bool]:
     return realized_r - fee_r, estimated
 
 
+def _net_pnl(trade: dict) -> tuple[float | None, bool]:
+    """수수료를 뺀 실현손익($). (값, 추정여부).
+
+    거래소의 `realizedPnl`에는 수수료가 안 들어있어서, 그 값만 보고 "오늘 +5 USDT 벌었다"고
+    말하면 계좌 총자산과 맞지 않는다(2026-09-24에 실제로 문제가 됐다). 2026-09-22 이후 기록은
+    `net_realized_pnl`을 직접 들고 있고, 그 전 기록은 수수료 R과 이 거래의 "R당 달러"로
+    환산해 추정한다 — 사이징이 거래마다 달라서 고정 금액으로는 추정할 수 없다.
+    """
+    net = trade.get("net_realized_pnl")
+    if isinstance(net, (int, float)):
+        return float(net), False
+
+    pnl = trade.get("realized_pnl")
+    if not isinstance(pnl, (int, float)):
+        return None, False
+
+    fee_r, _ = _fee_r(trade)
+    realized_r = trade.get("realized_r")
+    if fee_r is None or not isinstance(realized_r, (int, float)) or realized_r == 0:
+        return float(pnl), True          # 수수료를 못 재면 총액 그대로(추정 표시)
+    dollars_per_r = abs(float(pnl) / float(realized_r))
+    return float(pnl) - fee_r * dollars_per_r, True
+
+
 def _drawdown(values: list[float]) -> float:
     """누적 곡선의 최대 낙폭(고점 대비 최대 하락폭). 자산 대비 %가 아니라 절대값이다 —
     입출금 이력이 없어서 신뢰할 수 있는 시작 자산을 모르기 때문."""
@@ -390,13 +414,26 @@ def summarize_day(entries: list[dict], day: str) -> dict:
             circuit_breakers += 1
 
     wins = sum(1 for t in trades if (t.get("realized_pnl") or 0) > 0)
+
+    # 승패는 수수료 전 부호로 센다(거래소 체결 내역과 같은 기준). 금액은 수수료 후로 말한다 —
+    # 화면의 "+N USDT"가 계좌 총자산과 어긋나면 요약 자체가 쓸모없어지기 때문이다.
+    nets = [_net_pnl(t) for t in trades]
+    net_values = [v for v, _ in nets if v is not None]
+    net_r = [_net_r(t) for t in trades]
+    net_r_values = [v for v, _ in net_r if v is not None]
+
     return {
         "day": day,
         "trades": len(trades),
         "wins": wins,
         "losses": len(trades) - wins,
         "total_r": sum(t["realized_r"] for t in with_r) if with_r else None,
+        "net_total_r": sum(net_r_values) if net_r_values else None,
         "realized_pnl": sum(t.get("realized_pnl") or 0.0 for t in trades),
+        "net_realized_pnl": sum(net_values) if net_values else None,
+        "fees": (sum(t.get("realized_pnl") or 0.0 for t in trades) - sum(net_values)
+                 if net_values else None),
+        "fees_estimated": any(est for v, est in nets if v is not None),
         "rejections": rejections,
         "circuit_breakers": circuit_breakers,
     }

@@ -35,6 +35,7 @@ if __name__ == "__main__":
     from src.data.futures_exchange import get_futures_client
     from src.execution.heartbeat import LIVE_DEFAULT_PATH as HEARTBEAT_LIVE_PATH, write_heartbeat
     from src.execution.heartbeat import DEFAULT_PATH as HEARTBEAT_DEMO_PATH
+    from src.execution import equity_log
     from src.futures_rule_bot import (
         LIVE_JOURNAL_PATH,
         LIVE_LAST_TRADE_STATE_PATH,
@@ -52,6 +53,8 @@ if __name__ == "__main__":
     state_path = LIVE_STATE_PATH if env == "live" else DEMO_STATE_PATH
     last_trade_path = LIVE_LAST_TRADE_STATE_PATH if env == "live" else DEMO_LAST_TRADE_PATH
     heartbeat_path = HEARTBEAT_LIVE_PATH if env == "live" else HEARTBEAT_DEMO_PATH
+    equity_log_path = (equity_log.LIVE_DEFAULT_PATH if env == "live"
+                       else equity_log.DEFAULT_PATH)
 
     logger.info("futures rule bot starting env=%s — watching %s (max %d concurrent, poll every %ss)",
                 env, ", ".join(FUTURES_SYMBOLS), MAX_CONCURRENT_POSITIONS, POLL_INTERVAL_SECONDS)
@@ -87,6 +90,9 @@ if __name__ == "__main__":
             blocked = cycle.get("event") == "circuit_breaker_blocked"
             write_heartbeat(cycle_count, cycle.get("open_position_count", 0), cycle["margin_equity"],
                              path=heartbeat_path, breaker_reason=(cycle.get("reason") or "사유 미상") if blocked else None)
+            # 하트비트는 **마지막 한 순간**만 덮어쓰므로 "어제 자산이 얼마였나"를 답할 수 없다.
+            # 일일 요약이 계좌 총자산과 맞춰볼 수 있으려면 날짜별 시작/종료가 남아야 한다.
+            equity_log.record(cycle["margin_equity"], path=equity_log_path)
 
             if cycle.get("event") == "circuit_breaker_blocked":
                 logger.info("circuit_breaker_blocked margin_equity=%.2f", cycle["margin_equity"])

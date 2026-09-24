@@ -25,6 +25,7 @@ from src.execution.heartbeat import DEFAULT_PATH as HEARTBEAT_DEMO_PATH
 from src.execution.heartbeat import LIVE_DEFAULT_PATH as HEARTBEAT_LIVE_PATH
 from src.execution.heartbeat import read_heartbeat
 from src.execution.journal import read_entries
+from src.execution import equity_log
 from src.execution.performance import summarize_day
 from src.execution.telegram_client import get_updates, send_message
 from src.futures_rule_bot import (
@@ -102,6 +103,10 @@ def _filter_stats_path(env: str) -> str:
 
 def _excursion_path(env: str) -> str:
     return LIVE_EXCURSION_PATH if env == "live" else EXCURSION_PATH
+
+
+def _equity_log_path(env: str) -> str:
+    return equity_log.LIVE_DEFAULT_PATH if env == "live" else equity_log.DEFAULT_PATH
 
 
 def _heartbeat_path(env: str) -> str:
@@ -417,6 +422,29 @@ def format_conditions(limit: int = 6) -> str:
     return "\n".join(lines)
 
 
+def _format_equity_line(env: str, day: str) -> str:
+    """그날 자산이 얼마에서 얼마가 됐는지. 기록이 없으면 빈 문자열(줄을 빼고 나간다).
+
+    실현손익·R과 달리 이 값만이 **계좌 화면의 총자산과 직접 맞춰볼 수 있다** — 미실현 변동,
+    펀딩비, 입출금이 전부 반영돼 있기 때문이다. 사용자가 "수익이라는데 총자산은 그대로"라고
+    한 것이 정확히 이 간극이었다(2026-09-24).
+    """
+    change = equity_log.day_change(day, path=_equity_log_path(env))
+    if not change:
+        return ""
+
+    pct = f", {change['change_pct'] * 100:+.2f}%" if change["change_pct"] is not None else ""
+    line = (f"  자산 {change['start']:.2f} → {change['end']:.2f} "
+            f"({change['change']:+.2f}{pct})")
+
+    # 봇이 꺼져 있던 동안의 변화는 그날 거래로 설명되지 않는다 — 숨기면 또 안 맞는다.
+    overnight = change.get("overnight_change")
+    if overnight is not None and abs(overnight) >= 0.01:
+        line += (f"\n  (전날 마감 {change['prev_end']:.2f} → 당일 시작 사이 "
+                 f"{overnight:+.2f})")
+    return line
+
+
 def _format_day_line(env: str, day: str) -> str:
     """한 계좌의 하루 성과를 두어 줄로. 거래가 없었으면 그렇다고만 말한다."""
     label = "LIVE" if env == "live" else "DEMO"
@@ -429,12 +457,29 @@ def _format_day_line(env: str, day: str) -> str:
         if stats["circuit_breakers"]:
             extras.append(f"서킷브레이커 {stats['circuit_breakers']}회")
         tail = f" ({' · '.join(extras)})" if extras else ""
-        return f"[{label}] 청산된 거래 없음{tail}"
+        head = f"[{label}] 청산된 거래 없음{tail}"
+        # 거래가 없어도 자산은 움직인다(보유 포지션 평가손익, 펀딩비). 그 줄이 빠지면
+        # "거래 없음 = 변화 없음"으로 읽혀 계좌 화면과 또 어긋난다.
+        return "\n".join([head] + [line for line in [_format_equity_line(env, day)] if line])
 
-    total_r = stats["total_r"]
-    r_text = f"{total_r:+.2f}R" if total_r is not None else "R 측정 불가"
+    # **수수료 뺀 값을 앞에 놓는다.** 거래소의 realizedPnl에는 수수료가 안 들어있어서, 그걸
+    # 그대로 알리면 "+5 USDT 수익"이라고 해놓고 계좌 총자산은 줄어 있는 일이 생긴다
+    # (2026-09-24 사용자 보고). 이 전략은 건당 기대값과 수수료가 같은 크기라 부호까지 뒤집힌다.
+    net_r = stats.get("net_total_r")
+    r_text = f"{net_r:+.2f}R" if net_r is not None else "R 측정 불가"
+    net_pnl = stats.get("net_realized_pnl")
+    pnl_text = (f"{net_pnl:+.2f} USDT" if net_pnl is not None
+                else f"{stats['realized_pnl']:+.2f} USDT")
     lines = [f"[{label}] {stats['trades']}건 · 승 {stats['wins']} / 패 {stats['losses']}"
-             f" · {r_text} · {stats['realized_pnl']:+.2f} USDT"]
+             f" · {r_text} · {pnl_text}"]
+
+    fees = stats.get("fees")
+    if fees:
+        tail = " 추정" if stats.get("fees_estimated") else ""
+        lines.append(f"  수수료 {fees:.2f} 차감{tail} (차감 전 {stats['realized_pnl']:+.2f})")
+
+    lines.append(_format_equity_line(env, day))
+    lines = [line for line in lines if line]
 
     blocked = filter_stats.format_counts(
         filter_stats.read_counts(path=_filter_stats_path(env), days=14).get(day, {}))
@@ -445,11 +490,37 @@ def _format_day_line(env: str, day: str) -> str:
     return "\n".join(lines)
 
 
+def _format_goal_line(env: str) -> str:
+    """최근 30일 **자산** 수익률과 목표(월 +10%)의 거리. 기록이 모자라면 빈 문자열.
+
+    R 합계로는 이 줄을 만들 수 없다 — 사이징이 바뀌면 같은 R이 다른 금액이 되고, 미실현
+    변동과 펀딩비가 빠진다. 목표가 금액 기준이므로 비교도 금액 기준이어야 한다
+    (`docs/OBJECTIVE.md`).
+    """
+    period = equity_log.period_return(path=_equity_log_path(env), days=30)
+    if not period:
+        return ""
+    label = "LIVE" if env == "live" else "DEMO"
+    pct = period["return_pct"] * 100
+    return (f"[{label}] 최근 {period['days']}일 자산 {period['start']:.2f} → "
+            f"{period['end']:.2f} ({pct:+.2f}%) · 목표 월 +10%")
+
+
 def build_daily_summary(day: str) -> str:
-    """전날 성과 한 통. 데모/실계좌를 한 메시지에 담는다 — 두 통으로 나누면 폰에서 비교가 안 된다."""
-    return "\n".join([f"📊 일일 요약 · {day}",
-                       _format_day_line("demo", day),
-                       _format_day_line("live", day)])
+    """전날 성과 한 통. 데모/실계좌를 한 메시지에 담는다 — 두 통으로 나누면 폰에서 비교가 안 된다.
+
+    금액은 전부 **수수료를 뺀 값**이고, 자산 줄은 계좌 총자산과 직접 맞춰볼 수 있는 값이다
+    (2026-09-24). 그 전에는 수수료가 빠진 실현손익만 알려서 "수익이라는데 총자산은 그대로"가
+    반복됐다 — 요약이 계좌 화면과 어긋나면 요약 자체가 쓸모없다.
+    """
+    lines = [f"📊 일일 요약 · {day}",
+             _format_day_line("demo", day),
+             _format_day_line("live", day)]
+    goals = [line for line in (_format_goal_line("demo"), _format_goal_line("live")) if line]
+    if goals:
+        lines.append("— 목표 진행 —")
+        lines.extend(goals)
+    return "\n".join(lines)
 
 
 def check_daily_summary(state: dict, now: datetime = None) -> str | None:

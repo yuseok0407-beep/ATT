@@ -570,7 +570,10 @@ def test_build_daily_summary_covers_both_accounts(monkeypatch):
     from src.execution.performance import _local_day
     text = tb.build_daily_summary(_local_day("2026-09-08T06:00:00+00:00"))
 
-    assert "[DEMO] 1건 · 승 1 / 패 0 · +2.00R · +20.00 USDT" in text
+    # 금액과 R은 **수수료를 뺀 값**이다(2026-09-24). 손절폭 1%에서 왕복 수수료는
+    # 2 x 0.0004 / 0.01 = 0.08R이고, R당 10달러이므로 0.80달러가 빠진다.
+    assert "[DEMO] 1건 · 승 1 / 패 0 · +1.92R · +19.20 USDT" in text
+    assert "수수료 0.80 차감 추정 (차감 전 +20.00)" in text
     assert "[LIVE] 청산된 거래 없음" in text
 
 
@@ -733,3 +736,83 @@ def test_breaker_halt_can_be_disabled(monkeypatch):
     state = {"demo": {"breaker_blocked_since": (_T0 - timedelta(hours=48)).isoformat()}}
 
     assert tb.check_breaker_halt("demo", state, now=_T0) is None
+
+
+def test_daily_summary_reports_fee_adjusted_money(monkeypatch):
+    """거래소의 realizedPnl에는 수수료가 안 들어있다 — 그대로 알리면 "수익 +N"이라고 해놓고
+    계좌 총자산은 줄어 있는 일이 생긴다(2026-09-24 사용자 보고). 이 전략은 건당 기대값과
+    수수료가 같은 크기라 부호까지 뒤집힌다."""
+    entries = [
+        {"timestamp": "2026-09-08T05:00:00+00:00", "event": "entered", "symbol": "BTC/USDT:USDT",
+         "signal": "LONG", "entry_price": 100.0, "stop_loss_price": 99.0},
+        {"timestamp": "2026-09-08T06:00:00+00:00", "event": "closed", "symbol": "BTC/USDT:USDT",
+         "reason": "take_profit", "entry_price": 100.0, "exit_price": 102.0,
+         "realized_pnl": 20.0, "net_realized_pnl": 18.5, "realized_r": 2.0,
+         "net_realized_r": 1.85, "fee_r": 0.15, "total_fee": 1.5},
+    ]
+    monkeypatch.setattr(tb, "read_entries", lambda path=None: entries if "live" not in str(path) else [])
+    monkeypatch.setattr(tb.filter_stats, "read_counts", lambda path=None, days=1: {})
+
+    from src.execution.performance import _local_day
+    text = tb.build_daily_summary(_local_day("2026-09-08T06:00:00+00:00"))
+
+    assert "+1.85R · +18.50 USDT" in text
+    # 실측 수수료가 기록에 있으면 "추정"을 붙이지 않는다.
+    assert "수수료 1.50 차감 (차감 전 +20.00)" in text
+
+
+def test_daily_summary_shows_the_equity_move(monkeypatch, tmp_path):
+    """자산 줄만이 계좌 화면의 총자산과 직접 맞춰볼 수 있는 값이다."""
+    path = tmp_path / "equity.json"
+    monkeypatch.setattr(tb.equity_log, "DEFAULT_PATH", str(path))
+    from datetime import datetime
+    for hour, value in ((1, 1000.0), (23, 1012.5)):
+        tb.equity_log.record(value, path=str(path),
+                             now=datetime.fromisoformat(f"2026-09-08T{hour:02d}:00:00").astimezone())
+
+    monkeypatch.setattr(tb, "read_entries", lambda path=None: [])
+    text = tb.build_daily_summary("2026-09-08")
+
+    assert "자산 1000.00 → 1012.50 (+12.50, +1.25%)" in text
+
+
+def test_daily_summary_shows_equity_even_when_nothing_closed(monkeypatch, tmp_path):
+    """거래가 없어도 자산은 움직인다(보유 포지션 평가손익, 펀딩비). "거래 없음"만 보내면
+    변화가 없었던 것으로 읽혀 또 계좌와 어긋난다."""
+    path = tmp_path / "equity.json"
+    monkeypatch.setattr(tb.equity_log, "DEFAULT_PATH", str(path))
+    from datetime import datetime
+    for hour, value in ((1, 500.0), (23, 490.0)):
+        tb.equity_log.record(value, path=str(path),
+                             now=datetime.fromisoformat(f"2026-09-08T{hour:02d}:00:00").astimezone())
+
+    monkeypatch.setattr(tb, "read_entries", lambda path=None: [])
+    text = tb.build_daily_summary("2026-09-08")
+
+    assert "청산된 거래 없음" in text
+    assert "자산 500.00 → 490.00 (-10.00, -2.00%)" in text
+
+
+def test_daily_summary_omits_equity_before_any_is_recorded(monkeypatch):
+    """새 코드로 봇을 재시작하기 전에는 기록이 없다 — 그 줄 없이 정상 동작해야 한다."""
+    monkeypatch.setattr(tb, "read_entries", lambda path=None: [])
+    text = tb.build_daily_summary("2026-09-08")
+    assert "자산" not in text
+    assert "청산된 거래 없음" in text
+
+
+def test_daily_summary_compares_recent_equity_to_the_monthly_goal(monkeypatch, tmp_path):
+    """목표(월 +10%)는 금액 기준이므로 비교도 금액 기준이어야 한다 — R 합계로는 못 낸다."""
+    path = tmp_path / "equity.json"
+    monkeypatch.setattr(tb.equity_log, "DEFAULT_PATH", str(path))
+    from datetime import datetime, timedelta
+    base = datetime.fromisoformat("2026-09-01T09:00:00").astimezone()
+    for i, value in enumerate([1000.0, 1040.0, 1080.0]):
+        tb.equity_log.record(value, path=str(path), now=base + timedelta(days=i))
+
+    monkeypatch.setattr(tb, "read_entries", lambda path=None: [])
+    text = tb.build_daily_summary("2026-09-03")
+
+    assert "— 목표 진행 —" in text
+    assert "1000.00 → 1080.00 (+8.00%)" in text
+    assert "목표 월 +10%" in text
