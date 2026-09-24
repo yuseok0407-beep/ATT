@@ -56,7 +56,10 @@ def detect_signal(
 
     close = df["close"]
     sma_line = sma(close, sma_period)
-    latest_adx = adx(df, 14)["adx"].iloc[-1]
+    # ADX 한 번으로 추세 강도(adx)와 방향(+DI/-DI)을 **둘 다** 얻는다 — 방향 필터에서 다시
+    # 부르면 백테스트에서 가장 무거운 계산이 봉마다 두 번 돈다.
+    adx_frame = adx(df, 14)
+    latest_adx = adx_frame["adx"].iloc[-1]
 
     if pd.isna(latest_adx) or latest_adx < adx_threshold:
         return None
@@ -79,8 +82,8 @@ def detect_signal(
     if direction_filter == "di":
         # +DI/-DI는 ADX와 **같은 계산**에서 이미 나오는데 지금까지 버려지고 있었다 — ADX로
         # "추세가 있는가"를 묻고 방향은 별개 지표(RSI)로 물으면 두 판단의 근거가 갈라진다.
-        di = adx(df, 14)
-        plus_di, minus_di = di["plus_di"].iloc[-1], di["minus_di"].iloc[-1]
+        plus_di = adx_frame["plus_di"].iloc[-1]
+        minus_di = adx_frame["minus_di"].iloc[-1]
         if pd.isna(plus_di) or pd.isna(minus_di):
             return None
         if bullish_cross and plus_di > minus_di:
