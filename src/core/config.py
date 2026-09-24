@@ -32,6 +32,14 @@ POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "30"))  # 감시 
 # (필터 없음)은 마지막 구간 -5.4R로 OOS FAIL인 반면 SMA400/SMA700 숏차단만 전 구간 양수로 PASS했고,
 # 그중 총R이 더 나은 400을 채택(400 +171.0R / 700 +161.5R). 0으로 두면 필터가 꺼진다.
 RULE_REGIME_SMA_PERIOD = int(os.getenv("RULE_REGIME_SMA_PERIOD", "400"))
+
+# SMA 돌파의 **방향**을 무엇으로 확인하는가(2026-09-24).
+#   "rsi"  — RSI가 임계값 위/아래 (2026-09-24까지의 동작)
+#   "di"   — +DI > -DI. ADX와 같은 계산에서 나오는 방향 지표인데 그동안 버려지고 있었다.
+#   "none" — 방향 확인 없음. 실험용이고 실거래에 쓰지 말 것(탐색 구간 총R -84R).
+# 코드 상수가 아니라 설정으로 둔 이유: 저널의 config_changed가 자동으로 경계를 남기고
+# 전략 버전이 생기며, 되돌릴 때 코드를 안 고쳐도 된다.
+RULE_DIRECTION_FILTER = os.getenv("RULE_DIRECTION_FILTER", "rsi")
 # 신호를 만든 마감 봉의 종가에서 현재가가 손절폭의 몇 배까지 벌어져도 진입을 허용할지.
 # 이걸 넘으면 진입을 건너뛴다 — 손절/익절가가 전부 그 봉 종가 기준으로 계산되므로, 현재가가
 # 이미 손절선 근처/너머면 진입하자마자 손절되거나 브라켓 주문이 -2021로 거부된다

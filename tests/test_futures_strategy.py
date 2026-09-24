@@ -68,10 +68,14 @@ def test_detect_signal_without_rsi_confirm_ignores_momentum():
 
 
 def test_detect_signal_stricter_rsi_threshold_can_block_signal():
+    """RSI 분기를 재는 테스트이므로 `direction_filter="rsi"`를 명시한다 — 기본값이 설정에서
+    오므로(2026-09-24 실거래가 "di"로 전환) 명시하지 않으면 이 테스트가 재려는 분기를
+    아예 안 탄다."""
     df = _cross_up_df(n=60)
     latest_rsi = rsi_indicator(df["close"], 14).iloc[-1]
     # 실제 RSI보다 높은 임계값을 요구하면 신호가 막혀야 한다
-    signal = detect_signal(df, adx_threshold=1, rsi_threshold=float(latest_rsi) + 10)
+    signal = detect_signal(df, adx_threshold=1, direction_filter="rsi",
+                           rsi_threshold=float(latest_rsi) + 10)
     assert signal is None
 
 
@@ -211,11 +215,20 @@ def test_volatility_floor_is_permissive_when_unknown_or_disabled():
 # detect_signal은 adx 값만 썼다). 방향 확인을 RSI 대신 그쪽으로 돌릴 수 있게 열어둔 손잡이라,
 # 여기서 지키는 것은 **기본값이 실거래 동작 그대로인가**와 **선택지가 실제로 다르게 도는가**다.
 
-def test_direction_filter_defaults_to_the_live_behaviour():
-    """기본값이 바뀌면 실거래 규칙이 조용히 바뀐다 — 그건 STRATEGY_LOGIC_REVISION을 올릴 일이다."""
-    from src.core import futures_strategy as fs
-    assert fs.DEFAULT_DIRECTION_FILTER == "rsi"
+def test_direction_filter_default_comes_from_config():
+    """기본값의 정의는 `config.RULE_DIRECTION_FILTER` 한 곳이어야 한다 — 코드에 따로 박아두면
+    .env를 고쳐도 백테스트는 옛 규칙을 돌아서 둘이 갈라진다(이 저장소에서 두 번 난 사고 유형)."""
+    from src.core import config, futures_strategy as fs
+    assert fs.DEFAULT_DIRECTION_FILTER == config.RULE_DIRECTION_FILTER
+    assert config.RULE_DIRECTION_FILTER in fs.VALID_DIRECTION_FILTERS
     assert set(fs.VALID_DIRECTION_FILTERS) == {"rsi", "di", "none"}
+
+
+def test_direction_filter_is_recorded_in_the_journal_config():
+    """저널의 config_changed에 안 실리면 "이 거래가 어느 규칙에서 나왔는지"를 나중에 알 수 없다."""
+    from src.core import config
+    from src.futures_rule_bot import current_strategy_config
+    assert current_strategy_config()["direction_filter"] == config.RULE_DIRECTION_FILTER
 
 
 def _crossing_up(n=60, base=100.0):

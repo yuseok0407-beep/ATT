@@ -498,6 +498,7 @@ def test_engine_defaults_match_the_live_config():
     assert defaults["take_profit_rr"] == config.TAKE_PROFIT_RR
     assert defaults["fee_pct_per_side"] == config.FEE_PCT_PER_SIDE
     assert defaults["regime_sma_period"] == config.RULE_REGIME_SMA_PERIOD
+    assert defaults["direction_filter"] == config.RULE_DIRECTION_FILTER
     assert defaults["min_atr_to_stop_ratio"] == config.MIN_ATR_TO_STOP_RATIO
 
 

@@ -5,6 +5,7 @@ import pandas as pd
 from src.core.config import (
     MIN_ATR_TO_STOP_RATIO,
     RULE_ADX_THRESHOLD,
+    RULE_DIRECTION_FILTER,
     RULE_SMA_PERIOD,
     STOP_LOSS_PCT,
     TAKE_PROFIT_RR,
@@ -20,13 +21,11 @@ VALID_SIDES = ("long", "short")
 # 1: 규칙 봇 개시 / 2: 마감봉 신호(08-25) / 3: 같은 신호봉 재진입 잠금 + 진입가 괴리 검사(09-08)
 STRATEGY_LOGIC_REVISION = 3
 
-# SMA 돌파의 **방향**을 무엇으로 확인하는가. 실거래 현재 동작은 "rsi"이고, 바꾸려면 게이트를
-# 통과시킨 뒤 이 기본값을 옮긴다(그때 STRATEGY_LOGIC_REVISION도 같이 올릴 것).
-#   "rsi"  — RSI가 임계값 위/아래 (현재 실거래)
-#   "di"   — +DI > -DI (ADX와 같은 계산에서 나오는 방향 지표. 지금까지 버려지고 있었다)
-#   "none" — 방향 확인 없이 돌파만으로 진입
+# SMA 돌파의 **방향**을 무엇으로 확인하는가. 값의 정의와 기본값은 `config.RULE_DIRECTION_FILTER`
+# 한 곳에 있다 — 설정이므로 바꿔도 STRATEGY_LOGIC_REVISION은 안 올린다(저널의 config_changed가
+# 경계를 남기고 전략 버전이 자동으로 생긴다).
 VALID_DIRECTION_FILTERS = ("rsi", "di", "none")
-DEFAULT_DIRECTION_FILTER = "rsi"
+DEFAULT_DIRECTION_FILTER = RULE_DIRECTION_FILTER
 
 
 def detect_signal(
