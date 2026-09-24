@@ -75,6 +75,12 @@ SEARCHABLE = {
     "regime_sma_period": int,
     "min_atr_to_stop_ratio": float,
     "max_concurrent_positions": int,
+    # 청산 관리(2026-09-24 추가). 저장소 관례대로 **0이면 끈다** — 켜고 끄는 불리언을 따로 두면
+    # "off인데 값은 1.0"처럼 원장에서 읽을 수 없는 조합이 생긴다.
+    # 주의: 이 둘은 **실거래 봇에 아직 구현이 없다.** 게이트를 통과해도 채택하려면 브라켓 주문
+    # 수정 경로를 먼저 만들어야 한다(백테스트와 실거래가 같은 규칙이어야 한다는 원칙).
+    "breakeven_at_r": float,    # 이만큼 유리하게 가면 손절을 진입가로 옮긴다. 0=끔
+    "max_hold_bars": int,       # 이 봉 수를 넘기면 시장가 청산. 0=끔
 }
 
 LEDGER_COLUMNS = [
@@ -103,6 +109,9 @@ def _defaults() -> dict:
         "regime_sma_period": RULE_REGIME_SMA_PERIOD,
         "min_atr_to_stop_ratio": MIN_ATR_TO_STOP_RATIO,
         "max_concurrent_positions": MAX_CONCURRENT_POSITIONS,
+        # 실거래 봇에 이 둘이 없으므로 기본값은 "끔"이다 — 그래야 기준선이 실거래와 같다.
+        "breakeven_at_r": 0.0,
+        "max_hold_bars": 0,
     }
 
 
@@ -211,6 +220,11 @@ def _run_one(df_by_symbol: dict[str, pd.DataFrame], params: dict, *, seeds: int,
         fee_pct_per_side=FEE_PCT_PER_SIDE, slippage_r_per_side=slippage,
         regime_sma_period=params["regime_sma_period"],
         min_atr_to_stop_ratio=params["min_atr_to_stop_ratio"],
+        # 0을 "끔"으로 쓰는 관례를 엔진의 불리언 인자로 옮긴다.
+        use_breakeven=params["breakeven_at_r"] > 0,
+        breakeven_at_r=params["breakeven_at_r"] or 1.0,
+        use_max_hold=params["max_hold_bars"] > 0,
+        max_hold_bars=params["max_hold_bars"] or 72,
     )
     return gate.summarize(results, df_by_symbol)
 
