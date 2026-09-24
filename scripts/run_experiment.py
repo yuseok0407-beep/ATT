@@ -122,6 +122,28 @@ def _parse_overrides(pairs: list[str]) -> dict:
     return out
 
 
+def rejected_ids(rows: list[dict]) -> set[str]:
+    """기각된 실험 ID. `verdict="REJECTED"` 행이 `failed` 칸에 대상 ID를 들고 있다.
+
+    왜 필요한가(2026-09-24, E0007에서 실제로 걸렸다): PASS가 나와도 이웃값이 하나도 못 따라오면
+    그건 잡음에서 튄 한 칸이라 채택할 수 없다. 그런데 **원장에 PASS 행이 남아 있는 한 홀드아웃
+    잠금이 풀린다** — 기각한 설정 때문에 홀드아웃이 열리면 봉인의 의미가 없어진다.
+
+    기각도 **지우지 않고 한 줄 더 쌓는다**(원장은 append-only다). `failed` 칸을 재사용하는 이유는
+    칼럼을 추가하면 이미 쓰인 헤더와 어긋나 옛 행이 밀리기 때문이다.
+    """
+    return {row.get("failed", "").strip() for row in rows
+            if row.get("verdict") == "REJECTED" and row.get("failed", "").strip()}
+
+
+def adoptable_passes(rows: list[dict]) -> list[dict]:
+    """탐색 구간에서 PASS했고 아직 기각되지 않은 행."""
+    dropped = rejected_ids(rows)
+    return [row for row in rows
+            if row.get("verdict") == "PASS" and row.get("window") == "search"
+            and row.get("run_id") not in dropped]
+
+
 def read_ledger() -> list[dict]:
     if not LEDGER_PATH.exists():
         return []
@@ -193,6 +215,38 @@ def _run_one(df_by_symbol: dict[str, pd.DataFrame], params: dict, *, seeds: int,
     return gate.summarize(results, df_by_symbol)
 
 
+def _reject(run_id: str, reason: str) -> int:
+    """PASS 행을 기각한다. 원장의 기존 줄은 손대지 않고 REJECTED 줄을 하나 더 쌓는다."""
+    rows = read_ledger()
+    target = next((r for r in rows if r.get("run_id") == run_id), None)
+    if target is None:
+        print(f"거부: 원장에 {run_id}가 없다.")
+        return 2
+    if target.get("verdict") != "PASS":
+        print(f"거부: {run_id}는 PASS가 아니다(판정 {target.get('verdict')}) — 기각할 것이 없다.")
+        return 2
+    if run_id in rejected_ids(rows):
+        print(f"{run_id}는 이미 기각돼 있다.")
+        return 0
+    if not reason:
+        print("거부: --note로 기각 이유를 남겨야 한다. 이유 없는 기각은 나중에 재현할 수 없다.")
+        return 2
+
+    append_ledger({
+        "run_id": f"E{len(rows) + 1:04d}",
+        "utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "commit": _git_commit(),
+        "gate_version": gate.GATE_VERSION,
+        "window": target.get("window", ""),
+        "params": target.get("params", ""),
+        "verdict": "REJECTED",
+        "failed": run_id,
+        "note": reason.replace("\t", " "),
+    })
+    print(f"{run_id} 기각 기록. 이제 이 PASS로는 홀드아웃이 열리지 않는다.")
+    return 0
+
+
 def _print_ledger() -> int:
     rows = read_ledger()
     if not rows:
@@ -205,8 +259,11 @@ def _print_ledger() -> int:
               f"{row['total_r_p5']:>8s} {row['oos_pass_rate']:>5s} "
               f"{row['stress_total_r']:>8s} {row['verdict']:>6s}  "
               f"{row['params']} {row['note']}")
-    passed = [r for r in rows if r["verdict"] == "PASS" and r["window"] == "search"]
-    print(f"\n총 {len(rows)}회 시도 · 탐색 구간 PASS {len(passed)}회")
+    adoptable = adoptable_passes(rows)
+    dropped = rejected_ids(rows)
+    print(f"\n총 {len(rows)}회 기록 · 탐색 구간 PASS "
+          f"{sum(1 for r in rows if r['verdict'] == 'PASS')}회 "
+          f"(기각 {len(dropped)}회 → 채택 가능 {len(adoptable)}개)")
     print("시도 횟수가 많을수록 한 번의 PASS가 의미하는 바는 작아진다 — 프로토콜의 다중비교 항목 참고.")
     return 0
 
@@ -225,11 +282,17 @@ def main() -> int:
     parser.add_argument("--cache-dir", type=Path, default=PROJECT_ROOT / ".ohlcv_cache")
     parser.add_argument("--note", default="")
     parser.add_argument("--ledger", action="store_true", help="원장만 출력하고 끝낸다")
+    parser.add_argument("--reject", metavar="RUN_ID",
+                        help="PASS한 실험을 기각한다(이웃값이 안 따라오는 고립된 칸 등). "
+                             "원장에 한 줄을 더 쌓으며 기존 행은 건드리지 않고, 그 뒤로는 "
+                             "그 PASS로 홀드아웃이 열리지 않는다. --note로 이유를 남길 것")
     parser.add_argument("--dry-run", action="store_true", help="판정만 하고 원장에 안 남긴다")
     args = parser.parse_args()
 
     if args.ledger:
         return _print_ledger()
+    if args.reject:
+        return _reject(args.reject, args.note)
 
     params = _defaults() | _parse_overrides(args.overrides)
 
@@ -238,8 +301,12 @@ def main() -> int:
             print("거부: 홀드아웃은 --confirm-holdout 없이 열 수 없다.")
             print("한 번 보면 그 구간은 더 이상 '안 본 데이터'가 아니다 — 프로토콜 참고.")
             return 2
-        if not any(r["verdict"] == "PASS" and r["window"] == "search" for r in read_ledger()):
-            print("거부: 탐색 구간에서 PASS한 설정이 원장에 아직 없다.")
+        rows = read_ledger()
+        if not adoptable_passes(rows):
+            passed = [r["run_id"] for r in rows if r.get("verdict") == "PASS"]
+            print("거부: 탐색 구간에서 PASS했고 기각되지 않은 설정이 원장에 없다.")
+            if passed:
+                print(f"       PASS는 있으나 전부 기각됐다: {', '.join(passed)}")
             print("홀드아웃은 후보를 고르는 곳이 아니라 이미 고른 후보를 **확인**하는 곳이다.")
             return 2
 

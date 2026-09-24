@@ -231,3 +231,82 @@ def test_holdout_is_declared_as_sealed_in_the_protocol():
     text = PROTOCOL_PATH.read_text(encoding="utf-8")
     assert "--confirm-holdout" in text
     assert re.search(r"홀드아웃.*FAIL.*재도전하지 않는다|재도전하지 않는다", text, re.S)
+
+
+# --- PASS 기각 (2026-09-24, E0007에서 실제로 필요해진 경로) ------------------
+
+def _ledger(runner, tmp_path, rows):
+    runner.LEDGER_PATH = tmp_path / "experiments.tsv"
+    for row in rows:
+        runner.append_ledger(row)
+    return runner
+
+
+def test_a_rejected_pass_no_longer_counts_as_adoptable(tmp_path, monkeypatch):
+    """PASS가 나와도 이웃값이 안 따라오면 잡음에서 튄 한 칸이다. 그때 원장에 PASS 행이 그대로
+    남아 있으면 **기각한 설정 때문에 홀드아웃 봉인이 풀린다** — 실제로 E0007에서 걸린 구멍이다."""
+    runner = _load_runner()
+    monkeypatch.setattr(runner, "LEDGER_PATH", tmp_path / "experiments.tsv")
+    runner.append_ledger({"run_id": "E0001", "verdict": "PASS", "window": "search"})
+    assert len(runner.adoptable_passes(runner.read_ledger())) == 1
+
+    runner.append_ledger({"run_id": "E0002", "verdict": "REJECTED", "window": "search",
+                          "failed": "E0001", "note": "이웃값 전부 FAIL"})
+
+    rows = runner.read_ledger()
+    assert runner.rejected_ids(rows) == {"E0001"}
+    assert runner.adoptable_passes(rows) == []
+    # 기각은 지우는 게 아니라 쌓는 것이다 — 원래 PASS 행은 그대로 남아야 한다.
+    assert rows[0]["verdict"] == "PASS"
+
+
+def test_rejection_requires_a_reason(tmp_path, monkeypatch):
+    """이유 없는 기각은 나중에 재현할 수 없다."""
+    runner = _load_runner()
+    monkeypatch.setattr(runner, "LEDGER_PATH", tmp_path / "experiments.tsv")
+    runner.append_ledger({"run_id": "E0001", "verdict": "PASS", "window": "search"})
+
+    assert runner._reject("E0001", "") == 2
+    assert runner.adoptable_passes(runner.read_ledger()) != []
+
+
+def test_rejecting_an_unknown_or_failing_run_is_refused(tmp_path, monkeypatch):
+    runner = _load_runner()
+    monkeypatch.setattr(runner, "LEDGER_PATH", tmp_path / "experiments.tsv")
+    runner.append_ledger({"run_id": "E0001", "verdict": "FAIL", "window": "search",
+                          "failed": "top2_share"})
+
+    assert runner._reject("E0009", "없는 실험") == 2
+    assert runner._reject("E0001", "FAIL인데 기각?") == 2
+
+
+def test_rejecting_twice_is_a_no_op(tmp_path, monkeypatch):
+    runner = _load_runner()
+    monkeypatch.setattr(runner, "LEDGER_PATH", tmp_path / "experiments.tsv")
+    runner.append_ledger({"run_id": "E0001", "verdict": "PASS", "window": "search"})
+    assert runner._reject("E0001", "이웃값 전부 FAIL") == 0
+    before = len(runner.read_ledger())
+    assert runner._reject("E0001", "또 기각") == 0
+    assert len(runner.read_ledger()) == before
+
+
+def test_a_failed_run_never_unlocks_the_holdout(tmp_path, monkeypatch):
+    runner = _load_runner()
+    monkeypatch.setattr(runner, "LEDGER_PATH", tmp_path / "experiments.tsv")
+    runner.append_ledger({"run_id": "E0001", "verdict": "FAIL", "window": "search"})
+    assert runner.adoptable_passes(runner.read_ledger()) == []
+
+
+def test_a_holdout_pass_does_not_unlock_the_holdout(tmp_path, monkeypatch):
+    """홀드아웃에서 난 PASS는 홀드아웃을 여는 근거가 될 수 없다 — 순환이다."""
+    runner = _load_runner()
+    monkeypatch.setattr(runner, "LEDGER_PATH", tmp_path / "experiments.tsv")
+    runner.append_ledger({"run_id": "E0001", "verdict": "PASS", "window": "holdout"})
+    assert runner.adoptable_passes(runner.read_ledger()) == []
+
+
+def test_protocol_documents_the_neighbour_requirement():
+    """이웃값 확인 의무가 코드에만 있고 문서에 없으면 다음 세션이 그냥 채택한다."""
+    text = PROTOCOL_PATH.read_text(encoding="utf-8")
+    assert "이웃값" in text
+    assert "--reject" in text
