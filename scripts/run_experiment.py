@@ -53,7 +53,11 @@ from src.core.config import (  # noqa: E402
     STOP_LOSS_PCT,
     TAKE_PROFIT_RR,
 )
-from src.core.futures_strategy import detect_signal  # noqa: E402
+from src.core.futures_strategy import (  # noqa: E402
+    DEFAULT_DIRECTION_FILTER,
+    VALID_DIRECTION_FILTERS,
+    detect_signal,
+)
 from src.data.futures_exchange import get_futures_market_data_client  # noqa: E402
 
 TIMEFRAME = "1h"
@@ -81,6 +85,11 @@ SEARCHABLE = {
     # 수정 경로를 먼저 만들어야 한다(백테스트와 실거래가 같은 규칙이어야 한다는 원칙).
     "breakeven_at_r": float,    # 이만큼 유리하게 가면 손절을 진입가로 옮긴다. 0=끔
     "max_hold_bars": int,       # 이 봉 수를 넘기면 시장가 청산. 0=끔
+    "partial_at_r": float,      # 이 지점에서 일부 익절(스케일 아웃). 0=끔
+    "partial_fraction": float,  # 부분 익절로 닫는 비중
+    "breakeven_after_partial": int,  # 부분 익절 뒤 남은 물량의 손절을 진입가로. 1/0
+    # SMA 돌파의 방향을 무엇으로 확인하는가: "rsi"(실거래 현재) / "di"(+DI>-DI) / "none"
+    "direction_filter": str,
 }
 
 LEDGER_COLUMNS = [
@@ -112,6 +121,10 @@ def _defaults() -> dict:
         # 실거래 봇에 이 둘이 없으므로 기본값은 "끔"이다 — 그래야 기준선이 실거래와 같다.
         "breakeven_at_r": 0.0,
         "max_hold_bars": 0,
+        "partial_at_r": 0.0,
+        "partial_fraction": 0.5,
+        "breakeven_after_partial": 1,
+        "direction_filter": DEFAULT_DIRECTION_FILTER,
     }
 
 
@@ -191,6 +204,7 @@ def _signal_lookup(symbol: str, df: pd.DataFrame, params: dict, cache_dir: Path 
     """
     key = (f"{symbol.replace('/', '_').replace(':', '-')}"
            f"__adx{params['adx_threshold']}__sma{params['sma_period']}"
+           f"__dir{params['direction_filter']}"
            f"__n{len(df)}__{df['timestamp'].iloc[0]:%Y%m%d%H}-{df['timestamp'].iloc[-1]:%Y%m%d%H}")
     path = (cache_dir / "signals" / f"{key}.json") if cache_dir else None
     if path is not None and path.exists():
@@ -200,7 +214,8 @@ def _signal_lookup(symbol: str, df: pd.DataFrame, params: dict, cache_dir: Path 
     for i in range(entry_start_bar(len(df), params["regime_sma_period"]), len(df)):
         window = df.iloc[max(0, i - SIGNAL_LOOKBACK_BARS + 1):i + 1]
         signal = detect_signal(window, adx_threshold=params["adx_threshold"],
-                               sma_period=params["sma_period"], require_rsi_confirm=True)
+                               sma_period=params["sma_period"], require_rsi_confirm=True,
+                               direction_filter=params["direction_filter"])
         if signal:
             lookup[i] = signal
     if path is not None:
@@ -225,6 +240,10 @@ def _run_one(df_by_symbol: dict[str, pd.DataFrame], params: dict, *, seeds: int,
         breakeven_at_r=params["breakeven_at_r"] or 1.0,
         use_max_hold=params["max_hold_bars"] > 0,
         max_hold_bars=params["max_hold_bars"] or 72,
+        use_partial_tp=params["partial_at_r"] > 0,
+        partial_at_r=params["partial_at_r"] or 1.0,
+        partial_fraction=params["partial_fraction"],
+        breakeven_after_partial=bool(params["breakeven_after_partial"]),
     )
     return gate.summarize(results, df_by_symbol)
 
@@ -309,6 +328,12 @@ def main() -> int:
         return _reject(args.reject, args.note)
 
     params = _defaults() | _parse_overrides(args.overrides)
+    if params["direction_filter"] not in VALID_DIRECTION_FILTERS:
+        print(f"거부: direction_filter는 {VALID_DIRECTION_FILTERS} 중 하나여야 한다.")
+        return 2
+    if params["partial_at_r"] > 0 and params["breakeven_at_r"] > 0:
+        print("거부: 부분 익절과 손익분기 이동은 엔진이 동시에 지원하지 않는다. 하나만 켤 것.")
+        return 2
 
     if args.window == "holdout":
         if not args.confirm_holdout:

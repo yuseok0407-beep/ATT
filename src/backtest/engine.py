@@ -12,6 +12,7 @@ from src.core.config import (
     TAKE_PROFIT_RR,
 )
 from src.core.futures_strategy import (
+    DEFAULT_DIRECTION_FILTER,
     apply_regime_filter,
     compute_bracket_prices,
     detect_signal,
@@ -72,7 +73,8 @@ def _check_exit(bar: pd.Series, position: dict, use_breakeven: bool, breakeven_a
 
 
 def _check_exit_partial(bar: pd.Series, position: dict, fee_pct_per_side: float,
-                         partial_at_r: float, partial_fraction: float, breakeven_after_partial: bool):
+                         partial_at_r: float, partial_fraction: float, breakeven_after_partial: bool,
+                         slippage_r_per_side: float = 0.0, risk: float | None = None):
     """부분 익절(스케일 아웃) 모드에서 이 봉의 청산 이벤트를 확인한다. (사유, 청산가, 최종 R배수)를
     돌려주되, 포지션이 아직 완전히 안 닫혔으면(부분 익절만 발생했거나 아무 일도 없으면) 전부 None.
 
@@ -82,19 +84,38 @@ def _check_exit_partial(bar: pd.Series, position: dict, fee_pct_per_side: float,
     반영한다(그 구간만큼만 실제로 체결되므로).
 
     가정: 손절과 (부분/최종) 목표가가 같은 봉에서 동시에 닿을 수 있는 경우, 보수적으로 손절이
-    먼저라고 가정한다(기존 _check_exit과 동일한 가정)."""
+    먼저라고 가정한다(기존 _check_exit과 동일한 가정).
+
+    risk: R의 분모. 안 넘기면 진입가~최초 손절가를 쓴다(옛 동작). 실거래 `realized_r`과 같은
+    기준으로 재려면 **신호가~손절가**를 넘긴다 — 체결이 나빠진 것은 분모를 키우는 게 아니라
+    손익을 깎는 것으로 나타나야 하고, 그래야 비부분 경로와 같은 규약이 된다.
+
+    slippage_r_per_side: **청산 쪽** 슬리피지만 여기서 부과한다(진입 쪽은 호출자가 이미
+    entry_price를 불리하게 옮겨 놓는다 — 비부분 경로와 같다). 수수료와 같은 모양으로 각 다리에
+    비중만큼 걸리므로 합계는 편도 1회분이다. **2026-09-24 이전에는 이 경로가 슬리피지를 아예
+    무시했다** — 그대로 게이트에 넣으면 부분 익절만 비용을 안 내는 셈이라 스트레스 판정이
+    무의미해진다."""
     side = position["side"]
     entry = position["entry_price"]
     original_stop = position["original_stop_price"]
-    original_risk = abs(entry - original_stop)
+    original_risk = risk if risk is not None else abs(entry - original_stop)
     high, low = bar["high"], bar["low"]
     fee_r_full = (2 * fee_pct_per_side * entry) / original_risk if (fee_pct_per_side and original_risk) else 0.0
+    # 아래 계산에서 fee_r_full이 쓰이는 자리는 전부 "그 다리가 무는 왕복 비용"이다.
+    fee_r_full += slippage_r_per_side
+
+    def _leg_r(exit_price: float) -> float:
+        """넘겨받은 risk를 분모로 쓰는 R — `_pnl_r`은 분모를 진입가로 고정해서 못 쓴다."""
+        diff = exit_price - entry
+        if side == "short":
+            diff = -diff
+        return diff / original_risk if original_risk else 0.0
 
     if not position["partial_taken"]:
         stop_price = position["stop_price"]
         stop_hit = (low <= stop_price) if side == "long" else (high >= stop_price)
         if stop_hit:
-            pnl_r = _pnl_r(entry, original_stop, side, stop_price) - fee_r_full
+            pnl_r = _leg_r(stop_price) - fee_r_full
             return "stop_loss", stop_price, pnl_r
 
         partial_target = position["partial_target_price"]
@@ -113,12 +134,12 @@ def _check_exit_partial(bar: pd.Series, position: dict, fee_pct_per_side: float,
     target_hit = (high >= target_price) if side == "long" else (low <= target_price)
 
     if stop_hit:
-        leg_pnl_r = _pnl_r(entry, original_stop, side, stop_price)
+        leg_pnl_r = _leg_r(stop_price)
         total_r = position["banked_r"] + remaining_fraction * (leg_pnl_r - fee_r_full)
         reason = "breakeven_stop" if stop_price == entry else "stop_loss"
         return reason, stop_price, total_r
     if target_hit:
-        leg_pnl_r = _pnl_r(entry, original_stop, side, target_price)
+        leg_pnl_r = _leg_r(target_price)
         total_r = position["banked_r"] + remaining_fraction * (leg_pnl_r - fee_r_full)
         return "take_profit", target_price, total_r
     return None, None, None
@@ -148,6 +169,7 @@ def gated_signals(
     rsi_period: int = 14,
     rsi_threshold: float = 50.0,
     require_rsi_confirm: bool = True,
+    direction_filter: str = DEFAULT_DIRECTION_FILTER,
     signal_fn: Callable[[pd.DataFrame], str | None] | None = None,
 ) -> dict[int, str]:
     """봉 위치 -> 진입 게이트를 모두 통과한 신호("LONG"/"SHORT"). 통과 못 한 봉은 아예 없다.
@@ -182,6 +204,7 @@ def gated_signals(
             signal = detect_signal(
                 window, adx_threshold=adx_threshold, sma_period=sma_period, rsi_period=rsi_period,
                 rsi_threshold=rsi_threshold, require_rsi_confirm=require_rsi_confirm,
+                direction_filter=direction_filter,
             )
         if signal is None:
             continue
@@ -223,6 +246,7 @@ def run_backtest(
     rsi_period: int = 14,
     rsi_threshold: float = 50.0,
     require_rsi_confirm: bool = True,
+    direction_filter: str = DEFAULT_DIRECTION_FILTER,
     signal_fn: Callable[[pd.DataFrame], str | None] | None = None,
     target_series: pd.Series | None = None,
     use_partial_tp: bool = False,
@@ -279,8 +303,9 @@ def run_backtest(
     df와 같은 인덱스를 가져야 한다. stop_mode로 계산된 target_price는 이 경우 무시되고 손절가만
     그대로 쓰인다.
 
-    use_partial_tp: True면 부분 익절(스케일 아웃)을 시뮬레이션한다. **이 경로는
-    slippage_r_per_side를 반영하지 않는다** — 실거래 봇에 부분 익절이 없어서 비교 대상이 없다. — partial_at_r(원래 리스크의
+    use_partial_tp: True면 부분 익절(스케일 아웃)을 시뮬레이션한다(2026-09-24부터 이 경로도
+    수수료와 슬리피지를 비부분 경로와 **같은 규약**으로 문다 — 그 전에는 슬리피지를 아예 무시해서
+    부분 익절만 비용을 안 내는 결과가 나왔다). — partial_at_r(원래 리스크의
     몇 배)에 도달하면 포지션의 partial_fraction만큼 청산해서 그만큼의 R을 확정하고,
     breakeven_after_partial=True(기본값)면 나머지 물량의 손절을 진입가로 옮긴 뒤, 나머지는
     (stop_mode로 계산된) 최종 target_price까지 계속 보유한다. use_breakeven/target_series와는
@@ -296,7 +321,8 @@ def run_backtest(
         df, stop_loss_pct=stop_loss_pct, atr_period=atr_period, adx_threshold=adx_threshold,
         regime_sma_period=regime_sma_period, min_atr_to_stop_ratio=min_atr_to_stop_ratio,
         sma_period=sma_period, rsi_period=rsi_period, rsi_threshold=rsi_threshold,
-        require_rsi_confirm=require_rsi_confirm, signal_fn=signal_fn,
+        require_rsi_confirm=require_rsi_confirm, direction_filter=direction_filter,
+        signal_fn=signal_fn,
     )
 
     trades: list[dict] = []
@@ -307,17 +333,23 @@ def run_backtest(
 
         if position is not None:
             if use_partial_tp:
+                # R의 분모는 비부분 경로와 같은 **신호가~손절가**다 — 두 경로가 다른 규약을
+                # 쓰면 원장의 행끼리 비교가 안 된다.
+                risk = abs(position["signal_price"] - position["original_stop_price"])
                 reason, exit_price, pnl_r = _check_exit_partial(
-                    bar, position, fee_pct_per_side, partial_at_r, partial_fraction, breakeven_after_partial,
+                    bar, position, fee_pct_per_side, partial_at_r, partial_fraction,
+                    breakeven_after_partial, slippage_r_per_side, risk,
                 )
                 if reason is None and use_max_hold and (i - position["entry_index"]) >= max_hold_bars:
                     exit_price = float(bar["close"])
                     remaining_fraction = (1 - partial_fraction) if position["partial_taken"] else 1.0
-                    leg_pnl_r = _pnl_r(position["entry_price"], position["original_stop_price"], position["side"], exit_price)
-                    original_risk = abs(position["entry_price"] - position["original_stop_price"])
-                    fee_r_full = (2 * fee_pct_per_side * position["entry_price"]) / original_risk \
-                        if (fee_pct_per_side and original_risk) else 0.0
-                    pnl_r = position["banked_r"] + remaining_fraction * (leg_pnl_r - fee_r_full)
+                    move = exit_price - position["entry_price"]
+                    if position["side"] == "short":
+                        move = -move
+                    leg_pnl_r = move / risk if risk else 0.0
+                    cost_r = ((2 * fee_pct_per_side * position["entry_price"]) / risk
+                              if (fee_pct_per_side and risk) else 0.0) + slippage_r_per_side
+                    pnl_r = position["banked_r"] + remaining_fraction * (leg_pnl_r - cost_r)
                     reason = "max_hold"
             else:
                 dynamic_target = float(target_series.iloc[i]) if target_series is not None else None
@@ -390,7 +422,9 @@ def run_backtest(
             "breakeven_moved": False,
         }
         if use_partial_tp:
-            original_risk = abs(entry_price - stop_price)
+            # 부분 익절 목표가도 **신호가~손절가**를 1R로 잡는다 — banked_r이 명목 partial_at_r을
+            # 그대로 적립하므로, 목표가를 다른 분모로 잡으면 "적립한 R"과 "실제로 간 R"이 어긋난다.
+            original_risk = abs(signal_price - stop_price)
             partial_target_price = entry_price + partial_at_r * original_risk if side == "long" \
                 else entry_price - partial_at_r * original_risk
             position.update({

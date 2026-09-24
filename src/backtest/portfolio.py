@@ -42,6 +42,7 @@ import pandas as pd
 
 from src.backtest.engine import (
     _check_exit,
+    _check_exit_partial,
     entry_start_bar,
     gated_signals,
 )
@@ -87,14 +88,21 @@ class _Position:
     # 보려면 거래마다 남아 있어야 한다(상한을 정하는 근거가 정확히 이 질문이다).
     concurrent_at_entry: int = 1
     breakeven_moved: bool = False
+    # 부분 익절(스케일 아웃) 상태 — use_partial_tp일 때만 의미가 있다.
+    partial_taken: bool = False
+    banked_r: float = 0.0
+    partial_target_price: float | None = None
 
     def as_dict(self) -> dict:
-        """engine._check_exit이 기대하는 딕셔너리 형태."""
+        """engine._check_exit / _check_exit_partial이 기대하는 딕셔너리 형태."""
         return {
             "side": self.side, "entry_price": self.entry_price,
             "stop_price": self.stop_price, "target_price": self.target_price,
             "original_stop_price": self.original_stop_price,
+            "signal_price": self.signal_price,
             "breakeven_moved": self.breakeven_moved,
+            "partial_taken": self.partial_taken, "banked_r": self.banked_r,
+            "partial_target_price": self.partial_target_price,
         }
 
 
@@ -136,6 +144,10 @@ def simulate_portfolio(
     breakeven_at_r: float = 1.0,
     use_max_hold: bool = False,
     max_hold_bars: int = 72,
+    use_partial_tp: bool = False,
+    partial_at_r: float = 1.0,
+    partial_fraction: float = 0.5,
+    breakeven_after_partial: bool = True,
     seed: int | None = None,
     signals_by_symbol: dict[str, dict[int, str]] | None = None,
     **signal_params,
@@ -207,25 +219,47 @@ def simulate_portfolio(
             position = open_positions[symbol]
             state = position.as_dict()
             bar = df_by_symbol[symbol].iloc[i]
-            reason, exit_price = _check_exit(bar, state, use_breakeven, breakeven_at_r)
-            position.breakeven_moved = state["breakeven_moved"]
-            position.stop_price = state["stop_price"]
-            if reason is None and use_max_hold and (i - position.entry_index) >= max_hold_bars:
-                reason, exit_price = "max_hold", float(bar["close"])
+            risk = abs(position.signal_price - position.original_stop_price)
+            pnl_r = None    # 부분 익절 경로는 다리마다 비중이 달라 R을 스스로 계산해 돌려준다
+
+            if use_partial_tp:
+                reason, exit_price, pnl_r = _check_exit_partial(
+                    bar, state, fee_pct_per_side, partial_at_r, partial_fraction,
+                    breakeven_after_partial, slippage_r_per_side, risk)
+                position.partial_taken = state["partial_taken"]
+                position.banked_r = state["banked_r"]
+                position.stop_price = state["stop_price"]
+                if reason is None and use_max_hold and (i - position.entry_index) >= max_hold_bars:
+                    exit_price = float(bar["close"])
+                    remaining = (1 - partial_fraction) if position.partial_taken else 1.0
+                    move = exit_price - position.entry_price
+                    if position.side == "short":
+                        move = -move
+                    cost_r = ((2 * fee_pct_per_side * position.entry_price) / risk
+                              if (fee_pct_per_side and risk) else 0.0) + slippage_r_per_side
+                    pnl_r = position.banked_r + remaining * ((move / risk if risk else 0.0) - cost_r)
+                    reason = "max_hold"
+            else:
+                reason, exit_price = _check_exit(bar, state, use_breakeven, breakeven_at_r)
+                position.breakeven_moved = state["breakeven_moved"]
+                position.stop_price = state["stop_price"]
+                if reason is None and use_max_hold and (i - position.entry_index) >= max_hold_bars:
+                    reason, exit_price = "max_hold", float(bar["close"])
+
             if reason is None:
                 continue
 
-            risk = abs(position.signal_price - position.original_stop_price)
-            fill_exit = exit_price
-            if slippage_r_per_side and risk:
-                slip = slippage_r_per_side * risk
-                fill_exit = exit_price - slip if position.side == "long" else exit_price + slip
-            move = fill_exit - position.entry_price
-            if position.side == "short":
-                move = -move
-            pnl_r = move / risk if risk else 0.0
-            if fee_pct_per_side and risk:
-                pnl_r -= (2 * fee_pct_per_side * position.entry_price) / risk
+            if pnl_r is None:
+                fill_exit = exit_price
+                if slippage_r_per_side and risk:
+                    slip = slippage_r_per_side * risk
+                    fill_exit = exit_price - slip if position.side == "long" else exit_price + slip
+                move = fill_exit - position.entry_price
+                if position.side == "short":
+                    move = -move
+                pnl_r = move / risk if risk else 0.0
+                if fee_pct_per_side and risk:
+                    pnl_r -= (2 * fee_pct_per_side * position.entry_price) / risk
 
             trades.append({
                 "symbol": symbol, "side": position.side, "reason": reason,
@@ -277,11 +311,19 @@ def simulate_portfolio(
                 drift = slippage_r_per_side * abs(signal_price - stop_price)
                 entry_price = signal_price + drift if side == "long" else signal_price - drift
 
+            partial_target_price = None
+            if use_partial_tp:
+                # 엔진과 같은 규약: 부분 익절 목표가도 **신호가~손절가**를 1R로 잡는다.
+                leg_risk = abs(signal_price - stop_price)
+                partial_target_price = (entry_price + partial_at_r * leg_risk if side == "long"
+                                        else entry_price - partial_at_r * leg_risk)
+
             position = _Position(
                 symbol=symbol, side=side, entry_price=entry_price, signal_price=signal_price,
                 stop_price=stop_price, target_price=target_price,
                 original_stop_price=stop_price, entry_index=i,
-                concurrent_at_entry=len(open_positions) + 1)
+                concurrent_at_entry=len(open_positions) + 1,
+                partial_target_price=partial_target_price)
             open_positions[symbol] = position
 
     return {

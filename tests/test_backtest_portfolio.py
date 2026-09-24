@@ -377,3 +377,83 @@ def test_breaker_resets_are_not_counted_when_the_counter_was_already_clear():
                                  signals_by_symbol={"A": {40: "LONG"}})
 
     assert result["breaker_resets_needed"] == 0
+
+
+# ---------- 부분 익절 (2026-09-24 포팅) ----------
+# `run_backtest`에만 있던 스케일 아웃을 포트폴리오 경로로 옮긴 것이라, 여기서 지키는 것은
+# **두 경로가 같은 답을 내는가**와 **비용을 제대로 무는가** 둘이다. 후자가 중요한 이유:
+# 포팅 전 이 경로는 슬리피지를 아예 무시했고, 그대로 게이트에 넣으면 부분 익절만 비용을
+# 안 내는 셈이라 스트레스 판정이 통과해도 의미가 없다.
+
+_PARTIAL = dict(use_partial_tp=True, partial_at_r=1.0, partial_fraction=0.5,
+                breakeven_after_partial=True)
+
+
+def _partial_then_breakeven_df(n=60, entry_bar=40, price=100.0):
+    """진입 -> 다음 봉에 +1R 터치(부분 익절) -> 그다음 봉에 진입가로 되돌아옴(손익분기 손절)."""
+    df = _flat(n, price)
+    # 여유를 넉넉히 둔다 — 슬리피지를 켜면 진입가와 목표가가 조금씩 밀리는데, 봉을 빠듯하게
+    # 잡으면 "비용 때문에 R이 줄었다"가 아니라 "이벤트 자체가 안 일어났다"가 되어 버린다.
+    df.loc[entry_bar + 1, "high"] = price * 1.015         # 손절폭 1% -> +1R = 101
+    df.loc[entry_bar + 2, "low"] = price * 0.995          # 진입가(≈100) 아래로 되돌아옴
+    return df
+
+
+def test_partial_tp_banks_half_then_stops_at_breakeven():
+    """절반을 +1R에 확정하고 나머지는 본전에 끊기면 최종 +0.5R이다.
+
+    손익분기 이동(E0013~16)이 전략을 망가뜨린 이유는 **익절을 0으로 바꿔서**였는데, 부분
+    익절은 절반을 먼저 확정하므로 그 실패 방식을 피한다 — 그게 이 경로를 여는 이유다."""
+    df = _partial_then_breakeven_df()
+    result = simulate_portfolio({"A": df}, signals_by_symbol={"A": {40: "LONG"}},
+                                 **NO_GATES, **_PARTIAL)
+    assert [t["reason"] for t in result["trades"]] == ["breakeven_stop"]
+    assert result["trades"][0]["pnl_r"] == pytest.approx(0.5)
+
+
+def test_partial_tp_matches_the_single_symbol_engine():
+    """동시보유 제약이 걸리지 않는 한 종목이면 `run_backtest`와 같은 답이어야 한다 —
+    두 경로가 갈라지면 원장의 행끼리 비교가 안 된다."""
+    from src.backtest.engine import run_backtest
+
+    df = _partial_then_breakeven_df()
+    engine_trades = run_backtest(
+        df, signal_fn=lambda w: "LONG" if len(w) == 41 else None,
+        regime_sma_period=0, min_atr_to_stop_ratio=0.0, fee_pct_per_side=0.0,
+        stop_loss_pct=0.01, take_profit_rr=2.0, **_PARTIAL)
+    port = simulate_portfolio({"A": df}, signals_by_symbol={"A": {40: "LONG"}},
+                               **NO_GATES, **_PARTIAL)
+
+    assert len(engine_trades) == len(port["trades"]) == 1
+    assert engine_trades[0]["reason"] == port["trades"][0]["reason"]
+    assert engine_trades[0]["pnl_r"] == pytest.approx(port["trades"][0]["pnl_r"])
+
+
+def test_partial_tp_charges_fees_on_both_legs():
+    """수수료는 다리마다 비중만큼 물어서 합계가 왕복 1회분이다."""
+    df = _partial_then_breakeven_df()
+    gates = {**NO_GATES, "fee_pct_per_side": 0.001}   # 손절폭 1% -> 왕복 0.2R
+    result = simulate_portfolio({"A": df}, signals_by_symbol={"A": {40: "LONG"}},
+                                 **gates, **_PARTIAL)
+    # 0.5*(1.0 - 0.2) + 0.5*(0.0 - 0.2) = 0.4 - 0.1 = 0.3
+    assert result["trades"][0]["pnl_r"] == pytest.approx(0.3)
+
+
+def test_partial_tp_is_charged_for_slippage():
+    """포팅 전 이 경로는 슬리피지를 아예 무시했다 — 게이트의 스트레스 판정이 무의미해진다."""
+    df = _partial_then_breakeven_df()
+    clean = simulate_portfolio({"A": df}, signals_by_symbol={"A": {40: "LONG"}},
+                                **NO_GATES, **_PARTIAL)
+    slipped = simulate_portfolio({"A": df}, signals_by_symbol={"A": {40: "LONG"}},
+                                  **NO_GATES, **_PARTIAL, slippage_r_per_side=0.05)
+    assert slipped["trades"][0]["pnl_r"] < clean["trades"][0]["pnl_r"]
+
+
+def test_partial_tp_full_stop_before_partial_is_a_normal_loss():
+    """부분 익절에 닿기 전에 손절되면 평소와 같은 -1R이다(적립된 R이 없으므로)."""
+    df = _flat(60)
+    df.loc[41, "low"] = 100 * 0.99 - 0.01
+    result = simulate_portfolio({"A": df}, signals_by_symbol={"A": {40: "LONG"}},
+                                 **NO_GATES, **_PARTIAL)
+    assert result["trades"][0]["reason"] == "stop_loss"
+    assert result["trades"][0]["pnl_r"] == pytest.approx(-1.0)

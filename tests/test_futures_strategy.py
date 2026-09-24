@@ -204,3 +204,56 @@ def test_volatility_floor_is_permissive_when_unknown_or_disabled():
 
     assert passes_volatility_floor(None, 0.64) is True
     assert passes_volatility_floor(0.01, 0) is True
+
+
+# ---------- direction_filter (2026-09-24) ----------
+# ADX와 **같은 계산**에서 나오는 +DI/-DI가 지금까지 버려지고 있었다(indicators.adx가 돌려주는데
+# detect_signal은 adx 값만 썼다). 방향 확인을 RSI 대신 그쪽으로 돌릴 수 있게 열어둔 손잡이라,
+# 여기서 지키는 것은 **기본값이 실거래 동작 그대로인가**와 **선택지가 실제로 다르게 도는가**다.
+
+def test_direction_filter_defaults_to_the_live_behaviour():
+    """기본값이 바뀌면 실거래 규칙이 조용히 바뀐다 — 그건 STRATEGY_LOGIC_REVISION을 올릴 일이다."""
+    from src.core import futures_strategy as fs
+    assert fs.DEFAULT_DIRECTION_FILTER == "rsi"
+    assert set(fs.VALID_DIRECTION_FILTERS) == {"rsi", "di", "none"}
+
+
+def _crossing_up(n=60, base=100.0):
+    """마지막 봉에서 종가가 SMA를 상향 돌파하도록 만든 프레임."""
+    import numpy as np
+    close = np.linspace(base, base * 0.97, n)      # 계속 내려오다가
+    close[-1] = close[-2] * 1.05                    # 마지막에 급반등 -> 상향 크로스
+    high = close * 1.01
+    low = close * 0.99
+    return pd.DataFrame({"high": high, "low": low, "close": close})
+
+
+def _falling_then_bouncing(n=60, drop=0.20, bounce=0.02):
+    """길게 하락하다 마지막 봉에서 SMA를 위로 뚫는 프레임 — 돌파는 있지만 -DI가 아직 우세하다."""
+    import numpy as np
+    close = np.linspace(100, 100 * (1 - drop), n)
+    close[-1] = close[-2] * (1 + bounce)
+    return pd.DataFrame({"high": close * 1.002, "low": close * 0.998, "close": close})
+
+
+def test_di_filter_blocks_a_cross_while_minus_di_still_dominates():
+    """DI 분기가 실제로 +DI/-DI를 본다는 것 — 돌파만 보는 "none"은 통과시키는 자리에서
+    "di"는 막아야 한다(이 프레임에서 -DI 52.3 > +DI 19.4)."""
+    from src.core.futures_strategy import detect_signal
+    from src.core.indicators import adx
+
+    df = _falling_then_bouncing()
+    di = adx(df, 14)
+    assert di["minus_di"].iloc[-1] > di["plus_di"].iloc[-1]   # 전제 확인
+
+    assert detect_signal(df, adx_threshold=1, sma_period=10, direction_filter="none") == "LONG"
+    assert detect_signal(df, adx_threshold=1, sma_period=10, direction_filter="di") is None
+
+
+def test_none_matches_the_old_require_rsi_confirm_false():
+    """`require_rsi_confirm=False`는 이제 direction_filter="none"과 같은 뜻이다 —
+    옛 호출자가 그대로 돌아야 한다."""
+    from src.core.futures_strategy import detect_signal
+    df = _crossing_up()
+    assert (detect_signal(df, adx_threshold=1, sma_period=10, require_rsi_confirm=False)
+            == detect_signal(df, adx_threshold=1, sma_period=10, direction_filter="none"))

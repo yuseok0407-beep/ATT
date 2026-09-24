@@ -20,6 +20,14 @@ VALID_SIDES = ("long", "short")
 # 1: 규칙 봇 개시 / 2: 마감봉 신호(08-25) / 3: 같은 신호봉 재진입 잠금 + 진입가 괴리 검사(09-08)
 STRATEGY_LOGIC_REVISION = 3
 
+# SMA 돌파의 **방향**을 무엇으로 확인하는가. 실거래 현재 동작은 "rsi"이고, 바꾸려면 게이트를
+# 통과시킨 뒤 이 기본값을 옮긴다(그때 STRATEGY_LOGIC_REVISION도 같이 올릴 것).
+#   "rsi"  — RSI가 임계값 위/아래 (현재 실거래)
+#   "di"   — +DI > -DI (ADX와 같은 계산에서 나오는 방향 지표. 지금까지 버려지고 있었다)
+#   "none" — 방향 확인 없이 돌파만으로 진입
+VALID_DIRECTION_FILTERS = ("rsi", "di", "none")
+DEFAULT_DIRECTION_FILTER = "rsi"
+
 
 def detect_signal(
     df: pd.DataFrame,
@@ -28,6 +36,7 @@ def detect_signal(
     rsi_period: int = 14,
     rsi_threshold: float = 50.0,
     require_rsi_confirm: bool = True,
+    direction_filter: str = DEFAULT_DIRECTION_FILTER,
 ) -> str | None:
     """df의 마지막 두 봉(직전 -> 현재)을 비교해 SMA 돌파 + ADX 추세 확인 + (선택) RSI 방향성으로
     진입 신호를 낸다.
@@ -60,10 +69,23 @@ def detect_signal(
     bullish_cross = prev_diff <= 0 and curr_diff > 0
     bearish_cross = prev_diff >= 0 and curr_diff < 0
 
-    if not require_rsi_confirm:
+    if not require_rsi_confirm or direction_filter == "none":
         if bullish_cross:
             return "LONG"
         if bearish_cross:
+            return "SHORT"
+        return None
+
+    if direction_filter == "di":
+        # +DI/-DI는 ADX와 **같은 계산**에서 이미 나오는데 지금까지 버려지고 있었다 — ADX로
+        # "추세가 있는가"를 묻고 방향은 별개 지표(RSI)로 물으면 두 판단의 근거가 갈라진다.
+        di = adx(df, 14)
+        plus_di, minus_di = di["plus_di"].iloc[-1], di["minus_di"].iloc[-1]
+        if pd.isna(plus_di) or pd.isna(minus_di):
+            return None
+        if bullish_cross and plus_di > minus_di:
+            return "LONG"
+        if bearish_cross and minus_di > plus_di:
             return "SHORT"
         return None
 
