@@ -119,7 +119,7 @@ def read_days(path: str = DEFAULT_PATH, days: int = KEEP_DAYS) -> dict:
 
 
 def period_return(path: str = DEFAULT_PATH, days: int = 30) -> dict | None:
-    """최근 N일 자산 수익률 — 목표(월 10%)와 직접 비교할 수 있는 유일한 값.
+    """최근 N일 자산 수익률 — 목표(월 +1%)와 직접 비교할 수 있는 유일한 값.
 
     R이나 실현손익 합계로는 이 값을 못 낸다: 사이징이 바뀌면 같은 R이 다른 금액이 되고,
     미실현 변동·펀딩비·입출금이 빠져 있다.

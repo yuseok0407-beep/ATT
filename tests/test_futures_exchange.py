@@ -131,33 +131,3 @@ def test_get_notional_cap_returns_none_when_symbol_missing():
     mock_client = MagicMock()
     mock_client.fetch_leverage_tiers.return_value = {}
     assert get_notional_cap(mock_client, "TSLA/USDT:USDT", leverage=5) is None
-
-
-# --- demo2 (2026-09-26) ------------------------------------------------------------
-
-def test_get_futures_client_demo2_uses_its_own_keys_and_demo_trading(monkeypatch):
-    monkeypatch.setattr("src.data.futures_exchange.BINANCE_FUTURES_API_KEY", "demo-key")
-    monkeypatch.setattr("src.data.futures_exchange.BINANCE_FUTURES_DEMO2_API_KEY", "demo2-key")
-    monkeypatch.setattr("src.data.futures_exchange.BINANCE_FUTURES_DEMO2_API_SECRET", "demo2-secret")
-    with patch("src.data.futures_exchange.ccxt.binance") as mock_binance_cls:
-        mock_client = MagicMock()
-        mock_binance_cls.return_value = mock_client
-        get_futures_client("demo2")
-
-    assert mock_binance_cls.call_args.args[0]["apiKey"] == "demo2-key"
-    mock_client.enable_demo_trading.assert_called_once_with(True)
-
-
-def test_get_futures_client_demo2_without_keys_does_not_fall_back_to_demo(monkeypatch):
-    """데모 키로 폴백하면 두 전략이 한 계좌에서 서로의 포지션을 건드린다. 대시보드·텔레그램이
-    이미 잡고 있는 LiveKeysNotConfiguredError 계열이어야 같은 안내 경로를 탄다."""
-    monkeypatch.setattr("src.data.futures_exchange.BINANCE_FUTURES_API_KEY", "demo-key")
-    monkeypatch.setattr("src.data.futures_exchange.BINANCE_FUTURES_DEMO2_API_KEY", "")
-    monkeypatch.setattr("src.data.futures_exchange.BINANCE_FUTURES_DEMO2_API_SECRET", "")
-    with pytest.raises(LiveKeysNotConfiguredError, match="DEMO2"):
-        get_futures_client("demo2")
-
-
-def test_get_futures_client_rejects_unknown_env():
-    with pytest.raises(ValueError):
-        get_futures_client("demo3")

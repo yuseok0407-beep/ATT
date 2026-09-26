@@ -22,9 +22,7 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
-from src.core.envs import ENVS
 from src.execution import journal, strategy_versions
-from src.execution.env_paths import paths_for
 from src.execution.performance import _net_r, _price_r, resolve_closed_trades
 
 DEFAULT_OUT_DIR = "exports"
@@ -32,15 +30,14 @@ DEFAULT_OUT_DIR = "exports"
 # env -> 저널 경로 / 필터 카운터 경로. futures_rule_bot의 상수를 그대로 쓰지 않는 이유는 이
 # 모듈이 봇 모듈(거래소 클라이언트까지 끌고 온다)에 의존할 필요가 없기 때문 — 내보내기는
 # 파일만 읽으므로 거래소 연결 없이 돌아야 한다.
-# 경로 규칙은 env_paths 한 곳(2026-09-26, demo2 추가).
-JOURNALS = {env: paths_for(env)["journal"] for env in ENVS}
-FILTER_STATS = {env: paths_for(env)["filter_stats"] for env in ENVS}
-
-
-def default_envs() -> tuple[str, ...]:
-    """내보낼 계좌 — 데모·실계좌는 항상, 그 밖(demo2)은 저널이 생긴 뒤부터."""
-    return tuple(env for env in ENVS
-                 if env in ("demo", "live") or (env in JOURNALS and Path(JOURNALS[env]).exists()))
+JOURNALS = {
+    "demo": "journal/futures_rule_trades.jsonl",
+    "live": "journal/futures_rule_trades.live.jsonl",
+}
+FILTER_STATS = {
+    "demo": "state/futures_rule_filter_stats.json",
+    "live": "state/futures_rule_filter_stats.live.json",
+}
 
 TRADE_COLUMNS = [
     "env", "symbol", "side", "reason",
@@ -306,13 +303,12 @@ def export_env(env: str, out_dir: str | Path = DEFAULT_OUT_DIR,
     }
 
 
-def export_all(out_dir: str | Path = DEFAULT_OUT_DIR, envs=None) -> dict:
+def export_all(out_dir: str | Path = DEFAULT_OUT_DIR, envs=("demo", "live")) -> dict:
     """모든 env를 내보내고, 두 계좌를 합친 `trades_all.csv`와 `manifest.json`까지 남긴다.
 
     합친 파일을 따로 두는 이유: 분석 질문 대부분이 "심볼별/시간대별/필터별"이라 env로 갈라져
     있으면 매번 두 파일을 붙여야 한다. env 칼럼이 있으니 합쳐도 계좌 구분은 유지된다."""
     out = Path(out_dir)
-    envs = default_envs() if envs is None else envs
     summaries = [export_env(env, out) for env in envs]
 
     combined = []

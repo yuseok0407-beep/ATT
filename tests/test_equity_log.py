@@ -85,7 +85,7 @@ def test_old_days_are_pruned(tmp_path):
 # --- 목표 대비 수익률 ------------------------------------------------------
 
 def test_period_return_measures_equity_not_r(tmp_path):
-    """월 +10% 목표는 금액 기준이다 — R 합계로는 답할 수 없다(사이징이 바뀌면 같은 R이
+    """월 +1% 목표는 금액 기준이다 — R 합계로는 답할 수 없다(사이징이 바뀌면 같은 R이
     다른 금액이고, 미실현 변동·펀딩비가 빠진다)."""
     path = str(tmp_path / "equity.json")
     for i, value in enumerate([1000.0, 1050.0, 1100.0]):

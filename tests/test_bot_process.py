@@ -11,7 +11,6 @@ def _pid_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(bot_process, "PID_PATHS", {
         "demo": tmp_path / "futures_bot.pid",
         "live": tmp_path / "futures_bot.live.pid",
-        "demo2": tmp_path / "futures_bot.demo2.pid",
         "telegram": tmp_path / "telegram_bot.pid",
     })
     yield
@@ -19,8 +18,7 @@ def _pid_paths(tmp_path, monkeypatch):
 
 def _mock_live_process(cmdline_contains="run_futures_bot.py --env demo", create_time=1700000000.0):
     proc = MagicMock()
-    # 실제 psutil처럼 인자 단위로 쪼개서 준다 — 판정이 인자 단위라서.
-    proc.cmdline.return_value = ["python", *("scripts/" + cmdline_contains).split()]
+    proc.cmdline.return_value = ["python", "scripts/" + cmdline_contains]
     proc.create_time.return_value = create_time
     return proc
 
@@ -202,30 +200,3 @@ def test_telegram_stop_does_not_affect_futures_bot_pid_files():
 
     assert not bot_process._pid_path("telegram").exists()
     assert bot_process._read_pid("demo") == 111
-
-
-# --- demo2 (2026-09-26) -------------------------------------------------------------
-# "--env demo"는 "--env demo2"의 부분 문자열이다. 문자열 포함으로 판정하면 demo2 봇이 데모 봇으로
-# 인정되어, 데모 PID 파일에 demo2의 PID가 남은 경우 "데모 중지"가 demo2 봇을 죽인다.
-
-def test_demo2_process_is_not_mistaken_for_demo():
-    bot_process._write_pid("demo", 4242)
-    with patch("src.execution.bot_process.psutil.Process",
-               return_value=_mock_live_process("run_futures_bot.py --env demo2")):
-        assert bot_process.get_status("demo")["running"] is False
-
-
-def test_demo2_process_is_recognized_as_demo2():
-    bot_process._write_pid("demo2", 4343)
-    with patch("src.execution.bot_process.psutil.Process",
-               return_value=_mock_live_process("run_futures_bot.py --env demo2")):
-        assert bot_process.get_status("demo2")["running"] is True
-
-
-def test_demo2_launches_with_its_own_env_flag():
-    assert bot_process._launch_args("demo2")[-2:] == ["--env", "demo2"]
-
-
-def test_unknown_key_does_not_fall_back_to_the_demo_pid_file():
-    with pytest.raises(KeyError):
-        bot_process._pid_path("demo3")

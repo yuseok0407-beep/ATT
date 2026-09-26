@@ -16,9 +16,7 @@ from src.core.config import (
     RULE_TIMEFRAME,
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
-    strategy_for_env,
 )
-from src.core.envs import ENVS
 from src.core.risk import MAX_CONSECUTIVE_LOSSES, MAX_DAILY_LOSS_PCT
 from src.core.signal_status import collect_conditions
 from src.core.state import compute_consecutive_losses, get_daily_pnl_pct
@@ -28,7 +26,8 @@ from src.data.public_ip import get_public_ip
 from src.execution import bot_process, excursion, filter_stats
 from src.execution.strategy_versions import summarize_by_version
 from src.execution.futures_orders import close_position, get_bracket_prices
-from src.execution.env_paths import paths_for
+from src.execution.heartbeat import DEFAULT_PATH as HEARTBEAT_DEMO_PATH
+from src.execution.heartbeat import LIVE_DEFAULT_PATH as HEARTBEAT_LIVE_PATH
 from src.execution.heartbeat import read_heartbeat
 from src.execution.journal import read_entries
 from src.execution.performance import (
@@ -37,13 +36,25 @@ from src.execution.performance import (
     summarize_recent_issues,
 )
 from src.futures_rule_bot import (
+    EXCURSION_PATH,
+    FILTER_STATS_PATH,
+    JOURNAL_PATH,
+    LAST_TRADE_STATE_PATH,
+    STATE_PATH,
     current_strategy_config,
     record_manual_close,
     reset_consecutive_losses,
 )
+from src.futures_rule_bot import (
+    LIVE_EXCURSION_PATH,
+    LIVE_FILTER_STATS_PATH,
+    LIVE_JOURNAL_PATH,
+    LIVE_LAST_TRADE_STATE_PATH,
+    LIVE_STATE_PATH,
+)
 
 app = Flask(__name__)
-_clients: dict[str, object] = {}  # env(core.envs.ENVS) -> ccxt client, 지연 생성 후 캐시
+_clients: dict[str, object] = {}  # env("demo"/"live") -> ccxt client, 지연 생성 후 캐시
 
 
 def _get_client(env: str = "demo"):
@@ -71,15 +82,19 @@ def _get_client_or_error(env: str):
 
 
 def _resolve_env():
-    """쿼리스트링 env를 읽는다. ENVS에 없으면 None을 돌려주고 호출자가 400으로 처리한다."""
+    """쿼리스트링 env를 읽는다. "demo"/"live"가 아니면 None을 돌려주고 호출자가 400으로 처리한다."""
     env = request.args.get("env", "demo")
-    return env if env in ENVS else None
+    return env if env in ("demo", "live") else None
 
 
 def _paths_for(env: str) -> dict:
-    # 경로 규칙은 env_paths 한 곳 — 여기서 "live가 아니면 데모"로 분기하면 demo2 화면이 데모
-    # 저널을 보여준다(2026-09-26).
-    return paths_for(env)
+    if env == "live":
+        return {"journal": LIVE_JOURNAL_PATH, "state": LIVE_STATE_PATH,
+                "last_trade": LIVE_LAST_TRADE_STATE_PATH, "heartbeat": HEARTBEAT_LIVE_PATH,
+                "filter_stats": LIVE_FILTER_STATS_PATH, "excursion": LIVE_EXCURSION_PATH}
+    return {"journal": JOURNAL_PATH, "state": STATE_PATH,
+            "last_trade": LAST_TRADE_STATE_PATH, "heartbeat": HEARTBEAT_DEMO_PATH,
+            "filter_stats": FILTER_STATS_PATH, "excursion": EXCURSION_PATH}
 
 
 def _available_symbols(client):
@@ -198,8 +213,7 @@ def api_status():
         },
         # 전략 설정은 futures_rule_bot.current_strategy_config() 한 곳에서만 정의한다 —
         # 저널에 기록되는 설정 스냅샷과 화면에 뜨는 설정이 다르면 둘 중 뭘 믿을지 알 수 없다.
-        "config": current_strategy_config(env),
-        "strategy": strategy_for_env(env),
+        "config": current_strategy_config(),
     })
 
 
@@ -255,7 +269,7 @@ def api_conditions():
     if err:
         return err
 
-    payload = collect_conditions(_available_symbols(client), strategy=strategy_for_env(env))
+    payload = collect_conditions(_available_symbols(client))
     payload["env"] = env
     return jsonify(payload)
 
@@ -315,11 +329,10 @@ def api_bot_start():
     env = _resolve_env()
     if env is None:
         return jsonify({"status": "error", "message": "알 수 없는 env입니다."}), 400
-    if env != "demo":
-        # 키가 없거나 연결 자체가 안 되는 채로 봇 프로세스를 띄우면 매 사이클
+    if env == "live":
+        # 라이브 키가 없거나 연결 자체가 안 되는 채로 봇 프로세스를 띄우면 매 사이클
         # 크래시-재시도만 반복하게 된다 — 여기서 미리 확인해서 깔끔한 오류로 막는 게 낫다.
-        # (실계좌와 두 번째 데모 둘 다 키가 따로 있어야 한다.)
-        _, err = _get_client_or_error(env)
+        _, err = _get_client_or_error("live")
         if err:
             return err
     return jsonify(bot_process.start(env))

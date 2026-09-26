@@ -3,14 +3,6 @@ from typing import Callable
 import pandas as pd
 
 from src.core.config import (
-    AOA_MIN_MOVE_ATR,
-    AOA_MIN_VOL_RATIO,
-    AOA_MOVE_BARS,
-    AOA_RANGE_BARS,
-    AOA_RANGE_EDGE,
-    AOA_STOP_LOSS_PCT,
-    AOA_TAKE_PROFIT_PCT,
-    AOA_VOL_LOOKBACK,
     MIN_ATR_TO_STOP_RATIO,
     RULE_ADX_THRESHOLD,
     RULE_DIRECTION_FILTER,
@@ -34,15 +26,6 @@ STRATEGY_LOGIC_REVISION = 3
 # 경계를 남기고 전략 버전이 자동으로 생긴다).
 VALID_DIRECTION_FILTERS = ("rsi", "di", "none")
 DEFAULT_DIRECTION_FILTER = RULE_DIRECTION_FILTER
-
-# 계좌마다 고르는 진입 전략(2026-09-26, `config.strategy_for_env`).
-#   "trend" — SMA 돌파 + ADX + 방향 필터 + 레짐 숏차단 + 저변동 차단 (이 파일 대부분)
-#   "aoa"   — 24시간 범위 끝에서의 역추세 (`detect_aoa_signal`)
-# 전략이 정하는 건 **신호와 손절/익절가**뿐이고, 나머지 진입 게이트는 공통이다.
-VALID_STRATEGIES = ("trend", "aoa")
-
-# aoa 규칙의 코드 개정 번호 — STRATEGY_LOGIC_REVISION과 같은 역할을 aoa 쪽에서 한다.
-AOA_LOGIC_REVISION = 1
 
 
 def detect_signal(
@@ -257,97 +240,3 @@ def passes_volatility_floor(ratio: float | None,
     if min_ratio <= 0 or ratio is None:
         return True
     return ratio >= min_ratio
-
-
-def check_strategy(strategy: str) -> str:
-    """모르는 전략 이름은 기본 전략으로 폴백하지 않고 예외 — `.env` 오타가 조용히 trend로 돌면
-    데모2가 데모와 같은 전략을 돌면서 "다른 전략을 시험 중"이라고 믿게 된다."""
-    if strategy not in VALID_STRATEGIES:
-        raise ValueError(f"unknown strategy {strategy!r}, expected one of {VALID_STRATEGIES}")
-    return strategy
-
-
-def aoa_min_bars(range_bars: int = AOA_RANGE_BARS, move_bars: int = AOA_MOVE_BARS,
-                 vol_lookback: int = AOA_VOL_LOOKBACK, atr_period: int = 14) -> int:
-    """aoa 판정에 필요한 최소 마감봉 수 — ATR이 확정된 뒤 vol_lookback봉의 중간값이 있어야 한다."""
-    return max(range_bars, move_bars + 1, atr_period + vol_lookback)
-
-
-def aoa_features(
-    df: pd.DataFrame,
-    *,
-    range_bars: int = AOA_RANGE_BARS,
-    move_bars: int = AOA_MOVE_BARS,
-    vol_lookback: int = AOA_VOL_LOOKBACK,
-    atr_period: int = 14,
-) -> dict | None:
-    """aoa 판정의 재료 세 개. 봉이 모자라거나 값이 NaN이면 None.
-
-    - range_pos: 마지막 종가가 최근 range_bars봉 고저 범위의 어디쯤인가(0=바닥, 1=천장)
-    - move_atr:  최근 move_bars봉 동안의 종가 변화를 ATR로 나눈 값(음수=하락)
-    - vol_ratio: 지금 ATR ÷ 최근 vol_lookback봉 ATR의 중간값(1보다 크면 평소보다 변동성이 큼)
-
-    조건 근접도 화면(`signal_status`)이 이 값을 그대로 보여주므로 판정과 표시가 어긋나지 않는다.
-    df는 **마감된 봉만** 담겨 있어야 한다(실거래 봇이 진행 중인 봉을 잘라서 넘긴다)."""
-    if len(df) < aoa_min_bars(range_bars, move_bars, vol_lookback, atr_period):
-        return None
-    close = df["close"]
-    atr_line = atr(df, atr_period)
-    latest_atr = atr_line.iloc[-1]
-    typical_atr = atr_line.iloc[-vol_lookback:].median()
-    high = df["high"].iloc[-range_bars:].max()
-    low = df["low"].iloc[-range_bars:].min()
-    last = close.iloc[-1]
-    if pd.isna(latest_atr) or pd.isna(typical_atr) or latest_atr <= 0 or typical_atr <= 0 or high <= low:
-        return None
-    return {
-        "range_pos": float((last - low) / (high - low)),
-        "move_atr": float((last - close.iloc[-1 - move_bars]) / latest_atr),
-        "vol_ratio": float(latest_atr / typical_atr),
-    }
-
-
-def aoa_signal_from_features(
-    features: dict | None,
-    *,
-    range_edge: float = AOA_RANGE_EDGE,
-    min_move_atr: float = AOA_MIN_MOVE_ATR,
-    min_vol_ratio: float = AOA_MIN_VOL_RATIO,
-) -> str | None:
-    """aoa 규칙 — **이 규칙의 유일한 정의**. 실거래 봇·백테스트·조건 근접도 화면이 전부 여기로 온다.
-
-    롱: 범위 하위 range_edge 안 + 최근 min_move_atr ATR 이상 하락 + 변동성이 평소 이상
-    숏: 범위 상위 range_edge 안 + 최근 min_move_atr ATR 이상 상승 + 변동성이 평소 이상
-    롱/숏 대칭이고 레짐 필터가 없다 — 원본 매매가 롱/숏 정확히 반반이었다."""
-    if features is None or features["vol_ratio"] < min_vol_ratio:
-        return None
-    if features["range_pos"] <= range_edge and features["move_atr"] <= -min_move_atr:
-        return "LONG"
-    if features["range_pos"] >= 1 - range_edge and features["move_atr"] >= min_move_atr:
-        return "SHORT"
-    return None
-
-
-def detect_aoa_signal(df: pd.DataFrame, **kwargs) -> str | None:
-    """`aoa_features` → `aoa_signal_from_features`. 백테스트 엔진의 `signal_fn`으로 그대로 넘길 수
-    있는 모양(마감봉 윈도우 하나를 받아 "LONG"/"SHORT"/None)."""
-    feature_keys = ("range_bars", "move_bars", "vol_lookback", "atr_period")
-    features = aoa_features(df, **{k: v for k, v in kwargs.items() if k in feature_keys})
-    return aoa_signal_from_features(features, **{k: v for k, v in kwargs.items() if k not in feature_keys})
-
-
-def strategy_stop_loss_pct(strategy: str) -> float:
-    return AOA_STOP_LOSS_PCT if check_strategy(strategy) == "aoa" else STOP_LOSS_PCT
-
-
-def strategy_take_profit_rr(strategy: str) -> float:
-    """aoa는 익절을 %로 정의하므로 손익비로 환산한다(1% ÷ 3% = 0.33)."""
-    if check_strategy(strategy) == "aoa":
-        return AOA_TAKE_PROFIT_PCT / AOA_STOP_LOSS_PCT
-    return TAKE_PROFIT_RR
-
-
-def strategy_bracket_prices(strategy: str, entry_price: float, side: str) -> tuple[float, float]:
-    """전략별 (손절가, 익절가). 계산 자체는 `compute_bracket_prices` 하나를 공유한다."""
-    return compute_bracket_prices(entry_price, side, strategy_stop_loss_pct(strategy),
-                                  strategy_take_profit_rr(strategy))

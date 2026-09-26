@@ -13,11 +13,6 @@ BINANCE_FUTURES_API_SECRET = os.getenv("BINANCE_FUTURES_API_SECRET", "")
 # 데모와 실계좌를 동시에 운영하기 위한 별도 키 쌍(2026-08-22, get_futures_client(env=...) 참고).
 BINANCE_FUTURES_LIVE_API_KEY = os.getenv("BINANCE_FUTURES_LIVE_API_KEY", "")
 BINANCE_FUTURES_LIVE_API_SECRET = os.getenv("BINANCE_FUTURES_LIVE_API_SECRET", "")
-# 두 번째 데모 계좌 — 다른 전략을 같은 인프라에서 나란히 돌리기 위한 것(2026-09-26,
-# docs/DEMO2_PLAN.md). 데모 계좌는 바이낸스 로그인 계정당 하나라 **다른 바이낸스 계정**의 데모
-# 키여야 한다 — 같은 계정 키면 한 종목에 포지션이 하나뿐이라 두 전략이 서로의 포지션을 건드린다.
-BINANCE_FUTURES_DEMO2_API_KEY = os.getenv("BINANCE_FUTURES_DEMO2_API_KEY", "")
-BINANCE_FUTURES_DEMO2_API_SECRET = os.getenv("BINANCE_FUTURES_DEMO2_API_SECRET", "")
 LEVERAGE = int(os.getenv("LEVERAGE", "10"))
 MARGIN_MODE = os.getenv("MARGIN_MODE", "isolated")
 STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.0125"))  # 진입가 대비 손절 거리 (기본 1.25%)
@@ -63,36 +58,6 @@ MAX_ENTRY_PRICE_DRIFT_R = float(os.getenv("MAX_ENTRY_PRICE_DRIFT_R", "0.1"))
 # 배정순서 50회 전부 FAIL(총R +157.6, MDD -32.0%)인 반면 k=0.64는 전부 PASS(+185.0, -25.6%).
 # k를 0.4~1.2로 훑어도 전부 PASS라 특정 값에만 맞은 게 아니다. 0으로 두면 필터가 꺼진다.
 MIN_ATR_TO_STOP_RATIO = float(os.getenv("MIN_ATR_TO_STOP_RATIO", "0.64"))
-
-# 계좌(env)마다 어떤 진입 전략을 쓰는가(2026-09-26). 기본은 전부 "trend"(위의 SMA 돌파 전략)라
-# 이 줄들을 안 적으면 지금까지와 똑같이 돈다. 값의 정의는 futures_strategy.VALID_STRATEGIES.
-#   RULE_STRATEGY_DEMO / RULE_STRATEGY_LIVE / RULE_STRATEGY_DEMO2
-# 전략이 바꾸는 건 **신호와 손절/익절가뿐**이다 — 마감봉 신호, 같은 봉 재진입 잠금, 괴리 검사,
-# 사이징, 청산가 검증, 서킷브레이커, 동시보유 상한, 감시 종목은 전략과 무관하게 공통이다.
-def strategy_for_env(env: str) -> str:
-    return os.getenv(f"RULE_STRATEGY_{env.upper()}", "trend").strip().lower()
-
-
-# "aoa" 전략 — BitMEX 트레이더 aoa의 2018~2021 공개 체결 내역(XBTUSD 왕복 2,589건)에서 기계화
-# 가능한 습관만 옮긴 역추세 전략(docs/DEMO2_PLAN.md, scripts/analyze_aoa_trades.py).
-# 값은 **백테스트로 고르지 않고 분석값으로 고정**했다 — 여기서 파라미터를 백테스트로 튜닝하기
-# 시작하면 docs/BACKTEST_PROTOCOL.md의 다중비교 문제로 그대로 들어간다.
-#   - 24시간 범위의 바닥 근처(하위 20%)에서 사고 천장 근처(상위 20%)에서 판다 — 그의 롱/숏을 가장
-#     잘 가른 변수가 24시간 범위 안의 위치였다.
-#   - 직전 4시간에 ATR 1배 이상 움직인 뒤에만 — 4시간 급락 뒤 롱 58%, 급등 뒤 롱 39%.
-#     % 대신 ATR 배수로 쓰는 이유: 12종목의 변동성이 제각각이라 같은 %가 종목마다 다른 뜻이 된다.
-#   - 평소보다 변동성이 클 때만 — 그의 진입 시점 ATR은 평시의 약 1.5배였다. "평소"는 최근 72봉의
-#     ATR 중간값(백테스트 엔진이 신호 함수에 넘기는 100봉 창 안에서 계산되도록 72로 잡았다).
-#   - 익절 +1% / 손절 -3% — 손절 주문을 거의 안 쓰고(1%) 역행을 버텼다(중간값 -1.7~-3.6%).
-#     2020년 평균 이익 +1.38%. 손익비 0.33이라 승률이 75%를 넘어야 본전이다.
-AOA_RANGE_BARS = int(os.getenv("AOA_RANGE_BARS", "24"))
-AOA_RANGE_EDGE = float(os.getenv("AOA_RANGE_EDGE", "0.2"))
-AOA_MOVE_BARS = int(os.getenv("AOA_MOVE_BARS", "4"))
-AOA_MIN_MOVE_ATR = float(os.getenv("AOA_MIN_MOVE_ATR", "1.0"))
-AOA_VOL_LOOKBACK = int(os.getenv("AOA_VOL_LOOKBACK", "72"))
-AOA_MIN_VOL_RATIO = float(os.getenv("AOA_MIN_VOL_RATIO", "1.0"))
-AOA_STOP_LOSS_PCT = float(os.getenv("AOA_STOP_LOSS_PCT", "0.03"))
-AOA_TAKE_PROFIT_PCT = float(os.getenv("AOA_TAKE_PROFIT_PCT", "0.01"))
 
 # 편도 거래 수수료율 — 백테스트의 R배수 차감과 실거래 R의 수수료 보정이 **같은 값**을 쓴다.
 # 여기 한 곳에만 두는 이유: 이 값이 스크립트 7개에 각각 `FEE_PCT_PER_SIDE = 0.0004`로 복사돼

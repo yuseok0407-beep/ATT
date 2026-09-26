@@ -174,7 +174,6 @@
   }
   .env-toggle button.active[data-env="demo"] { background: rgba(96,165,250,.18); color: var(--blue); }
   .env-toggle button.active[data-env="live"] { background: rgba(248,113,113,.22); color: var(--red); }
-  .env-toggle button.active[data-env="demo2"] { background: rgba(52,211,153,.18); color: var(--green); }
   .env-banner {
     display: none; background: rgba(248,113,113,.12); border: 1px solid var(--red); color: var(--red);
     border-radius: 8px; padding: 10px 14px; font-size: 13px; font-weight: 600; margin-bottom: 14px;
@@ -230,7 +229,6 @@
   <div class="env-toggle" id="env-toggle">
     <button data-env="demo" class="active" onclick="switchEnv('demo')">DEMO</button>
     <button data-env="live" onclick="switchEnv('live')">LIVE</button>
-    <button data-env="demo2" onclick="switchEnv('demo2')" title="두 번째 데모 계좌 — aoa 전략 시험용">DEMO2</button>
   </div>
   <div class="env-banner">
     ⚠ LIVE — 실거래 계정입니다. 아래 시작/중지/긴급 청산은 전부 실제 자금에 영향을 줍니다.
@@ -500,10 +498,6 @@ const CONFIG_LABELS = {
   max_concurrent_positions: '최대 동시 포지션', max_daily_loss_pct: '일일 손실 한도',
   max_consecutive_losses: '연속 손실 한도', consecutive_loss_cooldown_hours: '연속손실 쿨다운(시간)',
   symbols: '감시 종목', logic_revision: '규칙 코드 개정',
-  // aoa 전략(DEMO2, 2026-09-26)
-  strategy: '전략', aoa_range_bars: '범위 봉 수', aoa_range_edge: '범위 끝 비율',
-  aoa_move_bars: '움직임 봉 수', aoa_min_move_atr: '최소 움직임(ATR)',
-  aoa_vol_lookback: '변동성 기준 봉 수', aoa_min_vol_ratio: '최소 변동성 배수', take_profit_pct: '익절폭',
 };
 
 function renderConfigNote(r) {
@@ -1111,28 +1105,7 @@ async function refresh() {
     `;
   }
 
-  if (data.config && data.config.strategy === 'aoa') {
-    // aoa 계좌는 trend의 ADX/SMA/레짐 설정을 쓰지 않는다 — 그 칸을 그리면 "undefined"가 뜨거나
-    // 데모 설정을 이 계좌 것으로 오해하게 된다. 서버가 보내는 설정만 그린다.
-    const c = data.config;
-    document.getElementById('config-grid').innerHTML = `
-      <div class="config-item"><div class="k">전략</div><div class="v">aoa (역추세)</div></div>
-      <div class="config-item"><div class="k">범위 끝 (${c.aoa_range_bars}봉)</div>
-        <div class="v">하위/상위 ${fmtPct(c.aoa_range_edge)}</div></div>
-      <div class="config-item"><div class="k">최소 움직임 (${c.aoa_move_bars}봉)</div>
-        <div class="v">${c.aoa_min_move_atr} ATR</div></div>
-      <div class="config-item"><div class="k">최소 변동성 (평소 대비)</div>
-        <div class="v">${c.aoa_min_vol_ratio}배</div></div>
-      <div class="config-item"><div class="k">손절폭</div><div class="v">${fmtPct(c.stop_loss_pct)}</div></div>
-      <div class="config-item"><div class="k">익절폭</div><div class="v">${fmtPct(c.take_profit_pct)}</div></div>
-      <div class="config-item"><div class="k">레버리지</div><div class="v">${data.leverage}x</div></div>
-      <div class="config-item"><div class="k">최대 동시 포지션</div><div class="v">${data.max_concurrent}</div></div>
-      <div class="config-item"><div class="k">진입 괴리 한도</div>
-        <div class="v">${c.max_entry_price_drift_r}R</div></div>
-      <div class="config-item"><div class="k">거래당 리스크</div>
-        <div class="v">${fmtPct(c.risk_per_trade)}</div></div>
-    `;
-  } else if (data.config) {
+  if (data.config) {
     const c = data.config;
     document.getElementById('config-grid').innerHTML = `
       <div class="config-item"><div class="k">ADX 임계값</div><div class="v">${c.adx_threshold}</div></div>
@@ -1254,54 +1227,7 @@ function condMetric(key, ratio, valueText, state) {
          '<span class="v ' + state + '">' + valueText + '</span></div>';
 }
 
-function renderAoaConditions(data) {
-  // aoa 전략(DEMO2)의 근접도 — 범위 위치·움직임·변동성. 판정은 서버(signal_status)가 한다.
-  const list = document.getElementById('cond-list');
-  const meta = document.getElementById('cond-meta');
-  const note = document.getElementById('cond-note');
-  meta.textContent = '· ' + data.timeframe + ' · aoa: ' + data.aoa_range_bars + '봉 범위 끝 + ' +
-                     data.aoa_move_bars + '봉 급변 + 변동성';
-  if (!data.symbols || !data.symbols.length) {
-    list.innerHTML = '<div class="cond-note">표시할 종목이 없습니다.</div>';
-    return;
-  }
-  list.innerHTML = data.symbols.map(function (r) {
-    const name = r.symbol.split('/')[0];
-    if (r.candidate_side === null) {
-      return '<div class="cond-row blocked"><div><div class="cond-name">' + name + '</div></div>' +
-             '<div class="cond-blockers">' + (r.blockers.join(' · ') || '계산 불가') + '</div>' +
-             '<div class="cond-score"><div class="pct">–</div></div></div>';
-    }
-    const isLong = r.candidate_side === 'LONG';
-    const sideText = r.ready ? ('🔥 지금 ' + (r.signal === 'LONG' ? '롱' : '숏') + ' 신호')
-                             : ((isLong ? '롱(바닥)' : '숏(천장)') + ' 대기');
-    // 범위 위치: 롱 후보는 0에 가까울수록, 숏 후보는 1에 가까울수록 막대가 길다
-    const edgeRatio = isLong ? 1 - r.range_pos : r.range_pos;
-    const moveRatio = r.min_move_atr ? Math.abs(r.move_atr) / r.min_move_atr : 1;
-    const volRatio = r.min_vol_ratio ? r.vol_ratio / r.min_vol_ratio : 1;
-    return '<div class="cond-row' + (r.ready ? ' ready' : '') + '">' +
-      '<div><div class="cond-name">' + name + '</div>' +
-      '<div class="cond-side ' + (isLong ? 'long' : 'short') + '">' + sideText + '</div></div>' +
-      '<div class="cond-bars">' +
-        condMetric('범위 위치', edgeRatio, Math.round(r.range_pos * 100) + '%', r.range_ok ? 'ok' : 'no') +
-        condMetric('움직임', moveRatio, r.move_atr.toFixed(2) + ' ATR', r.move_ok ? 'ok' : 'no') +
-        condMetric('변동성', volRatio, r.vol_ratio.toFixed(2) + '배', r.vol_ok ? 'ok' : 'no') +
-      '</div>' +
-      '<div class="cond-score"><div class="pct">' + Math.round(r.proximity * 100) + '%</div>' +
-      '<div class="cap">근접도</div></div>' +
-      '<div class="cond-blockers">' + (r.blockers.join(' · ') || '조건 충족') + '</div>' +
-    '</div>';
-  }).join('');
-  const parts = ['24시간 범위의 바닥 근처에서 급락했으면 롱, 천장 근처에서 급등했으면 숏을 노립니다(역추세).',
-                 '근접도는 세 조건의 곱이라 하나만 멀어도 낮게 나옵니다.'];
-  if (data.errors && data.errors.length) {
-    parts.push('조회 실패: ' + data.errors.map(function (e) { return e.symbol.split('/')[0]; }).join(', '));
-  }
-  note.innerHTML = parts.join('<br>');
-}
-
 function renderConditions(data) {
-  if (data.strategy === 'aoa') return renderAoaConditions(data);
   const list = document.getElementById('cond-list');
   const meta = document.getElementById('cond-meta');
   const note = document.getElementById('cond-note');

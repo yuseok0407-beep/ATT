@@ -6,14 +6,6 @@ from pathlib import Path
 import ccxt
 
 from src.core.config import (
-    AOA_MIN_MOVE_ATR,
-    AOA_MIN_VOL_RATIO,
-    AOA_MOVE_BARS,
-    AOA_RANGE_BARS,
-    AOA_RANGE_EDGE,
-    AOA_STOP_LOSS_PCT,
-    AOA_TAKE_PROFIT_PCT,
-    AOA_VOL_LOOKBACK,
     CONSECUTIVE_LOSS_COOLDOWN_HOURS,
     FUTURES_RISK_PER_TRADE,
     FUTURES_SYMBOLS,
@@ -29,23 +21,16 @@ from src.core.config import (
     RULE_TIMEFRAME,
     STOP_LOSS_PCT,
     TAKE_PROFIT_RR,
-    strategy_for_env,
 )
 from src.core.futures_risk import check_stop_before_liquidation, estimate_liquidation_price, leveraged_position_size
 from src.core.futures_strategy import (
-    AOA_LOGIC_REVISION,
     STRATEGY_LOGIC_REVISION,
-    aoa_features,
-    aoa_min_bars,
-    aoa_signal_from_features,
     apply_regime_filter,
     atr_to_stop_ratio,
-    check_strategy,
+    compute_bracket_prices,
     detect_signal,
     is_above_long_sma,
     passes_volatility_floor,
-    strategy_bracket_prices,
-    strategy_stop_loss_pct,
 )
 from src.core.risk import MAX_CONSECUTIVE_LOSSES, MAX_DAILY_LOSS_PCT, check_circuit_breaker
 from src.core.state import compute_consecutive_losses, get_daily_pnl_pct
@@ -61,26 +46,23 @@ from src.data.futures_exchange import (
     set_margin_mode,
 )
 from src.execution import excursion, filter_stats
-from src.execution.env_paths import DEMO_PATHS, paths_for
 from src.execution.futures_orders import cleanup_stale_orders, get_bracket_prices, open_position_with_bracket
 from src.execution.journal import append_entry, read_entries
 
-JOURNAL_PATH = DEMO_PATHS["journal"]
-STATE_PATH = DEMO_PATHS["state"]
-LAST_TRADE_STATE_PATH = DEMO_PATHS["last_trade"]
-FILTER_STATS_PATH = DEMO_PATHS["filter_stats"]
-EXCURSION_PATH = DEMO_PATHS["excursion"]
+JOURNAL_PATH = "journal/futures_rule_trades.jsonl"
+STATE_PATH = "state/futures_rule_daily_equity.json"
+LAST_TRADE_STATE_PATH = "state/futures_rule_last_trade.json"
+FILTER_STATS_PATH = filter_stats.DEFAULT_PATH
+EXCURSION_PATH = excursion.DEFAULT_PATH
 
 # 실계좌(진짜 자금) 전용 — 데모 파일은 절대 안 건드리고 완전히 분리된 저널/상태로 기록한다
 # (2026-08-22, 데모/실계좌 동시 운영). run_once(env="live", ...)가 명시적으로 안 넘기면
-# 이 상수들이 기본값으로 쓰인다. 경로 규칙은 env_paths.paths_for 한 곳이다(2026-09-26 — demo2가
-# 생기면서 "live가 아니면 데모"라는 분기가 데모 파일을 오염시킬 수 있게 됐다).
-_LIVE_PATHS = paths_for("live")
-LIVE_JOURNAL_PATH = _LIVE_PATHS["journal"]
-LIVE_STATE_PATH = _LIVE_PATHS["state"]
-LIVE_LAST_TRADE_STATE_PATH = _LIVE_PATHS["last_trade"]
-LIVE_FILTER_STATS_PATH = _LIVE_PATHS["filter_stats"]
-LIVE_EXCURSION_PATH = _LIVE_PATHS["excursion"]
+# 이 상수들이 기본값으로 쓰인다.
+LIVE_JOURNAL_PATH = "journal/futures_rule_trades.live.jsonl"
+LIVE_STATE_PATH = "state/futures_rule_daily_equity.live.json"
+LIVE_LAST_TRADE_STATE_PATH = "state/futures_rule_last_trade.live.json"
+LIVE_FILTER_STATS_PATH = filter_stats.LIVE_DEFAULT_PATH
+LIVE_EXCURSION_PATH = excursion.LIVE_DEFAULT_PATH
 
 logger = logging.getLogger(__name__)
 
@@ -98,44 +80,18 @@ _SILENT_EVENTS = ("no_signal", "holding_position", "skipped_max_positions", "ski
 # 저널에 기록해두는 "이 거래들이 어떤 규칙으로 나왔는지" — 진입 판단에 실제로 영향을 주는
 # 설정만 넣는다(알림 주기 같은 운영 설정은 뺀다). 값이 바뀌면 log_config_change가 봇 시작 시
 # 저널에 한 줄 남기므로, 나중에 성과를 볼 때 "이 구간은 어떤 규칙이었나"를 저널만으로 알 수 있다.
-def current_strategy_config(env: str = "demo") -> dict:
-    """지금 이 프로세스가 들고 있는 전략/리스크 설정. 저널에 남길 형태 그대로.
-
-    env마다 전략이 다를 수 있어서(2026-09-26, demo2) env를 받는다. **그 전략이 실제로 쓰는
-    파라미터만** 넣는다 — aoa 계좌 저널에 ADX 임계값을 적어두면, 데모 전략의 ADX를 바꿀 때마다
-    aoa 계좌에 아무 의미 없는 새 전략 버전이 생긴다. trend 계좌의 기록 형태는 예전과 한 글자도
-    같다(안 그러면 재시작만으로 기존 계좌에 가짜 config_changed가 남는다)."""
-    strategy = check_strategy(strategy_for_env(env))
-    if strategy == "aoa":
-        entry_rules = {
-            "strategy": "aoa",
-            "timeframe": RULE_TIMEFRAME,
-            "aoa_range_bars": AOA_RANGE_BARS,
-            "aoa_range_edge": AOA_RANGE_EDGE,
-            "aoa_move_bars": AOA_MOVE_BARS,
-            "aoa_min_move_atr": AOA_MIN_MOVE_ATR,
-            "aoa_vol_lookback": AOA_VOL_LOOKBACK,
-            "aoa_min_vol_ratio": AOA_MIN_VOL_RATIO,
-            "max_entry_price_drift_r": MAX_ENTRY_PRICE_DRIFT_R,
-            "stop_loss_pct": AOA_STOP_LOSS_PCT,
-            "take_profit_pct": AOA_TAKE_PROFIT_PCT,
-        }
-        revision = AOA_LOGIC_REVISION
-    else:
-        entry_rules = {
-            "timeframe": RULE_TIMEFRAME,
-            "adx_threshold": RULE_ADX_THRESHOLD,
-            "sma_period": RULE_SMA_PERIOD,
-            "regime_sma_period": RULE_REGIME_SMA_PERIOD,
-            "direction_filter": RULE_DIRECTION_FILTER,
-            "min_atr_to_stop_ratio": MIN_ATR_TO_STOP_RATIO,
-            "max_entry_price_drift_r": MAX_ENTRY_PRICE_DRIFT_R,
-            "stop_loss_pct": STOP_LOSS_PCT,
-            "take_profit_rr": TAKE_PROFIT_RR,
-        }
-        revision = STRATEGY_LOGIC_REVISION
+def current_strategy_config() -> dict:
+    """지금 이 프로세스가 들고 있는 전략/리스크 설정. 저널에 남길 형태 그대로."""
     return {
-        **entry_rules,
+        "timeframe": RULE_TIMEFRAME,
+        "adx_threshold": RULE_ADX_THRESHOLD,
+        "sma_period": RULE_SMA_PERIOD,
+        "regime_sma_period": RULE_REGIME_SMA_PERIOD,
+        "direction_filter": RULE_DIRECTION_FILTER,
+        "min_atr_to_stop_ratio": MIN_ATR_TO_STOP_RATIO,
+        "max_entry_price_drift_r": MAX_ENTRY_PRICE_DRIFT_R,
+        "stop_loss_pct": STOP_LOSS_PCT,
+        "take_profit_rr": TAKE_PROFIT_RR,
         "leverage": LEVERAGE,
         "risk_per_trade": FUTURES_RISK_PER_TRADE,
         "max_concurrent_positions": MAX_CONCURRENT_POSITIONS,
@@ -144,7 +100,7 @@ def current_strategy_config(env: str = "demo") -> dict:
         "consecutive_loss_cooldown_hours": CONSECUTIVE_LOSS_COOLDOWN_HOURS,
         "symbols": sorted(FUTURES_SYMBOLS),
         # 코드 규칙 개정 번호 — 설정이 그대로여도 규칙 코드가 바뀌면 새 전략 버전이 되게 한다.
-        "logic_revision": revision,
+        "logic_revision": STRATEGY_LOGIC_REVISION,
     }
 
 
@@ -155,7 +111,7 @@ def _last_logged_config(journal_path: str) -> dict | None:
     return None
 
 
-def log_config_change(journal_path: str = None, config: dict = None, env: str = "demo") -> dict | None:
+def log_config_change(journal_path: str = None, config: dict = None) -> dict | None:
     """지금 설정이 저널에 마지막으로 기록된 설정과 다르면 config_changed를 한 줄 남긴다.
     같으면 아무것도 안 한다(봇을 하루에 몇 번씩 재시작해도 저널이 안 더러워진다).
 
@@ -167,7 +123,7 @@ def log_config_change(journal_path: str = None, config: dict = None, env: str = 
 
     심볼 목록도 같이 남긴다 — 종목 추가는 파라미터 변경만큼이나 성과 구간을 갈라놓는다."""
     journal_path = journal_path or JOURNAL_PATH
-    config = current_strategy_config(env) if config is None else config
+    config = current_strategy_config() if config is None else config
     previous = _last_logged_config(journal_path)
     if previous == config:
         return None
@@ -695,19 +651,9 @@ def _reconcile_symbol(client, symbol: str, position: dict | None, journal_path: 
         cleanup_stale_orders(client, symbol)
 
 
-def _candle_limit(strategy: str) -> int:
-    """이번 사이클에 받을 캔들 개수 — 마지막(진행 중) 봉을 버릴 몫 +1 포함.
-
-    trend: 신호엔 100봉이면 충분하지만 레짐 필터를 쓰면 장기 SMA만큼 더 필요하다.
-    aoa: ATR이 확정된 뒤 최근 72봉 중간값까지 봐야 한다(aoa_min_bars)."""
-    if strategy == "aoa":
-        return max(101, aoa_min_bars() + 1)
-    return max(101, RULE_REGIME_SMA_PERIOD + 1 + 1) if RULE_REGIME_SMA_PERIOD > 0 else 101
-
-
 def _evaluate_symbol(client, symbol: str, position: dict | None, margin_equity: float,
                       open_position_count: int, leverage: int = LEVERAGE, env: str = "demo",
-                      journal_path: str = None, last_trade_path: str = None, strategy: str = "trend") -> dict:
+                      journal_path: str = None, last_trade_path: str = None) -> dict:
     """종목 하나에 대한 신규 진입 판단. 새 포지션을 열면 result["entered"]=True로 호출자에게
     알려서 같은 사이클 안에서 MAX_CONCURRENT_POSITIONS 카운트를 즉시 반영할 수 있게 한다.
     청산 감지/고아 주문 정리/미기록 포지션 백필은 run_once가 이 함수를 부르기 전에
@@ -720,13 +666,7 @@ def _evaluate_symbol(client, symbol: str, position: dict | None, margin_equity: 
     env="live"면 open_position_with_bracket에 confirm_live=True를 같이 넘긴다 — 이 프로세스가
     애초에 실계좌 client(get_futures_client(env="live"))로 호출되고 있다는 것 자체가 명시적
     의도이므로(2026-08-22), 매 진입마다 다시 물어볼 필요는 없다. env="demo"는 그대로 확인 없이도
-    허용된다(_guard_live가 env="live"일 때만 막음).
-
-    strategy: "trend"|"aoa"(2026-09-26). 전략이 바꾸는 건 **신호와 손절/익절가뿐**이다 — 마감봉
-    트리밍, 같은 신호봉 잠금, 괴리 검사, 청산가 검증, 사이징은 아래 공통 경로를 그대로 탄다.
-    trend 고유의 레짐 숏차단·저변동 차단은 trend에만 걸린다(aoa는 자기 변동성 조건을 신호 안에
-    들고 있다)."""
-    strategy = check_strategy(strategy)
+    허용된다(_guard_live가 env="live"일 때만 막음)."""
     if position is not None:
         return {"symbol": symbol, "has_position": True, "event": "holding_position",
                 "position": position, "entered": False}
@@ -746,25 +686,16 @@ def _evaluate_symbol(client, symbol: str, position: dict | None, margin_equity: 
     # 조건과 정확히 같아진다 — 대신 신호 확정이 최대 한 시간봉만큼 늦어진다.
     # 신호 계산엔 100봉이면 충분하지만, 레짐 필터를 쓰면 장기 SMA만큼 더 필요하다.
     # +1은 아래에서 버릴 "아직 마감 안 된" 마지막 봉 몫.
-    limit = _candle_limit(strategy)
+    limit = max(101, RULE_REGIME_SMA_PERIOD + 1 + 1) if RULE_REGIME_SMA_PERIOD > 0 else 101
     raw_df = fetch_ohlcv_df(market_client, symbol, timeframe=RULE_TIMEFRAME, limit=limit)
     # 진행 중인 봉의 종가 = 사실상 현재가. 아래 괴리 검사에 쓰려고 버리기 전에 챙겨둔다
     # (티커를 따로 조회하지 않아도 되므로 API 호출이 안 늘어난다).
     live_price = float(raw_df["close"].iloc[-1])
     df = raw_df.iloc[:-1]
-    features = None
-    if strategy == "aoa":
-        features = aoa_features(df)
-        raw_signal = signal = aoa_signal_from_features(features)
-    else:
-        raw_signal = detect_signal(df)
-        signal = apply_regime_filter(raw_signal, is_above_long_sma(df, RULE_REGIME_SMA_PERIOD))
+    raw_signal = detect_signal(df)
+    signal = apply_regime_filter(raw_signal, is_above_long_sma(df, RULE_REGIME_SMA_PERIOD))
 
     result = {"symbol": symbol, "has_position": False, "entered": False}
-    if features is not None:
-        # 진입 당시의 판정 재료를 저널에 남긴다 — 나중에 "어떤 조건에서 들어간 거래가 좋았나"를
-        # 다시 계산 없이 볼 수 있게.
-        result["aoa_features"] = {k: round(v, 4) for k, v in features.items()}
     # 신호를 만든 마감 봉의 시각. "같은 봉으로 두 번 진입하지 않는다"의 판정 키이자, 차단 통계
     # (filter_stats)가 30초마다 재발생하는 같은 차단을 중복해서 세지 않게 하는 키이기도 해서
     # 모든 차단 경로가 이 값을 결과에 실어 보낸다. fetch_ohlcv_df는 항상 timestamp 열을 주지만,
@@ -785,8 +716,8 @@ def _evaluate_symbol(client, symbol: str, position: dict | None, margin_equity: 
     # 저변동 구간이면 진입하지 않는다 — 손절폭 대비 ATR이 너무 작으면 익절까지 가야 할 거리가
     # ATR 몇 배가 되어 사실상 도달이 어렵고, 대신 시간이 흐르며 손절로 흘러간다
     # (UPDATE_LOG.md 2026-09-09: 이 구간이 일관된 손실 구간이었다).
-    atr_ratio = atr_to_stop_ratio(df, strategy_stop_loss_pct(strategy))
-    if strategy == "trend" and not passes_volatility_floor(atr_ratio):
+    atr_ratio = atr_to_stop_ratio(df)
+    if not passes_volatility_floor(atr_ratio):
         result.update({
             "event": "skipped_low_volatility", "signal": signal, "atr_to_stop_ratio": atr_ratio,
             "signal_bar_timestamp": signal_bar_timestamp,
@@ -807,7 +738,7 @@ def _evaluate_symbol(client, symbol: str, position: dict | None, margin_equity: 
 
     entry_price = float(df["close"].iloc[-1])
     side = "long" if signal == "LONG" else "short"
-    stop_loss_price, take_profit_price = strategy_bracket_prices(strategy, entry_price, side)
+    stop_loss_price, take_profit_price = compute_bracket_prices(entry_price, side)
 
     # 손절/익절가가 전부 entry_price(마감 봉 종가) 기준이라, 현재가가 거기서 너무 멀어졌으면
     # 그 브라켓은 이미 무의미하다 — 진입하자마자 손절되거나 브라켓 주문이 -2021
@@ -885,14 +816,16 @@ def run_once(client, env: str = "demo", consecutive_losses: int = None, daily_pn
     파일은 절대 안 건드린다."""
     symbols = FUTURES_SYMBOLS if symbols is None else symbols
     leverage_by_symbol = leverage_by_symbol or {}
-    # 모르는 env면 여기서 예외 — 데모 경로로 폴백하지 않는다(env_paths 참고).
-    paths = paths_for(env)
-    journal_path = journal_path or paths["journal"]
-    state_path = state_path or paths["state"]
-    last_trade_path = last_trade_path or paths["last_trade"]
-    filter_stats_path = filter_stats_path or paths["filter_stats"]
-    excursion_path = excursion_path or paths["excursion"]
-    strategy = check_strategy(strategy_for_env(env))
+    if journal_path is None:
+        journal_path = LIVE_JOURNAL_PATH if env == "live" else JOURNAL_PATH
+    if state_path is None:
+        state_path = LIVE_STATE_PATH if env == "live" else STATE_PATH
+    if last_trade_path is None:
+        last_trade_path = LIVE_LAST_TRADE_STATE_PATH if env == "live" else LAST_TRADE_STATE_PATH
+    if filter_stats_path is None:
+        filter_stats_path = LIVE_FILTER_STATS_PATH if env == "live" else FILTER_STATS_PATH
+    if excursion_path is None:
+        excursion_path = LIVE_EXCURSION_PATH if env == "live" else EXCURSION_PATH
 
     balance = get_futures_balance(client)
     margin_equity = (balance.get("USDT") or {}).get("total") or 0.0
@@ -939,8 +872,7 @@ def run_once(client, env: str = "demo", consecutive_losses: int = None, daily_pn
         leverage = leverage_by_symbol.get(symbol, LEVERAGE)
         try:
             result = _evaluate_symbol(client, symbol, positions[symbol], margin_equity, open_count, leverage,
-                                       env=env, journal_path=journal_path, last_trade_path=last_trade_path,
-                                       strategy=strategy)
+                                       env=env, journal_path=journal_path, last_trade_path=last_trade_path)
         except Exception as exc:
             # 한 심볼의 거래소 쪽 오류(예: TSLA/CRCL 같은 토큰화 주식형 심볼이 계정에서 아직
             # TradFi-Perps 약관에 동의가 안 돼 주문이 거부되는 경우, 2026-08-14 실전 확인)로

@@ -15,13 +15,10 @@ sys.path.insert(0, str(PROJECT_ROOT))
 # 이 값이 argv에 그대로 남아있어야 한다(bot_process._is_our_bot_process가 cmdline에서
 # "--env {env}"를 찾아 데모/실계좌 프로세스를 구분하므로, 2026-08-22).
 _parser = argparse.ArgumentParser()
-_parser.add_argument("--env", choices=["demo", "live", "demo2"], default="demo")
+_parser.add_argument("--env", choices=["demo", "live"], default="demo")
 _ENV = _parser.parse_args().env
 
-from src.execution.env_paths import paths_for  # noqa: E402  (sys.path 설정 뒤에 와야 한다)
-
-_PATHS = paths_for(_ENV)
-LOG_PATH = PROJECT_ROOT / _PATHS["log"]
+LOG_PATH = PROJECT_ROOT / "logs" / ("futures_rule_bot.log" if _ENV == "demo" else "futures_rule_bot.live.log")
 LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(
@@ -34,22 +31,33 @@ logger = logging.getLogger("run_futures_bot")
 _SILENT_EVENTS = ("no_signal", "holding_position", "skipped_max_positions")
 
 if __name__ == "__main__":
-    from src.core.config import FUTURES_SYMBOLS, MAX_CONCURRENT_POSITIONS, POLL_INTERVAL_SECONDS, strategy_for_env
+    from src.core.config import FUTURES_SYMBOLS, MAX_CONCURRENT_POSITIONS, POLL_INTERVAL_SECONDS
     from src.data.futures_exchange import get_futures_client
-    from src.execution.heartbeat import write_heartbeat
+    from src.execution.heartbeat import LIVE_DEFAULT_PATH as HEARTBEAT_LIVE_PATH, write_heartbeat
+    from src.execution.heartbeat import DEFAULT_PATH as HEARTBEAT_DEMO_PATH
     from src.execution import equity_log
-    from src.futures_rule_bot import initialize, log_config_change, run_once
+    from src.futures_rule_bot import (
+        LIVE_JOURNAL_PATH,
+        LIVE_LAST_TRADE_STATE_PATH,
+        LIVE_STATE_PATH,
+        initialize,
+        log_config_change,
+        run_once,
+    )
+    from src.futures_rule_bot import JOURNAL_PATH as DEMO_JOURNAL_PATH
+    from src.futures_rule_bot import LAST_TRADE_STATE_PATH as DEMO_LAST_TRADE_PATH
+    from src.futures_rule_bot import STATE_PATH as DEMO_STATE_PATH
 
     env = _ENV
-    journal_path = _PATHS["journal"]
-    state_path = _PATHS["state"]
-    last_trade_path = _PATHS["last_trade"]
-    heartbeat_path = _PATHS["heartbeat"]
-    equity_log_path = _PATHS["equity_log"]
+    journal_path = LIVE_JOURNAL_PATH if env == "live" else DEMO_JOURNAL_PATH
+    state_path = LIVE_STATE_PATH if env == "live" else DEMO_STATE_PATH
+    last_trade_path = LIVE_LAST_TRADE_STATE_PATH if env == "live" else DEMO_LAST_TRADE_PATH
+    heartbeat_path = HEARTBEAT_LIVE_PATH if env == "live" else HEARTBEAT_DEMO_PATH
+    equity_log_path = (equity_log.LIVE_DEFAULT_PATH if env == "live"
+                       else equity_log.DEFAULT_PATH)
 
-    logger.info("futures rule bot starting env=%s strategy=%s — watching %s (max %d concurrent, poll every %ss)",
-                env, strategy_for_env(env), ", ".join(FUTURES_SYMBOLS), MAX_CONCURRENT_POSITIONS,
-                POLL_INTERVAL_SECONDS)
+    logger.info("futures rule bot starting env=%s — watching %s (max %d concurrent, poll every %ss)",
+                env, ", ".join(FUTURES_SYMBOLS), MAX_CONCURRENT_POSITIONS, POLL_INTERVAL_SECONDS)
 
     client = get_futures_client(env)
     leverage_by_symbol = initialize(client)
@@ -64,7 +72,7 @@ if __name__ == "__main__":
     # 이 프로세스가 어떤 규칙으로 도는지를 저널에 남긴다(직전 기록과 같으면 아무것도 안 남긴다).
     # 나중에 성과를 볼 때 설정이 바뀐 경계를 저널만으로 알 수 있게 하려는 것 — 사람 기억이나
     # UPDATE_LOG.md에만 있으면 "이 구간은 어떤 규칙이었나"를 화면에서 대조할 수 없다.
-    config_change = log_config_change(journal_path=journal_path, env=env)
+    config_change = log_config_change(journal_path=journal_path)
     if config_change is not None:
         logger.info("strategy config recorded to journal: %s",
                     config_change["changes"] if not config_change["first_record"] else "(first record)")

@@ -4,7 +4,6 @@ from unittest.mock import patch
 import pytest
 
 from src import telegram_bot as tb
-from src.execution import env_paths
 
 
 # ---------- check_new_journal_entries ----------
@@ -61,7 +60,7 @@ def test_check_new_journal_entries_uses_live_journal_path_for_live_env(monkeypat
     monkeypatch.setattr(tb, "read_entries", _read_entries)
 
     tb.check_new_journal_entries("live", {})
-    assert captured["path"] == tb.paths_for("live")["journal"]
+    assert captured["path"] == tb.LIVE_JOURNAL_PATH
 
 
 # ---------- check_bot_status_change ----------
@@ -222,7 +221,7 @@ def test_format_status_reports_live_keys_not_configured(monkeypatch):
     monkeypatch.setattr(tb, "get_futures_client", _raise)
 
     text = tb.format_status("live")
-    assert "LIVE 키 미설정" in text
+    assert "라이브 키 미설정" in text
 
 
 def test_format_status_reports_generic_connection_failure(monkeypatch):
@@ -287,7 +286,7 @@ def test_run_once_authorized_reset_streak_live_uses_live_journal_and_replies():
          patch("src.telegram_bot.check_daily_summary", return_value=None):
         tb.run_once({}, chat_id="555", token="tok")
 
-    mock_reset.assert_called_once_with(journal_path=tb.paths_for("live")["journal"])
+    mock_reset.assert_called_once_with(journal_path=tb.LIVE_JOURNAL_PATH)
     assert any("LIVE" in c.args[0] and "리셋" in c.args[0] for c in mock_send.call_args_list)
 
 
@@ -339,14 +338,13 @@ def test_run_once_replies_help_and_does_not_touch_bot_process():
 
 
 def test_conditions_command_is_dispatched():
-    assert tb.dispatch_command("/conditions") == ("demo", "conditions")
-    assert tb.dispatch_command("/conditions_demo2") == ("demo2", "conditions")
+    assert tb.dispatch_command("/conditions") == ("", "conditions")
 
 
 def test_format_conditions_renders_waiting_symbols(monkeypatch):
     """신호가 없을 때 '무엇을 기다리는 중인지'가 보여야 한다."""
     monkeypatch.setattr(tb, "get_futures_client", lambda env: _raise_(RuntimeError("no keys")))
-    monkeypatch.setattr(tb, "collect_conditions", lambda symbols, strategy="trend": {
+    monkeypatch.setattr(tb, "collect_conditions", lambda symbols: {
         "timeframe": "1h", "adx_threshold": 30.0, "sma_period": 10, "regime_sma_period": 400,
         "symbols": [{
             "symbol": "BTC/USDT:USDT", "ready": False, "signal": None, "candidate_side": "LONG",
@@ -366,7 +364,7 @@ def test_format_conditions_renders_waiting_symbols(monkeypatch):
 
 def test_format_conditions_highlights_a_live_signal(monkeypatch):
     monkeypatch.setattr(tb, "get_futures_client", lambda env: _raise_(RuntimeError("no keys")))
-    monkeypatch.setattr(tb, "collect_conditions", lambda symbols, strategy="trend": {
+    monkeypatch.setattr(tb, "collect_conditions", lambda symbols: {
         "timeframe": "1h", "adx_threshold": 30.0, "sma_period": 10, "regime_sma_period": 400,
         "symbols": [{"symbol": "ZEC/USDT:USDT", "ready": True, "signal": "SHORT",
                      "candidate_side": "SHORT", "proximity": 1.0, "blockers": []}],
@@ -379,7 +377,7 @@ def test_format_conditions_survives_a_collect_failure(monkeypatch):
     """조회가 통째로 실패해도 예외를 올리지 않고 사유를 돌려줘야 한다 — 알림 루프를 죽이면 안 된다."""
     monkeypatch.setattr(tb, "get_futures_client", lambda env: _raise_(RuntimeError("no keys")))
     monkeypatch.setattr(tb, "collect_conditions",
-                        lambda symbols, strategy="trend": _raise_(TimeoutError("backend timeout")))
+                        lambda symbols: _raise_(TimeoutError("backend timeout")))
     assert "조건 조회 실패" in tb.format_conditions()
 
 
@@ -607,7 +605,7 @@ def test_help_text_lists_every_registered_command():
 def test_help_text_does_not_advertise_commands_that_do_not_exist():
     """반대 방향도 막는다 — 없는 명령을 안내하면 사용자가 오타를 의심하게 된다."""
     import re
-    advertised = set(re.findall(r"/[a-z_0-9]+", tb._HELP_TEXT))
+    advertised = set(re.findall(r"/[a-z_]+", tb._HELP_TEXT))
     assert advertised - set(tb._COMMANDS) == set()
 
 
@@ -766,7 +764,7 @@ def test_daily_summary_reports_fee_adjusted_money(monkeypatch):
 def test_daily_summary_shows_the_equity_move(monkeypatch, tmp_path):
     """자산 줄만이 계좌 화면의 총자산과 직접 맞춰볼 수 있는 값이다."""
     path = tmp_path / "equity.json"
-    monkeypatch.setitem(env_paths.DEMO_PATHS, "equity_log", str(path))
+    monkeypatch.setattr(tb.equity_log, "DEFAULT_PATH", str(path))
     from datetime import datetime
     for hour, value in ((1, 1000.0), (23, 1012.5)):
         tb.equity_log.record(value, path=str(path),
@@ -782,7 +780,7 @@ def test_daily_summary_shows_equity_even_when_nothing_closed(monkeypatch, tmp_pa
     """거래가 없어도 자산은 움직인다(보유 포지션 평가손익, 펀딩비). "거래 없음"만 보내면
     변화가 없었던 것으로 읽혀 또 계좌와 어긋난다."""
     path = tmp_path / "equity.json"
-    monkeypatch.setitem(env_paths.DEMO_PATHS, "equity_log", str(path))
+    monkeypatch.setattr(tb.equity_log, "DEFAULT_PATH", str(path))
     from datetime import datetime
     for hour, value in ((1, 500.0), (23, 490.0)):
         tb.equity_log.record(value, path=str(path),
@@ -804,9 +802,9 @@ def test_daily_summary_omits_equity_before_any_is_recorded(monkeypatch):
 
 
 def test_daily_summary_compares_recent_equity_to_the_monthly_goal(monkeypatch, tmp_path):
-    """목표(월 +10%)는 금액 기준이므로 비교도 금액 기준이어야 한다 — R 합계로는 못 낸다."""
+    """목표(월 +1%)는 금액 기준이므로 비교도 금액 기준이어야 한다 — R 합계로는 못 낸다."""
     path = tmp_path / "equity.json"
-    monkeypatch.setitem(env_paths.DEMO_PATHS, "equity_log", str(path))
+    monkeypatch.setattr(tb.equity_log, "DEFAULT_PATH", str(path))
     from datetime import datetime, timedelta
     base = datetime.fromisoformat("2026-09-01T09:00:00").astimezone()
     for i, value in enumerate([1000.0, 1040.0, 1080.0]):
@@ -817,51 +815,4 @@ def test_daily_summary_compares_recent_equity_to_the_monthly_goal(monkeypatch, t
 
     assert "— 목표 진행 —" in text
     assert "1000.00 → 1080.00 (+8.00%)" in text
-    assert "목표 월 +10%" in text
-
-
-# ---------- demo2 (2026-09-26) ----------
-
-def test_demo2_commands_are_dispatched():
-    assert tb.dispatch_command("/start_demo2") == ("demo2", "start")
-    assert tb.dispatch_command("/stop_demo2") == ("demo2", "stop")
-    assert tb.dispatch_command("/reset_streak_demo2") == ("demo2", "reset_streak")
-
-
-def test_demo2_notifications_read_the_demo2_journal(monkeypatch):
-    captured = []
-    monkeypatch.setattr(tb, "read_entries", lambda path=None: captured.append(path) or [])
-    tb.check_new_journal_entries("demo2", {})
-    assert captured == [tb.paths_for("demo2")["journal"]]
-
-
-def test_demo2_is_left_out_of_reports_until_it_is_set_up(monkeypatch):
-    """계좌를 아직 안 만든 동안 매일 "[DEMO2] 키 미설정" 줄이 붙으면 잡음이다."""
-    monkeypatch.setattr(tb, "BINANCE_FUTURES_DEMO2_API_KEY", "")
-    monkeypatch.setattr(tb.bot_process, "get_status", lambda env: {"running": False})
-    assert tb.reported_envs() == ["demo", "live"]
-    monkeypatch.setattr(tb, "BINANCE_FUTURES_DEMO2_API_KEY", "k")
-    assert tb.reported_envs() == ["demo", "live", "demo2"]
-
-
-def test_start_demo2_without_keys_replies_instead_of_spawning(monkeypatch):
-    sent = []
-    monkeypatch.setattr(tb, "get_updates", lambda **kw: [
-        {"update_id": 1, "message": {"chat": {"id": 42}, "text": "/start_demo2"}}])
-    monkeypatch.setattr(tb, "send_message", lambda text, **kw: sent.append(text))
-
-    def _no_keys(env):
-        raise tb.LiveKeysNotConfiguredError("DEMO2 키 미설정")
-
-    monkeypatch.setattr(tb, "get_futures_client", _no_keys)
-    monkeypatch.setattr(tb.bot_process, "start", lambda env: pytest.fail("키 없이 띄우면 안 된다"))
-    for name in ("check_new_journal_entries",):
-        monkeypatch.setattr(tb, name, lambda env, state: [])
-    for name in ("check_bot_status_change", "check_heartbeat_stall", "check_breaker_halt"):
-        monkeypatch.setattr(tb, name, lambda env, state: None)
-    monkeypatch.setattr(tb, "check_daily_summary", lambda state: None)
-    monkeypatch.setattr(tb, "check_ip_change", lambda state: None)
-
-    tb.run_once({}, chat_id="42", token="t")
-
-    assert any("시작 안 함" in text for text in sent)
+    assert "목표 월 +1%" in text

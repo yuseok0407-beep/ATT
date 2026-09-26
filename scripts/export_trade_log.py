@@ -26,8 +26,8 @@ from src.execution import export_log  # noqa: E402
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="거래 저널을 분석용 CSV로 내보낸다")
-    parser.add_argument("--env", choices=["demo", "live", "demo2"], action="append",
-                        help="내보낼 계좌(반복 지정 가능). 생략하면 데모+실계좌(+저널이 있으면 demo2)")
+    parser.add_argument("--env", choices=["demo", "live"], action="append",
+                        help="내보낼 계좌(반복 지정 가능). 생략하면 데모+실계좌 둘 다")
     parser.add_argument("--out-dir", default=export_log.DEFAULT_OUT_DIR)
     parser.add_argument("--stamped", action="store_true",
                         help="--out-dir 아래에 실행 시각 폴더를 만들어 과거 내보내기를 덮어쓰지 않는다")
@@ -37,7 +37,7 @@ def main() -> int:
     if args.stamped:
         out_dir = out_dir / datetime.now().strftime("%Y%m%d-%H%M")
 
-    envs = tuple(dict.fromkeys(args.env)) if args.env else None
+    envs = tuple(dict.fromkeys(args.env)) if args.env else ("demo", "live")
     manifest = export_log.export_all(out_dir, envs=envs)
 
     for summary in manifest["envs"]:
