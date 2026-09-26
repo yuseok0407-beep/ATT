@@ -2,7 +2,8 @@
 
 USDT-M 선물(레버리지 롱/숏)을 **순수 규칙 기반**으로 상시 감시한다(외부 API 판단 없음):
 신호 탐지 → 리스크 검증 → 진입 + 손절/익절 브라켓 → 저널링 → 대시보드/텔레그램.
-데모 계좌와 실계좌를 독립 프로세스로 동시에 운영한다.
+데모 계좌와 실계좌를 독립 프로세스로 동시에 운영한다. **두 번째 데모 계좌(demo2)**는 다른 전략
+(aoa, 역추세)을 같은 인프라에서 나란히 시험하는 용도다(2026-09-26, `docs/DEMO2_PLAN.md`).
 
 새 세션을 시작할 때 읽는 순서:
 1. **`docs/OBJECTIVE.md`** — 이 프로젝트의 목표(월 +10% 자산 수익률)와 지금 거기서 얼마나
@@ -27,7 +28,13 @@ USDT-M 선물(레버리지 롱/숏)을 **순수 규칙 기반**으로 상시 감
 - 새 모듈 추가 시 `tests/`에 대응 테스트 작성.
 - **데모와 실계좌를 동시에 운영한다**(2026-08-22) — 아래 "데모/실계좌 동시 운영" 절 참고.
   전역 설정이 아니라 함수마다 명시적으로 넘기는 `env: "demo"|"live"`가 계정을 결정한다
-  (옛 현물 시절의 `USE_TESTNET`은 2026-09-12에 제거됨).
+  (옛 현물 시절의 `USE_TESTNET`은 2026-09-12에 제거됨). env는 `demo`/`live`/`demo2` 셋이다.
+- **계좌별 파일 경로는 `execution/env_paths.paths_for(env)`에서만 받는다**(2026-09-26). 규칙
+  (`core/envs.env_path`)은 데모는 이름 그대로, 나머지는 `.{env}.` 인픽스. 예전처럼
+  `"live" if env == "live" else 데모`로 적으면 demo2가 **데모 파일에 조용히 섞인다** — 모르는
+  env는 `UnknownEnvError`로 막는다. 테스트 격리도 `conftest`가 `env_paths.DEMO_PATHS`를 tmp로
+  바꾸는 것에 기대므로, 새 계좌별 파일은 반드시 `DEMO_PATHS`에 더할 것(여기서 빠뜨려서 테스트가
+  실제 데모 차단 통계에 한 번 쓴 적이 있다).
 
 ## 구조
 - `src/data/futures_exchange.py` — 거래소 연동(클라이언트 생성, 잔고/포지션/레버리지 조회) +
@@ -35,6 +42,16 @@ USDT-M 선물(레버리지 롱/숏)을 **순수 규칙 기반**으로 상시 감
 - `src/core/` — 전략/리스크 로직. `futures_strategy.py`(신호·필터·브라켓가), `futures_risk.py`
   (레버리지 사이징·청산가), `risk.py`(서킷브레이커 임계치), `indicators.py`(ADX/RSI/SMA/ATR),
   `config.py`(.env 설정), `signal_status.py`(조건 근접도), `state.py`(연속손실·일일손익)
+- **전략은 계좌마다 고른다**(`.env`의 `RULE_STRATEGY_DEMO|LIVE|DEMO2`, 기본 전부 `trend`,
+  `config.strategy_for_env`). 전략이 바꾸는 건 **신호와 손절/익절가뿐**이고(`_evaluate_symbol`의
+  분기), 마감봉 트리밍·같은 봉 잠금·괴리 검사·사이징·청산가 검증·서킷브레이커·동시보유 상한은
+  공통이다. 레짐 숏차단·저변동 하한은 trend 전용. aoa 규칙의 유일한 정의는
+  `futures_strategy.aoa_signal_from_features`(값은 `config.AOA_*`, 분석값으로 고정 — 백테스트로
+  튜닝하지 말 것). `current_strategy_config(env)`는 **그 전략이 쓰는 값만** 남기고, trend 계좌의
+  기록 형태는 예전과 같아야 한다(바뀌면 재시작만으로 가짜 `config_changed`가 생긴다 —
+  `test_trend_config_record_is_unchanged_by_the_strategy_switch`).
+- `scripts/analyze_aoa_trades.py` — `demo2/`의 aoa(BitMEX) 공개 체결 내역 분석(원자료 600MB는
+  gitignore). `scripts/run_aoa_backtest.py` — aoa 비용 포함 1회 검증(결과: 음수, DEMO2_PLAN.md).
 - `src/futures_rule_bot.py` — 감시 루프 본체(테스트 가능한 핵심 로직), `scripts/run_futures_bot.py`는
   얇은 무한루프 진입점. 이 2계층 패턴을 텔레그램 봇도 같이 쓴다.
 - `src/backtest/` — 백테스트 하네스(`engine`/`data`/`report`/`optimize`). 실거래와 **같은**
@@ -278,9 +295,14 @@ USDT-M 선물(레버리지 롱/숏)을 **순수 규칙 기반**으로 상시 감
   `env="live"`인데 `confirm_live=False`면 막는다. 이 프로세스가 애초에 실계좌 client로 실행되고
   있다는 것 자체가 명시 의도이므로 매 진입마다 다시 확인하지 않는다.
 - `scripts/run_futures_bot.py --env demo|live` — 두 env를 완전히 독립된 OS 프로세스로 동시에
-  띄운다. `bot_process.py`는 PID 파일을 env별로 분리(`state/futures_bot.pid` / `.live.pid`)하고,
+  띄운다. `bot_process.py`는 PID 파일을 env별로 분리(`state/futures_bot.pid` / `.live.pid` / `.demo2.pid`)하고,
   `_is_our_bot_process`가 cmdline에서 스크립트 이름뿐 아니라 `--env {env}`까지 확인해서 데모/실계좌
-  프로세스가 서로 뒤바뀌지 않게 한다.
+  프로세스가 서로 뒤바뀌지 않게 한다. **`--env` 비교는 인자 단위다** — 문자열 포함으로 보면
+  `--env demo`가 `--env demo2`에 들어 있어 demo2 봇이 데모 봇으로 인정된다(2026-09-26).
+  모르는 key는 데모 PID 파일로 폴백하지 않는다("demo2 중지"가 데모 봇을 죽이지 않게).
+- demo2는 `BINANCE_FUTURES_DEMO2_API_KEY/SECRET`(**다른 바이낸스 계정**의 데모 키)로 붙고, 키가
+  없으면 `Demo2KeysNotConfiguredError`(`LiveKeysNotConfiguredError`의 하위) — 데모 키로 폴백 안 함.
+  텔레그램 상태·요약은 demo2 키가 설정됐거나 봇이 떠 있을 때만 demo2 줄을 붙인다.
 - 대시보드는 모든 `/api/*` 라우트가 `?env=demo|live` 쿼리로 계좌를 고른다(기본 demo). 페이지는
   항상 데모로 로드되고, 새로고침해도 LIVE 탭이 기억되지 않는다(의도적 — 계좌 착각 방지).
   `env=live`인데 라이브 키가 없으면 서버가 안 죽고 400으로 명확히 응답한다.

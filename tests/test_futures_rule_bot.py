@@ -331,12 +331,12 @@ def test_run_once_uses_live_path_constants_when_env_live_and_paths_not_given():
              patch("src.futures_rule_bot.append_entry") as mock_append:
             bot.run_once(MagicMock(), env="live", consecutive_losses=0)
 
-        mock_pnl.assert_called_once_with(10_000, path=bot.LIVE_STATE_PATH)
+        mock_pnl.assert_called_once_with(10_000, path=bot.paths_for("live")["state"])
         # "entered" 이벤트 2건(MAX_CONCURRENT_POSITIONS=2)이 전부 라이브 저널 경로로 기록됐는지 확인
         entered_calls = [c for c in mock_append.call_args_list if c.args[0].get("event") == "entered"]
         assert len(entered_calls) == 2
         for c in entered_calls:
-            assert c.kwargs["path"] == bot.LIVE_JOURNAL_PATH
+            assert c.kwargs["path"] == bot.paths_for("live")["journal"]
     finally:
         _stop(patches)
 
@@ -460,7 +460,7 @@ def test_run_once_rejects_unsafe_stop_for_one_symbol():
     _start(patches)
     try:
         with patch("src.futures_rule_bot.detect_signal", return_value="LONG"), \
-             patch("src.futures_rule_bot.compute_bracket_prices", return_value=(1.0, 200.0)), \
+             patch("src.futures_rule_bot.strategy_bracket_prices", return_value=(1.0, 200.0)), \
              patch("src.futures_rule_bot.open_position_with_bracket") as mock_open:
             cycle = bot.run_once(MagicMock(), consecutive_losses=0, daily_pnl_pct=0.0)
 
@@ -1399,8 +1399,10 @@ def test_run_once_does_not_count_plain_no_signal(tmp_path):
 
 def test_run_once_uses_live_state_paths_for_live_env(tmp_path, monkeypatch):
     """데모/실계좌가 통계·최고점 파일도 완전히 분리돼야 한다."""
-    monkeypatch.setattr(bot, "LIVE_FILTER_STATS_PATH", str(tmp_path / "live_stats.json"))
-    monkeypatch.setattr(bot, "LIVE_EXCURSION_PATH", str(tmp_path / "live_exc.json"))
+    monkeypatch.setattr(bot, "paths_for", lambda env: {
+        "journal": str(tmp_path / f"{env}_j.jsonl"), "state": str(tmp_path / f"{env}_state.json"),
+        "last_trade": str(tmp_path / f"{env}_lt.json"), "filter_stats": str(tmp_path / f"{env}_stats.json"),
+        "excursion": str(tmp_path / ("live_exc.json" if env == "live" else "demo_exc.json"))})
     captured = {}
 
     def _reconcile(client, symbol, position, journal_path=None, last_trade_path=None,
@@ -1574,3 +1576,123 @@ class TestClosedTradeRecordsRealCosts:
         assert "net_realized_pnl" not in result
         assert "fee_r" not in result
         assert result["realized_pnl"] == pytest.approx(-10.0)
+
+
+# --- demo2 / aoa 전략 (2026-09-26) -------------------------------------------------------
+# 세 번째 계좌가 데모 파일에 섞이지 않고, 계좌마다 전략을 고를 수 있으며, 전략이 바꾸는 건 신호와
+# 손절/익절가뿐이고 나머지 진입 게이트는 공통인지를 고정한다.
+
+def _aoa_raw_df(direction=-1, n=120, move=4.0):
+    """aoa 신호가 나는 마감봉들 + 진행 중인 봉 하나(봇이 잘라낼 몫, 종가는 마지막 마감봉과 같게)."""
+    closes = np.full(n, 100.0)
+    highs, lows = closes + 0.5, closes - 0.5
+    for k, i in enumerate(range(n - 4, n)):
+        c = 100.0 + direction * move * (k + 1) / 4
+        closes[i] = c
+        highs[i] = c + (1.5 if direction < 0 else 0.2)
+        lows[i] = c - (0.2 if direction < 0 else 1.5)
+    df = pd.DataFrame({"timestamp": pd.date_range("2026-01-01", periods=n, freq="h"),
+                       "open": closes, "high": highs, "low": lows, "close": closes, "volume": 1.0})
+    forming = df.iloc[[-1]].copy()
+    forming["timestamp"] = df["timestamp"].iloc[-1] + pd.Timedelta(hours=1)
+    return pd.concat([df, forming], ignore_index=True)
+
+
+def test_trend_config_record_is_unchanged_by_the_strategy_switch():
+    """기존 계좌의 저널에 가짜 config_changed가 남지 않으려면 trend 기록 형태가 한 글자도 같아야 한다."""
+    config = bot.current_strategy_config("demo")
+    assert "strategy" not in config
+    assert config["adx_threshold"] == bot.RULE_ADX_THRESHOLD
+    assert config["logic_revision"] == bot.STRATEGY_LOGIC_REVISION
+    assert config == bot.current_strategy_config()
+
+
+def test_aoa_config_records_only_what_aoa_uses(monkeypatch):
+    """aoa 계좌에 ADX를 적어두면 데모 전략을 고칠 때마다 aoa 계좌에 의미 없는 버전이 생긴다."""
+    monkeypatch.setenv("RULE_STRATEGY_DEMO2", "aoa")
+    config = bot.current_strategy_config("demo2")
+    assert config["strategy"] == "aoa"
+    assert config["stop_loss_pct"] == 0.03 and config["take_profit_pct"] == 0.01
+    assert "adx_threshold" not in config and "regime_sma_period" not in config
+    # 공통 리스크 설정은 같이 남는다
+    assert config["max_concurrent_positions"] == bot.MAX_CONCURRENT_POSITIONS
+
+
+def test_run_once_demo2_trades_the_aoa_rules_into_its_own_journal(monkeypatch):
+    monkeypatch.setenv("RULE_STRATEGY_DEMO2", "aoa")
+    patches = _base_patches()
+    _start(patches)
+    try:
+        with patch("src.futures_rule_bot.fetch_ohlcv_df", return_value=_aoa_raw_df(-1)), \
+             patch("src.futures_rule_bot.detect_signal") as mock_trend, \
+             patch("src.futures_rule_bot.get_notional_cap", return_value=None), \
+             patch("src.futures_rule_bot.open_position_with_bracket", return_value={"status": "opened"}) as mock_open, \
+             patch("src.futures_rule_bot.append_entry") as mock_append:
+            cycle = bot.run_once(MagicMock(), env="demo2", consecutive_losses=0, daily_pnl_pct=0.0)
+
+        result = cycle["symbols"]["BTC/USDT:USDT"]
+        assert result["event"] == "entered" and result["signal"] == "LONG"
+        assert result["entry_price"] == 96.0
+        assert result["stop_loss_price"] == pytest.approx(96.0 * 0.97)
+        assert result["take_profit_price"] == pytest.approx(96.0 * 1.01)
+        assert result["aoa_features"]["range_pos"] <= 0.2
+        assert not mock_trend.called  # trend 신호 함수는 아예 안 불린다
+        # 데모 계좌이므로 실계좌 확인 없이 주문
+        assert mock_open.call_args.kwargs["env"] == "demo2"
+        assert mock_open.call_args.kwargs["confirm_live"] is False
+        paths = {c.kwargs["path"] for c in mock_append.call_args_list}
+        assert paths == {bot.paths_for("demo2")["journal"]}
+        assert bot.paths_for("demo2")["journal"] != bot.paths_for("demo")["journal"]
+    finally:
+        _stop(patches)
+
+
+def test_aoa_keeps_the_common_same_bar_lock(monkeypatch):
+    """전략이 바뀌어도 "같은 신호봉으로 두 번 진입하지 않는다"는 공통 게이트다."""
+    monkeypatch.setenv("RULE_STRATEGY_DEMO2", "aoa")
+    raw = _aoa_raw_df(-1)
+    signal_bar = str(raw["timestamp"].iloc[-2])
+    patches = _base_patches()
+    _start(patches)
+    try:
+        with patch("src.futures_rule_bot.fetch_ohlcv_df", return_value=raw), \
+             patch("src.futures_rule_bot.read_entries", return_value=[
+                 {"event": "entered", "symbol": "BTC/USDT:USDT", "signal_bar_timestamp": signal_bar}]), \
+             patch("src.futures_rule_bot.open_position_with_bracket") as mock_open:
+            cycle = bot.run_once(MagicMock(), env="demo2", consecutive_losses=0, daily_pnl_pct=0.0)
+
+        assert cycle["symbols"]["BTC/USDT:USDT"]["event"] == "skipped_same_signal_bar"
+        # 다른 심볼은 이 봉으로 진입한 기록이 없으니 들어가도 된다 — BTC만 막혀야 한다.
+        assert "BTC/USDT:USDT" not in [c.args[1] for c in mock_open.call_args_list]
+    finally:
+        _stop(patches)
+
+
+def test_aoa_is_not_blocked_by_the_trend_only_gates(monkeypatch):
+    """레짐 숏차단·저변동 하한은 trend 전용이다 — aoa 숏이 상승 레짐이라고 버려지면 안 된다."""
+    monkeypatch.setenv("RULE_STRATEGY_DEMO2", "aoa")
+    patches = _base_patches()
+    _start(patches)
+    try:
+        with patch("src.futures_rule_bot.fetch_ohlcv_df", return_value=_aoa_raw_df(+1)), \
+             patch("src.futures_rule_bot.is_above_long_sma", return_value=True), \
+             patch("src.futures_rule_bot.passes_volatility_floor", return_value=False), \
+             patch("src.futures_rule_bot.get_notional_cap", return_value=None), \
+             patch("src.futures_rule_bot.open_position_with_bracket", return_value={"status": "opened"}):
+            cycle = bot.run_once(MagicMock(), env="demo2", consecutive_losses=0, daily_pnl_pct=0.0)
+
+        result = cycle["symbols"]["BTC/USDT:USDT"]
+        assert result["event"] == "entered" and result["signal"] == "SHORT"
+    finally:
+        _stop(patches)
+
+
+def test_run_once_refuses_an_unknown_strategy(monkeypatch):
+    monkeypatch.setenv("RULE_STRATEGY_DEMO2", "aoaa")
+    with pytest.raises(ValueError):
+        bot.run_once(MagicMock(), env="demo2", consecutive_losses=0, daily_pnl_pct=0.0)
+
+
+def test_run_once_refuses_an_unknown_env():
+    with pytest.raises(ValueError):
+        bot.run_once(MagicMock(), env="demo3", consecutive_losses=0, daily_pnl_pct=0.0)

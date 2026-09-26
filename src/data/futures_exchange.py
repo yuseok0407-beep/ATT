@@ -4,10 +4,13 @@ import pandas as pd
 from src.core.config import (
     BINANCE_FUTURES_API_KEY,
     BINANCE_FUTURES_API_SECRET,
+    BINANCE_FUTURES_DEMO2_API_KEY,
+    BINANCE_FUTURES_DEMO2_API_SECRET,
     BINANCE_FUTURES_LIVE_API_KEY,
     BINANCE_FUTURES_LIVE_API_SECRET,
     MARGIN_MODE,
 )
+from src.core.envs import check_env
 
 
 class LiveKeysNotConfiguredError(RuntimeError):
@@ -16,6 +19,14 @@ class LiveKeysNotConfiguredError(RuntimeError):
     데모 키를 실계좌인 척 대신 쓰거나 그 반대로 섞이는 사고를 막기 위해, 라이브 키가 없으면
     조용히 데모로 폴백하지 않고 명확히 실패한다 — 호출자(대시보드 등)가 이걸 잡아서 400으로
     안내해야 한다."""
+
+
+class Demo2KeysNotConfiguredError(LiveKeysNotConfiguredError):
+    """env="demo2"인데 BINANCE_FUTURES_DEMO2_API_KEY/SECRET이 없을 때(2026-09-26).
+
+    LiveKeysNotConfiguredError를 상속하는 이유: 대시보드·텔레그램이 이미 "그 계좌 키가 없다"를
+    이 예외로 잡아서 안내하고 있어서, 같은 경로를 그대로 탄다. 데모 키로 폴백하지 않는 이유도
+    같다 — 폴백하면 두 전략이 한 계좌에서 서로의 포지션을 건드린다."""
 
 
 def get_futures_client(env: str = "demo") -> ccxt.binance:
@@ -31,12 +42,20 @@ def get_futures_client(env: str = "demo") -> ccxt.binance:
     env="live"면 실제 자금이 오가는 진짜 계정에 붙는다(BINANCE_FUTURES_LIVE_API_KEY/SECRET,
     binance.com 실제 계정 API 관리에서 발급 — 데모 키와 절대 같은 값이면 안 됨). 데모와 실계좌를
     대시보드에서 동시에 볼 수 있게 하기 위한 구분(2026-08-22)."""
+    check_env(env)
     if env == "live":
         if not BINANCE_FUTURES_LIVE_API_KEY or not BINANCE_FUTURES_LIVE_API_SECRET:
             raise LiveKeysNotConfiguredError(
                 "BINANCE_FUTURES_LIVE_API_KEY/BINANCE_FUTURES_LIVE_API_SECRET가 .env에 설정되지 않았습니다."
             )
         api_key, api_secret = BINANCE_FUTURES_LIVE_API_KEY, BINANCE_FUTURES_LIVE_API_SECRET
+    elif env == "demo2":
+        # 두 번째 데모 계좌(2026-09-26) — 연결 방식은 데모와 같고(enable_demo_trading) 키만 다르다.
+        if not BINANCE_FUTURES_DEMO2_API_KEY or not BINANCE_FUTURES_DEMO2_API_SECRET:
+            raise Demo2KeysNotConfiguredError(
+                "BINANCE_FUTURES_DEMO2_API_KEY/BINANCE_FUTURES_DEMO2_API_SECRET가 .env에 설정되지 않았습니다."
+            )
+        api_key, api_secret = BINANCE_FUTURES_DEMO2_API_KEY, BINANCE_FUTURES_DEMO2_API_SECRET
     else:
         api_key, api_secret = BINANCE_FUTURES_API_KEY, BINANCE_FUTURES_API_SECRET
 

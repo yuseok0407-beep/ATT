@@ -4,7 +4,7 @@ import pytest
 
 from dashboard import app as dashboard_app
 from src.data.futures_exchange import LiveKeysNotConfiguredError
-from src.execution import excursion, filter_stats
+from src.execution import env_paths, excursion, filter_stats
 
 
 class _FakeClient:
@@ -107,7 +107,7 @@ def test_api_risk_reset_streak_uses_demo_journal_by_default(client, monkeypatch)
     assert resp.status_code == 200
     body = resp.get_json()
     assert body["status"] == "ok"
-    assert captured["journal_path"] == dashboard_app.JOURNAL_PATH
+    assert captured["journal_path"] == env_paths.paths_for("demo")["journal"]
 
 
 def test_api_risk_reset_streak_uses_live_journal_when_env_live(client, monkeypatch):
@@ -121,7 +121,7 @@ def test_api_risk_reset_streak_uses_live_journal_when_env_live(client, monkeypat
 
     resp = client.post("/api/risk/reset-streak?env=live")
     assert resp.status_code == 200
-    assert captured["journal_path"] == dashboard_app.LIVE_JOURNAL_PATH
+    assert captured["journal_path"] == env_paths.paths_for("live")["journal"]
 
 
 def test_api_status_demo_and_live_use_different_journal_and_state_paths(client, monkeypatch):
@@ -140,8 +140,8 @@ def test_api_status_demo_and_live_use_different_journal_and_state_paths(client, 
 
     assert captured["journal_paths"][0] != captured["journal_paths"][1]
     assert captured["state_paths"][0] != captured["state_paths"][1]
-    assert captured["journal_paths"][0] == dashboard_app.JOURNAL_PATH
-    assert captured["journal_paths"][1] == dashboard_app.LIVE_JOURNAL_PATH
+    assert captured["journal_paths"][0] == env_paths.paths_for("demo")["journal"]
+    assert captured["journal_paths"][1] == env_paths.paths_for("live")["journal"]
 
 
 def test_api_public_ip_returns_get_public_ip_result(client, monkeypatch):
@@ -205,7 +205,7 @@ def test_api_conditions_returns_rows_for_the_env_symbols(client, monkeypatch):
     계산 자체는 core.signal_status가 하므로 여기서는 라우트 배선만 확인한다."""
     captured = {}
 
-    def _collect(symbols):
+    def _collect(symbols, strategy="trend"):
         captured["symbols"] = list(symbols)
         return {"timeframe": "1h", "adx_threshold": 30.0, "sma_period": 10,
                 "regime_sma_period": 400, "cross_near_pct": 1.0,
@@ -284,7 +284,7 @@ def test_api_status_includes_todays_filter_blocks(client, monkeypatch, tmp_path)
     stats_path = str(tmp_path / "stats.json")
     filter_stats.record("skipped_low_volatility", "BTC/USDT:USDT", "bar1",
                         path=stats_path, today="2026-09-09")
-    monkeypatch.setattr(dashboard_app, "FILTER_STATS_PATH", stats_path)
+    monkeypatch.setitem(env_paths.DEMO_PATHS, "filter_stats", stats_path)
 
     body = client.get("/api/status").get_json()
 
@@ -303,7 +303,7 @@ def test_api_status_includes_the_excursion_of_an_open_position(client, monkeypat
     excursion_path = str(tmp_path / "exc.json")
     excursion.update("BTC/USDT:USDT", entry_price=100.0, stop_loss_price=99.0,
                      mark_price=101.6, side="long", path=excursion_path)
-    monkeypatch.setattr(dashboard_app, "EXCURSION_PATH", excursion_path)
+    monkeypatch.setitem(env_paths.DEMO_PATHS, "excursion", excursion_path)
 
     body = client.get("/api/status").get_json()
 
@@ -354,3 +354,41 @@ def test_api_status_config_comes_from_the_single_strategy_config(client, monkeyp
     assert config == dashboard_app.current_strategy_config()
     # 진입 판단에 실제로 쓰이는 필터들이 화면에 빠져 있으면 "왜 진입을 안 하지"를 화면만 보고 알 수 없다
     assert "regime_sma_period" in config and "min_atr_to_stop_ratio" in config
+
+
+# --- demo2 (2026-09-26) ------------------------------------------------------------
+
+def test_demo2_is_a_known_env_with_its_own_journal(client, monkeypatch):
+    captured = {}
+    monkeypatch.setattr(dashboard_app, "reset_consecutive_losses",
+                        lambda journal_path=None: captured.setdefault("path", journal_path) or {})
+    resp = client.post("/api/risk/reset-streak?env=demo2")
+    assert resp.status_code == 200
+    assert captured["path"] == env_paths.paths_for("demo2")["journal"]
+    assert captured["path"] != env_paths.paths_for("demo")["journal"]
+
+
+def test_demo2_conditions_use_the_demo2_strategy(client, monkeypatch):
+    monkeypatch.setenv("RULE_STRATEGY_DEMO2", "aoa")
+    captured = {}
+
+    def _collect(symbols, strategy="trend"):
+        captured["strategy"] = strategy
+        return {"strategy": strategy, "symbols": [], "errors": []}
+
+    monkeypatch.setattr(dashboard_app, "collect_conditions", _collect)
+    assert client.get("/api/conditions?env=demo2").status_code == 200
+    assert captured["strategy"] == "aoa"
+    client.get("/api/conditions?env=demo")
+    assert captured["strategy"] == "trend"
+
+
+def test_starting_demo2_without_keys_is_refused_before_spawning(client, monkeypatch):
+    def _no_keys(env="demo"):
+        raise LiveKeysNotConfiguredError("BINANCE_FUTURES_DEMO2_API_KEY/SECRET 미설정")
+
+    monkeypatch.setattr(dashboard_app, "_get_client", _no_keys)
+    monkeypatch.setattr(dashboard_app.bot_process, "start",
+                        lambda env: pytest.fail("키 없이 봇 프로세스를 띄우면 안 된다"))
+    resp = client.post("/api/bot/start?env=demo2")
+    assert resp.status_code == 400

@@ -270,3 +270,82 @@ def test_none_matches_the_old_require_rsi_confirm_false():
     df = _crossing_up()
     assert (detect_signal(df, adx_threshold=1, sma_period=10, require_rsi_confirm=False)
             == detect_signal(df, adx_threshold=1, sma_period=10, direction_filter="none"))
+
+
+# --- aoa 전략 (2026-09-26, demo2) -----------------------------------------------------
+
+import numpy as np  # noqa: E402
+
+from src.core import futures_strategy as fs  # noqa: E402
+
+
+def _aoa_df(direction=-1, n=120, move=4.0):
+    """평평하다가 마지막 4봉에 direction 쪽으로 move만큼 움직인다. 꼬리는 반대쪽에 달아서
+    마지막 종가가 24봉 범위의 끝에 오게 한다(-1이면 바닥, +1이면 천장)."""
+    closes = np.full(n, 100.0)
+    highs, lows = closes + 0.5, closes - 0.5
+    for k, i in enumerate(range(n - 4, n)):
+        c = 100.0 + direction * move * (k + 1) / 4
+        closes[i] = c
+        highs[i] = c + (1.5 if direction < 0 else 0.2)
+        lows[i] = c - (0.2 if direction < 0 else 1.5)
+    return pd.DataFrame({"timestamp": pd.date_range("2026-01-01", periods=n, freq="h"),
+                         "open": closes, "high": highs, "low": lows, "close": closes, "volume": 1.0})
+
+
+def test_aoa_goes_long_after_a_sharp_drop_to_the_bottom_of_the_range():
+    df = _aoa_df(-1)
+    features = fs.aoa_features(df)
+    assert features["range_pos"] <= 0.2 and features["move_atr"] <= -1.0 and features["vol_ratio"] >= 1.0
+    assert fs.detect_aoa_signal(df) == "LONG"
+
+
+def test_aoa_goes_short_after_a_sharp_rise_to_the_top_of_the_range():
+    assert fs.detect_aoa_signal(_aoa_df(+1)) == "SHORT"
+
+
+def test_aoa_ignores_a_small_move_even_at_the_edge_of_the_range():
+    """범위 끝이어도 ATR 1배 미만의 움직임이면 들어가지 않는다."""
+    df = _aoa_df(-1, move=0.6)
+    assert fs.aoa_features(df)["range_pos"] <= 0.2
+    assert fs.detect_aoa_signal(df) is None
+
+
+def test_aoa_ignores_quiet_markets():
+    features = {"range_pos": 0.05, "move_atr": -2.0, "vol_ratio": 0.9}
+    assert fs.aoa_signal_from_features(features) is None
+    assert fs.aoa_signal_from_features({**features, "vol_ratio": 1.0}) == "LONG"
+
+
+def test_aoa_needs_enough_closed_bars():
+    df = _aoa_df(-1)
+    assert fs.aoa_features(df.iloc[-(fs.aoa_min_bars() - 1):]) is None
+    assert fs.aoa_features(df.iloc[-fs.aoa_min_bars():]) is not None
+
+
+def test_aoa_uses_only_the_bars_it_is_given():
+    """마지막 봉을 잘라내면 판정이 그 전 봉 기준으로 바뀐다 — 실거래가 진행 중 봉을 버리는
+    트리밍이 이 함수에서도 그대로 의미를 갖는지 확인."""
+    df = _aoa_df(-1)
+    assert fs.detect_aoa_signal(df) == "LONG"
+    assert fs.aoa_features(df.iloc[:-4])["move_atr"] == pytest.approx(0.0)
+
+
+def test_aoa_bracket_is_three_percent_stop_one_percent_target():
+    stop, target = fs.strategy_bracket_prices("aoa", 100.0, "long")
+    assert stop == pytest.approx(97.0) and target == pytest.approx(101.0)
+    stop, target = fs.strategy_bracket_prices("aoa", 100.0, "short")
+    assert stop == pytest.approx(103.0) and target == pytest.approx(99.0)
+
+
+def test_trend_bracket_is_unchanged():
+    assert fs.strategy_bracket_prices("trend", 100.0, "long") == compute_bracket_prices(100.0, "long")
+
+
+def test_unknown_strategy_is_an_error_not_a_trend_fallback():
+    """.env 오타가 조용히 trend로 돌면 demo2가 데모와 같은 전략을 돌며 "다른 전략 시험 중"이라고
+    믿게 된다."""
+    with pytest.raises(ValueError):
+        fs.check_strategy("aoaa")
+    with pytest.raises(ValueError):
+        fs.strategy_bracket_prices("aoaa", 100.0, "long")

@@ -1,8 +1,10 @@
+from pathlib import Path
+
 import pytest
 
 from dashboard import app as dashboard_app
 from src import futures_rule_bot
-from src.execution import equity_log, excursion, filter_stats
+from src.execution import env_paths, equity_log, excursion, filter_stats
 
 # futures_rule_bot의 상태 파일 경로는 모듈 전역이고 호출 시점에 읽히므로, 여기서 tmp_path로
 # 갈아끼우면 테스트가 실제 파일을 절대 못 건드린다.
@@ -12,10 +14,6 @@ _ISOLATED_PATHS = [
     (futures_rule_bot, "EXCURSION_PATH", "excursion.json"),
     (futures_rule_bot, "LIVE_EXCURSION_PATH", "excursion.live.json"),
     # 대시보드는 임포트 시점에 이름을 복사해 가므로 그쪽도 같이 갈아끼워야 한다.
-    (dashboard_app, "FILTER_STATS_PATH", "filter_stats.json"),
-    (dashboard_app, "LIVE_FILTER_STATS_PATH", "filter_stats.live.json"),
-    (dashboard_app, "EXCURSION_PATH", "excursion.json"),
-    (dashboard_app, "LIVE_EXCURSION_PATH", "excursion.live.json"),
     (filter_stats, "DEFAULT_PATH", "filter_stats.json"),
     (filter_stats, "LIVE_DEFAULT_PATH", "filter_stats.live.json"),
     (excursion, "DEFAULT_PATH", "excursion.json"),
@@ -37,3 +35,8 @@ def isolate_bot_state_files(tmp_path, monkeypatch):
     사고가 안 나도록 여기서 구조적으로 막는다(2026-09-09)."""
     for module, attr, filename in _ISOLATED_PATHS:
         monkeypatch.setattr(module, attr, str(tmp_path / filename))
+    # 계좌별 경로는 전부 env_paths.DEMO_PATHS에서 만들어진다(2026-09-26) — 여기를 갈아끼우면
+    # 모든 env(demo/live/demo2)의 저널·상태 파일이 한 번에 tmp로 간다. 이걸 빠뜨려서 한 번
+    # run_once가 경로 없이 불린 테스트들이 실제 데모 차단 통계에 테스트 값을 적은 적이 있다.
+    for key, path in list(env_paths.DEMO_PATHS.items()):
+        monkeypatch.setitem(env_paths.DEMO_PATHS, key, str(tmp_path / Path(path).name))

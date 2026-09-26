@@ -9,3 +9,7 @@ state/
 exports/
 .ohlcv_cache/
 .ohlcv_cache_3y/
+
+# aoa 공개 체결 원자료(약 600MB)와 그 파싱 캐시 — 커밋하지 않는다(docs/DEMO2_PLAN.md)
+demo2/**/*.csv
+.aoa_cache/

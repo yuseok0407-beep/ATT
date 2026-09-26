@@ -18,6 +18,7 @@ TELEGRAM_BOT_SCRIPT = PROJECT_ROOT / "scripts" / "run_telegram_bot.py"
 PID_PATHS = {
     "demo": PROJECT_ROOT / "state" / "futures_bot.pid",
     "live": PROJECT_ROOT / "state" / "futures_bot.live.pid",
+    "demo2": PROJECT_ROOT / "state" / "futures_bot.demo2.pid",  # 두 번째 데모 계좌(2026-09-26)
     "telegram": PROJECT_ROOT / "state" / "telegram_bot.pid",
 }
 
@@ -25,7 +26,8 @@ GRACEFUL_STOP_TIMEOUT_SECONDS = 15
 
 
 def _pid_path(key: str) -> Path:
-    return PID_PATHS.get(key, PID_PATHS["demo"])
+    # 모르는 key를 데모 PID 파일로 폴백하면 "demo2 중지"가 데모 봇을 죽인다 — KeyError로 막는다.
+    return PID_PATHS[key]
 
 
 def _launch_args(key: str) -> list[str]:
@@ -73,10 +75,24 @@ def _is_our_bot_process(pid: int, key: str = "demo") -> bool:
     PID 파일 하나만 믿지 않고 그 PID가 다른 프로그램에 재사용된 건 아닌지 커맨드라인으로 검증한다."""
     try:
         proc = psutil.Process(pid)
-        cmdline = " ".join(proc.cmdline())
-        return all(token in cmdline for token in _match_tokens(key))
+        args = proc.cmdline()
     except (psutil.NoSuchProcess, psutil.AccessDenied):
         return False
+    return _cmdline_matches(args, key)
+
+
+def _cmdline_matches(args: list[str], key: str) -> bool:
+    """문자열 포함이 아니라 **인자 단위로** 비교한다(2026-09-26) — "--env demo"는 "--env demo2"의
+    부분 문자열이라, 이어붙인 커맨드라인에서 찾으면 demo2 프로세스가 데모 봇으로 인정된다."""
+    joined = " ".join(args)
+    tokens = _match_tokens(key)
+    if not all(token in joined for token in tokens if not token.startswith("--env ")):
+        return False
+    env_tokens = [token.split(" ", 1)[1] for token in tokens if token.startswith("--env ")]
+    if not env_tokens:
+        return True
+    pairs = {args[i + 1] for i in range(len(args) - 1) if args[i] == "--env"}
+    return all(env in pairs for env in env_tokens)
 
 
 def get_status(key: str = "demo") -> dict:

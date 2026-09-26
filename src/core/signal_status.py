@@ -14,6 +14,11 @@
 import pandas as pd
 
 from src.core.config import (
+    AOA_MIN_MOVE_ATR,
+    AOA_MIN_VOL_RATIO,
+    AOA_MOVE_BARS,
+    AOA_RANGE_BARS,
+    AOA_RANGE_EDGE,
     MIN_ATR_TO_STOP_RATIO,
     RULE_DIRECTION_FILTER,
     RULE_ADX_THRESHOLD,
@@ -23,7 +28,11 @@ from src.core.config import (
     STOP_LOSS_PCT,
 )
 from src.core.futures_strategy import (
+    aoa_features,
+    aoa_min_bars,
+    aoa_signal_from_features,
     apply_regime_filter,
+    check_strategy,
     atr_to_stop_ratio,
     detect_signal,
     is_above_long_sma,
@@ -197,6 +206,72 @@ def evaluate_conditions(
     return result
 
 
+def evaluate_aoa_conditions(
+    df: pd.DataFrame,
+    symbol: str = "",
+    *,
+    range_edge: float = AOA_RANGE_EDGE,
+    min_move_atr: float = AOA_MIN_MOVE_ATR,
+    min_vol_ratio: float = AOA_MIN_VOL_RATIO,
+) -> dict:
+    """aoa 전략(2026-09-26)의 조건 근접도. 판정은 `aoa_signal_from_features` 그대로다.
+
+    후보 방향은 **지금 24시간 범위의 어느 쪽 절반에 있는지**로 정한다 — 아래 절반이면 바닥에서
+    사는 롱 후보, 위 절반이면 천장에서 파는 숏 후보.
+
+    proximity(0~1)는 세 요소의 곱이다:
+      - range_score: 범위 끝(하위/상위 range_edge)에 얼마나 다가갔는지(안에 들어가면 1)
+      - move_score:  최근 움직임이 후보 방향 반대로 ATR 몇 배인지(min_move_atr 이상이면 1)
+      - vol_score:   변동성이 평소 대비 얼마인지(min_vol_ratio 이상이면 1)"""
+    result = {
+        "symbol": symbol, "strategy": "aoa", "bars": len(df), "close": None,
+        "candidate_side": None, "signal": None, "ready": False, "proximity": 0.0, "blockers": [],
+        "range_pos": None, "range_edge": range_edge, "range_ok": False,
+        "move_atr": None, "min_move_atr": min_move_atr, "move_ok": False,
+        "vol_ratio": None, "min_vol_ratio": min_vol_ratio, "vol_ok": False,
+    }
+    features = aoa_features(df)
+    if features is None:
+        result["blockers"].append(f"캔들 부족 또는 워밍업 중 ({len(df)}/{aoa_min_bars()})")
+        return result
+
+    signal = aoa_signal_from_features(features, range_edge=range_edge, min_move_atr=min_move_atr,
+                                      min_vol_ratio=min_vol_ratio)
+    pos, move, vol = features["range_pos"], features["move_atr"], features["vol_ratio"]
+    candidate_side = "LONG" if pos < 0.5 else "SHORT"
+    if candidate_side == "LONG":
+        range_ok = pos <= range_edge
+        range_score = 1.0 if range_ok else max(0.0, 1 - (pos - range_edge) / (0.5 - range_edge))
+        move_ok = move <= -min_move_atr
+        move_score = min(1.0, max(0.0, -move / min_move_atr)) if min_move_atr > 0 else 1.0
+    else:
+        range_ok = pos >= 1 - range_edge
+        range_score = 1.0 if range_ok else max(0.0, 1 - ((1 - range_edge) - pos) / (0.5 - range_edge))
+        move_ok = move >= min_move_atr
+        move_score = min(1.0, max(0.0, move / min_move_atr)) if min_move_atr > 0 else 1.0
+    vol_ok = vol >= min_vol_ratio
+    vol_score = min(1.0, vol / min_vol_ratio) if min_vol_ratio > 0 else 1.0
+
+    side_label = "바닥" if candidate_side == "LONG" else "천장"
+    blockers = []
+    if not range_ok:
+        blockers.append(f"{AOA_RANGE_BARS}봉 범위 {side_label}까지 멂 (위치 {pos:.0%})")
+    if not move_ok:
+        blockers.append(f"{AOA_MOVE_BARS}봉 움직임 {move:+.2f} ATR (필요 {'-' if candidate_side == 'LONG' else '+'}"
+                        f"{min_move_atr:g})")
+    if not vol_ok:
+        blockers.append(f"변동성 평소의 {vol:.2f}배 < {min_vol_ratio:g}")
+
+    result.update({
+        "close": float(df["close"].iloc[-1]), "candidate_side": candidate_side,
+        "signal": signal, "ready": signal is not None,
+        "range_pos": pos, "range_ok": range_ok, "move_atr": move, "move_ok": move_ok,
+        "vol_ratio": vol, "vol_ok": vol_ok, "blockers": blockers,
+        "proximity": round(range_score * move_score * vol_score, 4),
+    })
+    return result
+
+
 # --- 여러 종목을 한 번에 조회하는 계층 (대시보드 /api/conditions 와 텔레그램 /conditions 가 공유) ---
 
 CACHE_TTL_SECONDS = 20
@@ -215,7 +290,8 @@ def _fetch_closed_candles(symbol: str, limit: int):
     return df.iloc[:-1]
 
 
-def collect_conditions(symbols, *, ttl: float = CACHE_TTL_SECONDS, fetch=None) -> dict:
+def collect_conditions(symbols, *, strategy: str = "trend", ttl: float = CACHE_TTL_SECONDS,
+                       fetch=None) -> dict:
     """여러 종목의 조건 근접도를 모아 proximity 내림차순으로 돌려준다.
 
     종목마다 캔들을 새로 받아야 해서(레짐 SMA 때문에 402봉) 대시보드가 몇 초마다 부르면 낭비다 —
@@ -227,24 +303,33 @@ def collect_conditions(symbols, *, ttl: float = CACHE_TTL_SECONDS, fetch=None) -
     """
     import time
 
+    strategy = check_strategy(strategy)
     symbols = list(symbols)
-    key = tuple(symbols)
+    # 전략도 캐시 키에 넣는다 — 대시보드에서 DEMO↔DEMO2 탭을 오가면 같은 심볼 목록으로 다른
+    # 전략을 묻는다.
+    key = (strategy, tuple(symbols))
     now = time.time()
     if _cache["payload"] is not None and _cache["key"] == key and (now - _cache["at"]) < ttl:
         return _cache["payload"]
 
     fetch = fetch or _fetch_closed_candles
-    limit = max(101, RULE_REGIME_SMA_PERIOD + 2) if RULE_REGIME_SMA_PERIOD > 0 else 101
+    if strategy == "aoa":
+        limit, evaluate = max(101, aoa_min_bars() + 1), evaluate_aoa_conditions
+    else:
+        limit = max(101, RULE_REGIME_SMA_PERIOD + 2) if RULE_REGIME_SMA_PERIOD > 0 else 101
+        evaluate = evaluate_conditions
 
     rows, errors = [], []
     for symbol in symbols:
         try:
-            rows.append(evaluate_conditions(fetch(symbol, limit), symbol))
+            rows.append(evaluate(fetch(symbol, limit), symbol))
         except Exception as exc:  # noqa: BLE001 - 심볼 하나의 실패가 전체를 막지 않게
             errors.append({"symbol": symbol, "message": str(exc)})
 
     rows.sort(key=lambda r: (r["ready"], r["proximity"]), reverse=True)
     payload = {
+        "strategy": strategy,
+        "aoa_range_bars": AOA_RANGE_BARS, "aoa_move_bars": AOA_MOVE_BARS,
         "timeframe": RULE_TIMEFRAME, "adx_threshold": RULE_ADX_THRESHOLD,
         "sma_period": RULE_SMA_PERIOD, "regime_sma_period": RULE_REGIME_SMA_PERIOD,
         "cross_near_pct": CROSS_NEAR_PCT, "symbols": rows, "errors": errors,

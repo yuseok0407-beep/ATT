@@ -4,13 +4,16 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from src.core.config import (
+    BINANCE_FUTURES_DEMO2_API_KEY,
     BREAKER_HALT_ALERT_HOURS,
     CONSECUTIVE_LOSS_COOLDOWN_HOURS,
     FUTURES_SYMBOLS,
     HEARTBEAT_STALE_SECONDS,
     TELEGRAM_DAILY_SUMMARY_HOUR,
     TELEGRAM_POLL_INTERVAL_SECONDS,
+    strategy_for_env,
 )
+from src.core.envs import ENVS, label as env_label
 from src.core.signal_status import collect_conditions
 from src.data.futures_exchange import (
     LiveKeysNotConfiguredError,
@@ -21,22 +24,13 @@ from src.data.futures_exchange import (
 from src.data.public_ip import get_public_ip
 from src.execution import bot_process, excursion, filter_stats, strategy_versions
 from src.execution.futures_orders import get_bracket_prices
-from src.execution.heartbeat import DEFAULT_PATH as HEARTBEAT_DEMO_PATH
-from src.execution.heartbeat import LIVE_DEFAULT_PATH as HEARTBEAT_LIVE_PATH
+from src.execution.env_paths import paths_for
 from src.execution.heartbeat import read_heartbeat
 from src.execution.journal import read_entries
 from src.execution import equity_log
 from src.execution.performance import summarize_day
 from src.execution.telegram_client import get_updates, send_message
-from src.futures_rule_bot import (
-    EXCURSION_PATH,
-    FILTER_STATS_PATH,
-    JOURNAL_PATH,
-    LIVE_EXCURSION_PATH,
-    LIVE_FILTER_STATS_PATH,
-    LIVE_JOURNAL_PATH,
-    reset_consecutive_losses,
-)
+from src.futures_rule_bot import reset_consecutive_losses
 
 logger = logging.getLogger(__name__)
 
@@ -65,18 +59,25 @@ _CONFIG_LABELS = {
     "max_concurrent_positions": "동시보유상한", "max_daily_loss_pct": "일일손실한도",
     "max_consecutive_losses": "연속손실한도", "consecutive_loss_cooldown_hours": "연속손실쿨다운",
     "symbols": "감시종목", "logic_revision": "규칙코드개정",
+    # aoa 전략(2026-09-26, demo2)
+    "strategy": "전략", "aoa_range_bars": "범위봉수", "aoa_range_edge": "범위끝비율",
+    "aoa_move_bars": "움직임봉수", "aoa_min_move_atr": "최소움직임ATR",
+    "aoa_vol_lookback": "변동성기준봉수", "aoa_min_vol_ratio": "최소변동성배수",
+    "take_profit_pct": "익절폭",
 }
 
 # 여기 목록과 _COMMANDS는 항상 같아야 한다 — 안 그러면 동작하는데 아무도 모르는 명령이 생긴다
 # (실제로 /conditions가 그랬다). tests/test_telegram_bot.py가 둘이 어긋나면 실패시킨다.
 _HELP_TEXT = (
     "사용 가능한 명령:\n"
-    "/status — 데모/실계좌 상태 조회 (포지션·손절·익절·보유 중 최고점)\n"
-    "/conditions — 종목별 진입 조건 근접도\n"
+    "/status — 계좌별 상태 조회 (포지션·손절·익절·보유 중 최고점)\n"
+    "/conditions — 종목별 진입 조건 근접도 (데모 전략)\n"
+    "/conditions_demo2 — 종목별 진입 조건 근접도 (데모2 전략)\n"
     "/summary — 어제 하루 성과 요약 (매일 자동으로도 발송)\n"
     "/start_demo, /stop_demo — 데모 봇 시작/중지\n"
     "/start_live, /stop_live — 실계좌 봇 시작/중지 (실제 자금에 영향)\n"
-    "/reset_streak_demo, /reset_streak_live — 연속손실 카운트를 0으로 리셋\n"
+    "/start_demo2, /stop_demo2 — 데모2 봇 시작/중지\n"
+    "/reset_streak_demo, /reset_streak_live, /reset_streak_demo2 — 연속손실 카운트를 0으로 리셋\n"
     "/help — 이 메시지"
 )
 
@@ -87,31 +88,48 @@ _COMMANDS = {
     "/stop_live": ("live", "stop"),
     "/reset_streak_demo": ("demo", "reset_streak"),
     "/reset_streak_live": ("live", "reset_streak"),
+    "/start_demo2": ("demo2", "start"),
+    "/stop_demo2": ("demo2", "stop"),
+    "/reset_streak_demo2": ("demo2", "reset_streak"),
     "/status": ("", "status"),
     "/summary": ("", "summary"),
-    "/conditions": ("", "conditions"),
+    "/conditions": ("demo", "conditions"),
+    "/conditions_demo2": ("demo2", "conditions"),
     "/help": ("", "help"),
 }
 
 
+# 경로는 env_paths 한 곳에서 받는다 — "live가 아니면 데모"로 분기하면 demo2 알림이 데모 저널을
+# 읽는다(2026-09-26).
 def _journal_path(env: str) -> str:
-    return LIVE_JOURNAL_PATH if env == "live" else JOURNAL_PATH
+    return paths_for(env)["journal"]
 
 
 def _filter_stats_path(env: str) -> str:
-    return LIVE_FILTER_STATS_PATH if env == "live" else FILTER_STATS_PATH
+    return paths_for(env)["filter_stats"]
 
 
 def _excursion_path(env: str) -> str:
-    return LIVE_EXCURSION_PATH if env == "live" else EXCURSION_PATH
+    return paths_for(env)["excursion"]
 
 
 def _equity_log_path(env: str) -> str:
-    return equity_log.LIVE_DEFAULT_PATH if env == "live" else equity_log.DEFAULT_PATH
+    return paths_for(env)["equity_log"]
 
 
 def _heartbeat_path(env: str) -> str:
-    return HEARTBEAT_LIVE_PATH if env == "live" else HEARTBEAT_DEMO_PATH
+    return paths_for(env)["heartbeat"]
+
+
+def reported_envs() -> list[str]:
+    """상태·요약에 나오는 계좌. demo2는 키가 설정됐거나 봇이 떠 있을 때만 — 아직 계좌를 안 만든
+    동안 매일 "[DEMO2] 키 미설정" 줄이 붙으면 그게 잡음이 된다."""
+    envs = []
+    for env in ENVS:
+        if env == "demo2" and not BINANCE_FUTURES_DEMO2_API_KEY and not bot_process.get_status(env)["running"]:
+            continue
+        envs.append(env)
+    return envs
 
 
 def load_state(path: str = STATE_PATH) -> dict:
@@ -169,7 +187,7 @@ def _fmt_config_change(change: dict) -> str:
 
 
 def _format_entry(env: str, entry: dict) -> str | None:
-    label = "LIVE" if env == "live" else "DEMO"
+    label = env_label(env)
     symbol = entry.get("symbol")
     short_symbol = symbol.split("/")[0] if symbol else "?"
     event = entry.get("event")
@@ -249,7 +267,7 @@ def check_new_journal_entries(env: str, state: dict) -> list[str]:
 def check_bot_status_change(env: str, state: dict) -> str | None:
     """봇 프로세스가 켜짐<->꺼짐으로 전이할 때만 알린다(매번 알리면 스팸). 최초 호출은 현재 상태만
     기록."""
-    label = "LIVE" if env == "live" else "DEMO"
+    label = env_label(env)
     running = bot_process.get_status(env)["running"]
     env_state = state.setdefault(env, {})
     was_running = env_state.get("was_running")
@@ -267,7 +285,7 @@ def check_heartbeat_stall(env: str, state: dict) -> str | None:
     기다리며 멈추거나 예외 루프에 빠지면 알림이 한 건도 안 가고, /status를 직접 쳐보기 전엔 알
     방법이 없었다. 봇이 꺼져 있을 때는 아무 말도 안 한다(하트비트가 낡은 게 당연하고,
     check_bot_status_change가 이미 알렸다). 상태가 바뀔 때만 한 번씩 보낸다."""
-    label = "LIVE" if env == "live" else "DEMO"
+    label = env_label(env)
     env_state = state.setdefault(env, {})
     was_stalled = env_state.get("heartbeat_stalled", False)
 
@@ -301,7 +319,7 @@ def check_breaker_halt(env: str, state: dict, now: datetime = None) -> str | Non
     이미 맡는다). 하트비트에 필드가 없으면(재시작 전 옛 봇 코드) 알 수 없으므로 아무것도 안 바꾼다."""
     if BREAKER_HALT_ALERT_HOURS <= 0:
         return None
-    label = "LIVE" if env == "live" else "DEMO"
+    label = env_label(env)
     env_state = state.setdefault(env, {})
     now = now or datetime.now().astimezone()
 
@@ -369,7 +387,7 @@ def _proximity_bar(value: float, width: int = 10) -> str:
     return "█" * filled + "░" * (width - filled)
 
 
-def format_conditions(limit: int = 6) -> str:
+def format_conditions(limit: int = 6, env: str = "demo") -> str:
     """진입 조건에 가까운 순으로 종목을 보여준다 — "왜 안 들어가는지"를 폰에서 바로 보기 위한 것.
 
     계산은 대시보드 /api/conditions와 완전히 같은 함수(core.signal_status.collect_conditions)를
@@ -377,7 +395,11 @@ def format_conditions(limit: int = 6) -> str:
     달라서(SOXL은 실계좌에만 있음) 데모 기준 목록을 쓰고, 연결이 안 되면 설정값 전체로 폴백한다.
 
     limit: 상위 몇 종목까지 자세히 보여줄지 — 12종목을 전부 풀어 쓰면 한 메시지가 너무 길어져서
-    나머지는 근접도만 한 줄로 접는다."""
+    나머지는 근접도만 한 줄로 접는다.
+
+    env: 어느 계좌의 **전략**으로 볼지(2026-09-26). 심볼 목록은 계좌가 달라도 데모 마켓 기준이다
+    (demo2도 데모 마켓이라 같다)."""
+    strategy = strategy_for_env(env)
     try:
         client = get_futures_client("demo")
         client.load_markets()
@@ -386,13 +408,15 @@ def format_conditions(limit: int = 6) -> str:
         symbols = list(FUTURES_SYMBOLS)
 
     try:
-        payload = collect_conditions(symbols)
+        payload = collect_conditions(symbols, strategy=strategy)
     except Exception as exc:
         return f"조건 조회 실패: {exc}"
 
     rows = payload["symbols"]
     if not rows:
         return "조회 가능한 종목이 없습니다."
+    if strategy == "aoa":
+        return _format_aoa_conditions(payload, rows, limit, env)
 
     lines = [f"[진입 조건] {payload['timeframe']} · ADX≥{payload['adx_threshold']:.0f} · "
              f"SMA{payload['sma_period']} 돌파 · 레짐 SMA{payload['regime_sma_period']}"]
@@ -415,6 +439,34 @@ def format_conditions(limit: int = 6) -> str:
             f"\n  {' · '.join(row['blockers'])}"
         )
 
+    rest = rows[limit:]
+    if rest:
+        lines.append("\n" + ", ".join(
+            f"{r['symbol'].split('/')[0]} {r['proximity'] * 100:.0f}%" for r in rest))
+    for err in payload.get("errors", []):
+        lines.append(f"\n⚠️ {err['symbol'].split('/')[0]} 조회 실패: {err['message'][:60]}")
+    return "\n".join(lines)
+
+
+def _format_aoa_conditions(payload: dict, rows: list, limit: int, env: str) -> str:
+    """aoa 전략의 근접도 — 범위 위치·움직임·변동성 세 가지를 보여준다."""
+    lines = [f"[{env_label(env)} 진입 조건 · aoa] {payload['timeframe']} · "
+             f"{payload['aoa_range_bars']}봉 범위 끝 + {payload['aoa_move_bars']}봉 급변 + 변동성"]
+    for row in rows[:limit]:
+        name = row["symbol"].split("/")[0]
+        if row["ready"]:
+            lines.append(f"\n🔥 {name} — 지금 {_SIGNAL_LABELS.get(row['signal'], row['signal'])} 신호!")
+            continue
+        if row["candidate_side"] is None:
+            lines.append(f"\n▸ {name} — {', '.join(row['blockers']) or '계산 불가'}")
+            continue
+        side = _SIGNAL_LABELS.get(row["candidate_side"], row["candidate_side"])
+        lines.append(
+            f"\n▸ {name} {side} 대기  {_proximity_bar(row['proximity'])} {row['proximity'] * 100:.0f}%"
+            f"\n  범위 위치 {row['range_pos']:.0%} · 움직임 {row['move_atr']:+.2f} ATR"
+            f" · 변동성 {row['vol_ratio']:.2f}배"
+            f"\n  {' · '.join(row['blockers'])}"
+        )
     rest = rows[limit:]
     if rest:
         lines.append("\n" + ", ".join(
@@ -449,7 +501,7 @@ def _format_equity_line(env: str, day: str) -> str:
 
 def _format_day_line(env: str, day: str) -> str:
     """한 계좌의 하루 성과를 두어 줄로. 거래가 없었으면 그렇다고만 말한다."""
-    label = "LIVE" if env == "live" else "DEMO"
+    label = env_label(env)
     stats = summarize_day(read_entries(path=_journal_path(env)), day)
 
     if not stats["trades"]:
@@ -502,7 +554,7 @@ def _format_goal_line(env: str) -> str:
     period = equity_log.period_return(path=_equity_log_path(env), days=30)
     if not period:
         return ""
-    label = "LIVE" if env == "live" else "DEMO"
+    label = env_label(env)
     pct = period["return_pct"] * 100
     return (f"[{label}] 최근 {period['days']}일 자산 {period['start']:.2f} → "
             f"{period['end']:.2f} ({pct:+.2f}%) · 목표 월 +10%")
@@ -515,10 +567,9 @@ def build_daily_summary(day: str) -> str:
     (2026-09-24). 그 전에는 수수료가 빠진 실현손익만 알려서 "수익이라는데 총자산은 그대로"가
     반복됐다 — 요약이 계좌 화면과 어긋나면 요약 자체가 쓸모없다.
     """
-    lines = [f"📊 일일 요약 · {day}",
-             _format_day_line("demo", day),
-             _format_day_line("live", day)]
-    goals = [line for line in (_format_goal_line("demo"), _format_goal_line("live")) if line]
+    envs = reported_envs()
+    lines = [f"📊 일일 요약 · {day}"] + [_format_day_line(env, day) for env in envs]
+    goals = [line for line in (_format_goal_line(env) for env in envs) if line]
     if goals:
         lines.append("— 목표 진행 —")
         lines.extend(goals)
@@ -563,7 +614,7 @@ def format_status(env: str) -> str:
     """[env] 실행 여부/하트비트 + 마진 자산 + 보유 포지션별 진입가·현재가·미실현손익·손절가·익절가.
     계좌 연결 자체가 실패해도(라이브 키 미설정 등) 실행 여부/하트비트는 이미 계산해둔 걸 그대로
     보여주고 그 아래에만 실패 사유를 붙인다 — 대시보드 api_status의 부분 실패 격리와 같은 철학."""
-    label = "LIVE" if env == "live" else "DEMO"
+    label = env_label(env)
     status = bot_process.get_status(env)
     heartbeat = read_heartbeat(path=_heartbeat_path(env))
 
@@ -613,7 +664,7 @@ def format_status(env: str) -> str:
                 + _format_excursion(excursions.get(symbol))
             )
     except LiveKeysNotConfiguredError:
-        lines.append("계좌 연결: 라이브 키 미설정")
+        lines.append(f"계좌 연결: {label} 키 미설정")
     except Exception as exc:
         lines.append(f"계좌 연결 실패: {exc}")
 
@@ -647,15 +698,23 @@ def run_once(state: dict, chat_id: str, token: str) -> dict:
         if action == "help":
             send_message(_HELP_TEXT, chat_id=chat_id, token=token)
         elif action == "conditions":
-            send_message(format_conditions(), chat_id=chat_id, token=token)
+            send_message(format_conditions(env=env), chat_id=chat_id, token=token)
         elif action == "summary":
             yesterday = (datetime.now().astimezone().date() - timedelta(days=1)).isoformat()
             send_message(build_daily_summary(yesterday), chat_id=chat_id, token=token)
         elif action == "status":
-            send_message(format_status("demo") + "\n\n" + format_status("live"), chat_id=chat_id, token=token)
+            send_message("\n\n".join(format_status(e) for e in reported_envs()), chat_id=chat_id, token=token)
         elif action == "start":
+            if env != "demo":
+                # 키가 없는 계좌의 봇을 띄우면 프로세스가 바로 죽는데 "시작 요청됨"만 답하게 된다
+                # (대시보드 /api/bot/start와 같은 사전 확인).
+                try:
+                    get_futures_client(env)
+                except LiveKeysNotConfiguredError as exc:
+                    send_message(f"⚠️ [{env_label(env)}] 시작 안 함 — {exc}", chat_id=chat_id, token=token)
+                    continue
             result = bot_process.start(env)
-            send_message(f"✅ [{env.upper()}] 봇 시작 요청됨 (pid={result.get('pid')})", chat_id=chat_id, token=token)
+            send_message(f"✅ [{env_label(env)}] 봇 시작 요청됨 (pid={result.get('pid')})", chat_id=chat_id, token=token)
         elif action == "stop":
             bot_process.stop(env)
             send_message(f"🛑 [{env.upper()}] 봇을 중지했습니다.", chat_id=chat_id, token=token)
@@ -666,7 +725,7 @@ def run_once(state: dict, chat_id: str, token: str) -> dict:
     if max_update_id is not None:
         state["update_offset"] = max_update_id + 1
 
-    for env in ("demo", "live"):
+    for env in ENVS:
         for message in check_new_journal_entries(env, state):
             send_message(message, chat_id=chat_id, token=token)
         status_message = check_bot_status_change(env, state)
