@@ -309,6 +309,15 @@ USDT-M 선물(레버리지 롱/숏)을 **순수 규칙 기반**으로 상시 감
   실제 주문을 낸다 — `_guard_live`가 `env != "live"`면 애초에 막을 필요가 없어서 통과시키고,
   `env="live"`인데 `confirm_live=False`면 막는다. 이 프로세스가 애초에 실계좌 client로 실행되고
   있다는 것 자체가 명시 의도이므로 매 진입마다 다시 확인하지 않는다.
+- **봇은 띄운 쪽과 분리된 프로세스다**(2026-09-28, `bot_process.start`가 `DETACHED_PROCESS`로 띄움).
+  예전엔 대시보드 콘솔을 물려받아서 대시보드 창을 닫으면 봇까지 같이 죽었다. 콘솔이 없으니 끄는 것도
+  콘솔 신호(CTRL_BREAK)가 아니라 **종료 요청 파일**(`state/*.stop`)이다 — 봇 루프가 사이클 사이
+  대기 중에 1초마다 확인하고 스스로 끝낸다(주문 도중에 끊기지 않게). 30초 안에 안 끝나면 강제 종료.
+  **Windows에서 분리된 프로세스에 CTRL_BREAK를 보내지 말 것** — 보내는 쪽 콘솔 전체에 갈 수 있다.
+  화면 로그는 stdout(분리 시 버려짐), 로깅 시작 전 오류만 `logs/{key}_process.err`.
+- **감시 루프는 봉 마감 직후(+3초)에 한 번 더 깬다**(2026-09-28, `seconds_until_next_cycle`). 신호는
+  마감 봉으로만 생기므로 30초 주기로만 돌면 신호 뒤 진입까지 기다리는 시간이 곧 진입 슬리피지다
+  (실측 중간값 39초). 주기 전체를 줄이지 않은 이유: 요청 수가 그만큼 늘고 IP 한도는 대시보드와 공유다.
 - `scripts/run_futures_bot.py --env demo|live` — 두 env를 완전히 독립된 OS 프로세스로 동시에
   띄운다. `bot_process.py`는 PID 파일을 env별로 분리(`state/futures_bot.pid` / `.live.pid`)하고,
   `_is_our_bot_process`가 cmdline에서 스크립트 이름뿐 아니라 `--env {env}`까지 확인해서 데모/실계좌

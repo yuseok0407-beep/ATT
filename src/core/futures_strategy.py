@@ -19,7 +19,9 @@ VALID_SIDES = ("long", "short")
 # 변경은 전략 버전(`execution.strategy_versions`)에 안 잡힌다. 올리고 봇을 재시작하면
 # config_changed에 logic_revision N→N+1이 남고 그게 새 버전이 된다.
 # 1: 규칙 봇 개시 / 2: 마감봉 신호(08-25) / 3: 같은 신호봉 재진입 잠금 + 진입가 괴리 검사(09-08)
-STRATEGY_LOGIC_REVISION = 3
+# 4: 봉 마감 직후(+3초)에 맞춰 판정(09-28) — 규칙은 같지만 진입 지연이 중간값 39초 → 수 초로
+#    줄어 진입 슬리피지·가격이탈 차단 빈도가 달라진다. 전후 비교를 하려고 버전 경계를 만든다.
+STRATEGY_LOGIC_REVISION = 4
 
 # SMA 돌파의 **방향**을 무엇으로 확인하는가. 값의 정의와 기본값은 `config.RULE_DIRECTION_FILTER`
 # 한 곳에 있다 — 설정이므로 바꿔도 STRATEGY_LOGIC_REVISION은 안 올린다(저널의 config_changed가

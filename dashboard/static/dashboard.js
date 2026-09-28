@@ -1212,7 +1212,7 @@ async function startBot() {
 async function stopBot() {
   if (!confirm(`감시 봇을 중지할까요? (${state.env.toUpperCase()}) 이미 걸려 있는 포지션/주문(손절·익절)은 그대로 유지됩니다.`)) return;
   const btn = $('bot-stop-btn');
-  btn.disabled = true; btn.textContent = '중지 중… (최대 15초)';
+  btn.disabled = true; btn.textContent = '중지 중… (최대 30초)';
   try {
     const r = await api('/api/bot/stop', { method: 'POST' });
     if (!r.ok) alert('봇 중지에 실패했습니다.');

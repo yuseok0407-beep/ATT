@@ -21,11 +21,30 @@ PID_PATHS = {
     "telegram": PROJECT_ROOT / "state" / "telegram_bot.pid",
 }
 
-GRACEFUL_STOP_TIMEOUT_SECONDS = 15
+# 정상 종료는 "종료 요청 파일"로 한다 — 봇이 사이클 사이 대기 중에 이 파일을 보고 스스로 끝낸다.
+# 텔레그램 봇은 long-poll(최대 약 15초)을 마친 뒤에야 확인하므로 여유를 둔다.
+GRACEFUL_STOP_TIMEOUT_SECONDS = 30
+STDERR_LOG_DIR = PROJECT_ROOT / "logs"
 
 
 def _pid_path(key: str) -> Path:
     return PID_PATHS.get(key, PID_PATHS["demo"])
+
+
+def _stop_path(key: str) -> Path:
+    return _pid_path(key).with_suffix(".stop")
+
+
+def stop_requested(key: str) -> bool:
+    """봇 루프가 대기 중에 부른다 — True면 지금 사이클을 끝으로 스스로 종료해야 한다."""
+    return _stop_path(key).exists()
+
+
+def _clear_stop_request(key: str) -> None:
+    try:
+        _stop_path(key).unlink()
+    except FileNotFoundError:
+        pass
 
 
 def _launch_args(key: str) -> list[str]:
@@ -94,12 +113,26 @@ def start(key: str = "demo") -> dict:
     if status["running"]:
         return status
 
-    creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
-    proc = subprocess.Popen(
-        [sys.executable, *_launch_args(key)],
-        cwd=str(PROJECT_ROOT),
-        creationflags=creationflags,
-    )
+    _clear_stop_request(key)  # 지난번 종료 요청이 남아 있으면 켜자마자 꺼진다
+    # 봇은 띄운 쪽(대시보드 콘솔 창, 텔레그램 봇)과 **완전히 분리된** 프로세스로 띄운다(2026-09-28).
+    # 예전엔 콘솔을 물려받아서, 대시보드 창을 닫으면 Windows가 그 콘솔에 붙은 봇까지 같이 죽였다.
+    # 콘솔이 없으니 화면 출력은 버리고(로그는 각 스크립트가 logs/*.log 파일에 따로 쓴다), 로깅이
+    # 시작되기 전에 죽는 경우의 오류만 logs/{key}_process.err에 남긴다.
+    if sys.platform == "win32":
+        creationflags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        popen_kwargs = {"creationflags": creationflags}
+    else:
+        popen_kwargs = {"start_new_session": True}
+    STDERR_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    with open(STDERR_LOG_DIR / f"{key}_process.err", "ab") as stderr_file:
+        proc = subprocess.Popen(
+            [sys.executable, *_launch_args(key)],
+            cwd=str(PROJECT_ROOT),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=stderr_file,
+            **popen_kwargs,
+        )
     _write_pid(key, proc.pid)
     return {"running": True, "pid": proc.pid, "started_at": time.time()}
 
@@ -108,15 +141,20 @@ def stop(key: str = "demo") -> dict:
     pid = _read_pid(key)
     if pid is None or not _is_our_bot_process(pid, key):
         _clear_pid(key)
+        _clear_stop_request(key)
         return {"running": False, "pid": None, "started_at": None}
 
-    try:
-        if sys.platform == "win32":
-            os.kill(pid, signal.CTRL_BREAK_EVENT)  # 봇의 KeyboardInterrupt 처리로 정상 종료 유도
-        else:
+    # 분리된 프로세스에는 콘솔 신호(CTRL_BREAK)가 닿지 않는다 — 종료 요청 파일을 남기면 봇이 사이클
+    # 사이에서 스스로 끝낸다(주문을 내는 도중에 끊기지 않게).
+    _stop_path(key).parent.mkdir(parents=True, exist_ok=True)
+    _stop_path(key).write_text(str(time.time()), encoding="utf-8")
+    # Windows에서는 CTRL_BREAK를 보내지 않는다 — 콘솔을 공유하지 않는 프로세스에 보내면 보내는 쪽
+    # 콘솔 전체(대시보드 자신)에 신호가 갈 수 있다. 유예 시간 안에 안 끝나면 아래에서 강제 종료한다.
+    if sys.platform != "win32":
+        try:
             os.kill(pid, signal.SIGTERM)
-    except OSError:
-        pass
+        except OSError:
+            pass
 
     deadline = time.time() + GRACEFUL_STOP_TIMEOUT_SECONDS
     while time.time() < deadline and _is_our_bot_process(pid, key):
@@ -129,4 +167,5 @@ def stop(key: str = "demo") -> dict:
             pass
 
     _clear_pid(key)
+    _clear_stop_request(key)
     return {"running": False, "pid": None, "started_at": None}

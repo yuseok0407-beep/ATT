@@ -1575,3 +1575,34 @@ class TestClosedTradeRecordsRealCosts:
         assert "net_realized_pnl" not in result
         assert "fee_r" not in result
         assert result["realized_pnl"] == pytest.approx(-10.0)
+
+
+# ---------- 봉 마감에 맞춰 깨기 (2026-09-28) ----------
+
+def test_next_cycle_waits_the_normal_poll_when_no_bar_closes_soon():
+    now = 1_790_600_000 + 600  # 정각 10분 뒤 (1_790_600_000 = 정각이 아님 → 아래서 정각으로 맞춘다)
+    hour = (now // 3600) * 3600
+    assert bot.seconds_until_next_cycle(hour + 600, 30, "1h", 3) == 30
+
+
+def test_next_cycle_wakes_just_after_the_bar_closes():
+    """정각 10초 전에 사이클이 끝났으면 30초를 다 기다리지 않고 정각+3초에 깬다 — 새 신호는 봉이
+    마감되는 순간에만 생기므로, 거기서 기다리는 시간이 곧 진입 슬리피지의 원인이다."""
+    next_hour = ((1_790_600_000 // 3600) + 1) * 3600
+    assert bot.seconds_until_next_cycle(next_hour - 10, 30, "1h", 3) == pytest.approx(13)
+
+
+def test_next_cycle_catches_a_close_that_just_happened():
+    """정각 1초 뒤(아직 +3초 전)면 2초 뒤에 깬다."""
+    hour = (1_790_600_000 // 3600) * 3600
+    assert bot.seconds_until_next_cycle(hour + 1, 30, "1h", 3) == pytest.approx(2)
+
+
+def test_next_cycle_after_the_aligned_wake_goes_back_to_the_normal_poll():
+    hour = (1_790_600_000 // 3600) * 3600
+    assert bot.seconds_until_next_cycle(hour + 4, 30, "1h", 3) == 30
+
+
+def test_next_cycle_never_busy_loops():
+    hour = (1_790_600_000 // 3600) * 3600
+    assert bot.seconds_until_next_cycle(hour + 2.99, 30, "1h", 3) >= 0.5

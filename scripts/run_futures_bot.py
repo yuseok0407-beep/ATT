@@ -24,7 +24,10 @@ LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
-    handlers=[logging.FileHandler(LOG_PATH, encoding="utf-8"), logging.StreamHandler()],
+    handlers=[logging.FileHandler(LOG_PATH, encoding="utf-8"),
+              # 화면 출력은 stdout으로 — 대시보드가 분리해서 띄우면 stdout은 버려지고 stderr는
+              # 시작 전 오류용 파일(logs/*_process.err)이라, 여기로 보내면 로그가 거기 중복으로 쌓인다.
+              logging.StreamHandler(sys.stdout)],
 )
 logger = logging.getLogger("run_futures_bot")
 
@@ -35,7 +38,7 @@ if __name__ == "__main__":
     from src.data.futures_exchange import get_futures_client
     from src.execution.heartbeat import LIVE_DEFAULT_PATH as HEARTBEAT_LIVE_PATH, write_heartbeat
     from src.execution.heartbeat import DEFAULT_PATH as HEARTBEAT_DEMO_PATH
-    from src.execution import equity_log
+    from src.execution import bot_process, equity_log
     from src.futures_rule_bot import (
         LIVE_JOURNAL_PATH,
         LIVE_LAST_TRADE_STATE_PATH,
@@ -43,6 +46,7 @@ if __name__ == "__main__":
         initialize,
         log_config_change,
         run_once,
+        seconds_until_next_cycle,
     )
     from src.futures_rule_bot import JOURNAL_PATH as DEMO_JOURNAL_PATH
     from src.futures_rule_bot import LAST_TRADE_STATE_PATH as DEMO_LAST_TRADE_PATH
@@ -82,6 +86,19 @@ if __name__ == "__main__":
     HEARTBEAT_EVERY_N_CYCLES = max(1, int(600 / POLL_INTERVAL_SECONDS))  # 대략 10분마다
     cycle_count = 0
 
+    def wait_or_stop(seconds: float) -> bool:
+        """seconds 동안 기다리되, 대시보드/텔레그램이 남긴 종료 요청을 1초마다 확인한다.
+        봇은 띄운 창과 분리돼 있어 콘솔 신호(Ctrl+C)가 안 닿으므로 이게 정상 종료 경로다 —
+        사이클(주문 포함)이 끝난 뒤에만 멈추므로 주문 도중에 끊기지 않는다."""
+        deadline = time.time() + seconds
+        while True:
+            if bot_process.stop_requested(env):
+                return True
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return False
+            time.sleep(min(1.0, remaining))
+
     while True:
         cycle_count += 1
         try:
@@ -111,4 +128,7 @@ if __name__ == "__main__":
         except Exception:
             logger.exception("cycle raised an error — continuing after backoff")
 
-        time.sleep(POLL_INTERVAL_SECONDS)
+        # 평소엔 POLL_INTERVAL_SECONDS, 봉 마감이 그보다 먼저 오면 마감 직후에 깬다
+        if wait_or_stop(seconds_until_next_cycle(time.time(), POLL_INTERVAL_SECONDS)):
+            logger.info("stop requested — exiting after the last completed cycle")
+            break

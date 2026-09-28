@@ -13,6 +13,7 @@ def _pid_paths(tmp_path, monkeypatch):
         "live": tmp_path / "futures_bot.live.pid",
         "telegram": tmp_path / "telegram_bot.pid",
     })
+    monkeypatch.setattr(bot_process, "STDERR_LOG_DIR", tmp_path / "logs")
     yield
 
 
@@ -104,24 +105,66 @@ def test_start_does_not_spawn_a_second_process_when_already_running():
     assert result == already_running
 
 
-def test_stop_sends_graceful_signal_then_clears_pid_once_process_exits():
+def test_stop_requests_a_graceful_exit_then_clears_pid_once_process_exits():
     bot_process._write_pid("demo", 4242)
     call_count = {"n": 0}
+    seen_request = []
 
     def fake_is_our_bot_process(pid, env):
         call_count["n"] += 1
+        seen_request.append(bot_process.stop_requested("demo"))
         return call_count["n"] < 3  # 두어 번 살아있다가 그 다음부터 죽었다고 응답
 
-    with patch("src.execution.bot_process.os.kill") as mock_kill, \
+    with patch("src.execution.bot_process.os.kill"), \
          patch("src.execution.bot_process._is_our_bot_process", side_effect=fake_is_our_bot_process), \
          patch("src.execution.bot_process.time.sleep"), \
          patch("src.execution.bot_process.psutil.Process") as mock_process_cls:
         result = bot_process.stop()
 
-    mock_kill.assert_called_once()
+    assert True in seen_request  # 봇이 기다리는 동안 종료 요청 파일이 보였다
     mock_process_cls.return_value.kill.assert_not_called()  # 정상 종료됐으니 강제 kill까지는 안 감
     assert result == {"running": False, "pid": None, "started_at": None}
     assert not bot_process._pid_path("demo").exists()
+    assert not bot_process.stop_requested("demo")  # 끝나면 요청 파일도 치운다(다음 시작이 곧장 꺼지지 않게)
+
+
+def test_stop_never_sends_ctrl_break_on_windows(monkeypatch):
+    """분리된 프로세스에 CTRL_BREAK를 보내면 보내는 쪽 콘솔(대시보드)에 신호가 갈 수 있다."""
+    monkeypatch.setattr(bot_process.sys, "platform", "win32")
+    bot_process._write_pid("demo", 4242)
+    with patch("src.execution.bot_process.os.kill") as mock_kill, \
+         patch("src.execution.bot_process._is_our_bot_process", side_effect=lambda pid, key: not bot_process.stop_requested(key)), \
+         patch("src.execution.bot_process.time.sleep"), \
+         patch("src.execution.bot_process.psutil.Process"):
+        bot_process.stop()
+
+    mock_kill.assert_not_called()
+
+
+def test_start_detaches_the_bot_from_the_launching_console(monkeypatch):
+    """대시보드 창을 닫아도 봇이 살아 있어야 한다 — 콘솔을 물려받지 않게 분리해서 띄운다."""
+    monkeypatch.setattr(bot_process.sys, "platform", "win32")
+    monkeypatch.setattr(bot_process.subprocess, "DETACHED_PROCESS", 0x8, raising=False)
+    monkeypatch.setattr(bot_process.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, raising=False)
+    with patch("src.execution.bot_process.get_status", return_value={"running": False, "pid": None, "started_at": None}), \
+         patch("src.execution.bot_process.subprocess.Popen") as mock_popen:
+        mock_popen.return_value.pid = 9999
+        bot_process.start("live")
+
+    kwargs = mock_popen.call_args.kwargs
+    assert kwargs["creationflags"] & 0x8  # DETACHED_PROCESS
+    assert kwargs["stdout"] is bot_process.subprocess.DEVNULL
+
+
+def test_start_clears_a_leftover_stop_request():
+    bot_process._stop_path("demo").parent.mkdir(parents=True, exist_ok=True)
+    bot_process._stop_path("demo").write_text("old", encoding="utf-8")
+    with patch("src.execution.bot_process.get_status", return_value={"running": False, "pid": None, "started_at": None}), \
+         patch("src.execution.bot_process.subprocess.Popen") as mock_popen:
+        mock_popen.return_value.pid = 9999
+        bot_process.start("demo")
+
+    assert not bot_process.stop_requested("demo")
 
 
 def test_stop_escalates_to_force_kill_if_process_never_exits():

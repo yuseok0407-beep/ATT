@@ -16,12 +16,16 @@ LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
-    handlers=[logging.FileHandler(LOG_PATH, encoding="utf-8"), logging.StreamHandler()],
+    handlers=[logging.FileHandler(LOG_PATH, encoding="utf-8"),
+              # 화면 출력은 stdout으로 — 대시보드가 분리해서 띄우면 stdout은 버려지고 stderr는
+              # 시작 전 오류용 파일(logs/*_process.err)이라, 여기로 보내면 로그가 거기 중복으로 쌓인다.
+              logging.StreamHandler(sys.stdout)],
 )
 logger = logging.getLogger("run_telegram_bot")
 
 if __name__ == "__main__":
     from src.core.config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_POLL_INTERVAL_SECONDS
+    from src.execution import bot_process
     from src.telegram_bot import STATE_PATH, load_state, run_once, save_state
 
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -34,6 +38,11 @@ if __name__ == "__main__":
     state = load_state(STATE_PATH)
 
     while True:
+        # 대시보드와 분리된 프로세스라 콘솔 신호가 안 닿는다 — 종료 요청 파일이 정상 종료 경로다.
+        # long-poll 한 번(최대 약 15초)이 끝날 때마다 확인한다.
+        if bot_process.stop_requested("telegram"):
+            logger.info("stop requested — exiting")
+            break
         try:
             state = run_once(state, TELEGRAM_CHAT_ID, TELEGRAM_BOT_TOKEN)
             save_state(state, STATE_PATH)

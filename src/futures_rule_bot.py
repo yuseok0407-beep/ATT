@@ -82,6 +82,29 @@ _SILENT_EVENTS = ("no_signal", "holding_position", "skipped_max_positions", "ski
 # 저널에 기록해두는 "이 거래들이 어떤 규칙으로 나왔는지" — 진입 판단에 실제로 영향을 주는
 # 설정만 넣는다(알림 주기 같은 운영 설정은 뺀다). 값이 바뀌면 log_config_change가 봇 시작 시
 # 저널에 한 줄 남기므로, 나중에 성과를 볼 때 "이 구간은 어떤 규칙이었나"를 저널만으로 알 수 있다.
+# 봉 마감 후 몇 초 뒤에 깰지. 거래소의 새 봉은 정각에 시작하지만 이 PC 시계가 거래소보다 조금
+# 느릴 수 있어서 여유를 둔다. 너무 일찍 깨도 안전하다 — 아직 안 끝난 봉은 트리밍으로 버리므로
+# 직전(이미 판정한) 봉을 다시 보고, 같은 신호봉 잠금 때문에 재진입하지 않는다. 다음 사이클이 잡는다.
+BAR_CLOSE_OFFSET_SECONDS = 3
+
+
+def seconds_until_next_cycle(now: float, poll_seconds: float, timeframe: str = RULE_TIMEFRAME,
+                             offset_seconds: float = BAR_CLOSE_OFFSET_SECONDS) -> float:
+    """다음 사이클까지 기다릴 초. 평소엔 poll_seconds, 단 **다음 봉 마감(+offset)이 그보다 먼저면
+    그때 깬다**(2026-09-28).
+
+    신호는 마감된 봉으로만 판정하므로 새 신호는 봉이 끝나는 순간에만 생긴다. 30초 주기로만 돌면
+    신호 발생 후 진입까지 평균 15초(예전엔 사이클 자체가 느려 중간값 39초)를 기다리고, 그동안 가격이
+    신호 봉 종가에서 멀어진다 — 그 거리가 곧 진입 슬리피지이고, 0.1R을 넘으면 가격이탈로 진입을
+    포기한다. 주기 전체를 줄이면 거래소 요청이 그만큼 늘어나(IP 한도는 대시보드와 공유) 대신 마감
+    시각에만 맞춰 한 번 더 깬다 — 요청 수는 그대로다.
+    """
+    bar = ccxt.Exchange.parse_timeframe(timeframe)
+    this_close = (now // bar) * bar + offset_seconds
+    target = this_close if now < this_close else this_close + bar
+    return max(0.5, min(poll_seconds, target - now))
+
+
 def current_strategy_config() -> dict:
     """지금 이 프로세스가 들고 있는 전략/리스크 설정. 저널에 남길 형태 그대로."""
     return {
