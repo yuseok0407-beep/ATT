@@ -54,6 +54,10 @@ USDT-M 선물(레버리지 롱/숏)을 **순수 규칙 기반**으로 상시 감
 - `src/execution/export_log.py` / `scripts/export_trade_log.py` — 저널을 분석용 CSV로 내보낸다
   (`exports/`). 결합은 `performance.resolve_closed_trades`를 그대로 불러서 하므로 CSV와 대시보드가
   같은 수를 말한다.
+- `src/execution/cost_report.py` / `scripts/report_execution_costs.py` — 실거래 **체결 비용 분포**
+  (2026-09-28). 진입 슬리피지(신호 봉 종가 대비), **청산 슬리피지(손절/익절 발동가 대비)**, 수수료,
+  그 합을 평균·p90·최악으로. 거래별 값은 `export_log`가 계산한다(`adverse_slippage_r` — 양수가
+  손해). 익절 조건주문은 발동 뒤 시장가라 되돌림에서 체결돼 평균 0.076R을 잃는다(손절은 0.005R).
 - `src/execution/futures_orders.py` — 주문 실행(브라켓 동시 발주, 고아 주문 정리)
 - `dashboard/app.py` — 선물 봇 상태를 보여주는 Flask 웹 대시보드 (http://127.0.0.1:5055)
 - `src/core/signal_status.py` — "진입 조건에 지금 얼마나 가까운지" 계산. 대시보드

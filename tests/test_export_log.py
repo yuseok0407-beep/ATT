@@ -303,3 +303,48 @@ def test_export_env_summary_reports_net_r_alongside_gross(tmp_path, monkeypatch)
 
     assert summary["total_r"] == 2.0
     assert summary["total_net_r"] == 1.936
+
+
+def test_exit_slippage_measures_take_profit_fill_against_the_trigger_price():
+    """익절 조건주문은 발동 뒤 시장가로 나간다 — 가격이 스치고 되돌아가면 발동가보다 나쁘게
+    체결된다(2026-09-27 실계좌 SUI). 백테스트는 익절가 정확히 체결을 가정하므로 그 차이를 잰다."""
+    entries = [
+        _entered("BTC/USDT:USDT", "2026-09-20T01:00:00+00:00", entry=100.0, stop=98.0, take=104.0),
+        _closed("BTC/USDT:USDT", "2026-09-20T02:00:00+00:00", 103.5, 7.0,
+                side="long", entry_price=100.0, stop_loss_price=98.0, take_profit_price=104.0,
+                realized_r=1.75, actual_entry_price=100.0, fee_r=0.05),
+    ]
+    row, = build_trade_rows(entries, "live")
+
+    # 롱 청산은 파는 주문 — 104에 팔려야 했는데 103.5에 팔렸다 -> 리스크 2 대비 +0.25R 불리.
+    assert row["exit_slippage_r"] == 0.25
+    # 총비용 = 진입 0 + 청산 0.25 + 수수료 0.05
+    assert row["execution_cost_r"] == 0.3
+
+
+def test_exit_slippage_sign_flips_for_short_stop_losses():
+    """숏 손절은 사는 주문 — 손절가보다 비싸게 사면 불리하다."""
+    entries = [
+        _entered("BTC/USDT:USDT", "2026-09-20T01:00:00+00:00", signal="SHORT",
+                 entry=100.0, stop=102.0, take=96.0),
+        _closed("BTC/USDT:USDT", "2026-09-20T02:00:00+00:00", 102.1, -4.2, reason="stop_loss",
+                side="short", entry_price=100.0, stop_loss_price=102.0, take_profit_price=96.0,
+                realized_r=-1.05),
+    ]
+    row, = build_trade_rows(entries, "live")
+
+    assert row["exit_slippage_r"] == 0.05
+    # 진입 체결가가 없는 옛 기록은 총비용을 내지 않는다 — 한쪽만 더하면 과소평가다.
+    assert row["execution_cost_r"] is None
+
+
+def test_exit_slippage_is_blank_when_the_exit_reason_is_unknown():
+    entries = [
+        _entered("BTC/USDT:USDT", "2026-09-20T01:00:00+00:00"),
+        _closed("BTC/USDT:USDT", "2026-09-20T02:00:00+00:00", 101.0, 2.0, reason="unknown",
+                side="long", entry_price=100.0, stop_loss_price=98.0, take_profit_price=104.0,
+                realized_r=0.5),
+    ]
+    row, = build_trade_rows(entries, "demo")
+
+    assert row["exit_slippage_r"] is None

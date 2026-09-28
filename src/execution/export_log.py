@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from src.execution import journal, strategy_versions
-from src.execution.performance import _net_r, _price_r, resolve_closed_trades
+from src.execution.performance import _fee_r, _net_r, _price_r, resolve_closed_trades
 
 DEFAULT_OUT_DIR = "exports"
 
@@ -45,7 +45,7 @@ TRADE_COLUMNS = [
     "entry_price", "exit_price", "stop_loss_price", "take_profit_price",
     "realized_pnl", "net_realized_pnl", "realized_r", "net_realized_r", "r_reliable",
     "total_fee", "entry_fee", "exit_fee", "fee_r", "fee_estimated", "actual_entry_price",
-    "entry_slippage_r", "max_favorable_r", "max_adverse_r",
+    "entry_slippage_r", "exit_slippage_r", "execution_cost_r", "max_favorable_r", "max_adverse_r",
     "signal", "signal_bar_timestamp", "atr_to_stop_ratio",
     "quantity", "notional", "stop_loss_pct", "config_timestamp", "strategy_version",
 ]
@@ -94,6 +94,31 @@ def _config_at(timeline: list[dict], when: str | None) -> str | None:
         else:
             break
     return active
+
+
+def adverse_slippage_r(actual, reference, entry_price, stop_loss_price, side, *, selling: bool):
+    """reference(의도한 가격) 대비 actual(실제 체결가)이 **불리한 쪽으로** 몇 R 벌어졌나.
+
+    양수 = 손해, 음수 = 이득. 불리한 방향은 "사는 주문이면 더 비싸게, 파는 주문이면 더 싸게"다 —
+    롱 진입과 숏 청산은 사고, 숏 진입과 롱 청산은 판다. 1R은 신호 봉 종가에서 손절가까지의 폭이라
+    사이징과 무관하게 백테스트의 R과 그대로 비교된다."""
+    values = (actual, reference, entry_price, stop_loss_price)
+    if side not in ("long", "short") or not all(
+            isinstance(v, (int, float)) and not isinstance(v, bool) for v in values):
+        return None
+    risk = abs(float(entry_price) - float(stop_loss_price))
+    if risk <= 0:
+        return None
+    drift = (float(actual) - float(reference)) / risk
+    return -drift if selling else drift
+
+
+def _exit_target(trade: dict):
+    """청산 사유가 가리키는 브라켓 가격 — 손절이면 손절가, 익절이면 익절가. 그 외(unknown 등)는
+    무엇을 의도했는지 모르므로 None. 사유는 봇이 "체결가가 어느 쪽에 더 가까운가"로 추정한 것이라
+    수동 청산이 익절 근처에서 났다면 익절로 분류될 수 있다(드물다)."""
+    return {"stop_loss": trade.get("stop_loss_price"),
+            "take_profit": trade.get("take_profit_price")}.get(trade.get("reason"))
 
 
 def build_trade_rows(entries: list[dict], env: str) -> list[dict]:
@@ -150,14 +175,23 @@ def build_trade_rows(entries: list[dict], env: str) -> list[dict]:
         # 실제 진입 체결가 - 신호 봉 종가 = 진입 슬리피지. R로 재면 사이징과 무관하다.
         # **이게 저널의 realized_r에 빠져 있는 또 하나의 비용**이다(R은 신호 봉 종가를 진입가로
         # 쓴다) — 값이 있는 거래만 채워지고, 옛 기록은 빈다.
+        side = trade.get("side")
         actual_entry = trade.get("actual_entry_price")
-        slippage_r = None
-        if (isinstance(actual_entry, (int, float)) and isinstance(entry_price, (int, float))
-                and stop_loss_price is not None):
-            risk = abs(float(entry_price) - float(stop_loss_price))
-            if risk > 0:
-                drift = (actual_entry - entry_price) / risk
-                slippage_r = drift if trade.get("side") == "long" else -drift
+        slippage_r = adverse_slippage_r(actual_entry, entry_price, entry_price, stop_loss_price,
+                                        side, selling=(side == "short"))
+        # 청산 슬리피지 — 손절/익절 조건주문이 발동한 가격(브라켓 가격)과 실제 체결가의 차이.
+        # 조건주문은 발동 뒤 **시장가**로 나가므로, 가격이 순간적으로 스치고 되돌아가면 발동가보다
+        # 한참 나쁜 값에 체결된다(2026-09-27 실계좌 SUI: 익절 발동 1.2947 → 체결 1.2898, -0.22R).
+        # 백테스트는 브라켓 가격에 정확히 체결된다고 가정하므로 이게 백테스트에 없는 비용이다.
+        exit_slippage_r = adverse_slippage_r(trade.get("exit_price"), _exit_target(trade),
+                                             entry_price, stop_loss_price, side,
+                                             selling=(side == "long"))
+        # 거래 한 건이 백테스트 가정(신호 봉 종가 진입, 브라켓 가격 청산, 수수료 없음)보다 실제로
+        # 더 낸 비용의 합. 진입·청산 슬리피지를 둘 다 알 때만 낸다(한쪽만 더하면 과소평가).
+        fee_r, _ = _fee_r(trade)
+        execution_cost_r = None
+        if slippage_r is not None and exit_slippage_r is not None and fee_r is not None:
+            execution_cost_r = slippage_r + exit_slippage_r + fee_r
 
         entry_timestamp = trade.get("entry_timestamp") or source.get("timestamp")
         rows.append({
@@ -184,6 +218,8 @@ def build_trade_rows(entries: list[dict], env: str) -> list[dict]:
             "fee_estimated": "yes" if (net_r is not None and fee_estimated) else "no",
             "actual_entry_price": _round(actual_entry),
             "entry_slippage_r": _round(slippage_r, 4),
+            "exit_slippage_r": _round(exit_slippage_r, 4),
+            "execution_cost_r": _round(execution_cost_r, 4),
             "max_favorable_r": _round(trade.get("max_favorable_r"), 4),
             "max_adverse_r": _round(trade.get("max_adverse_r"), 4),
             "signal": source.get("signal"),
