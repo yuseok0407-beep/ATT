@@ -129,10 +129,51 @@ def test_fee_reduces_pnl_r_by_round_trip_cost():
     no_fee = run_exit_only(extra, stop_mode="fixed", stop_loss_pct=0.01, take_profit_rr=2.0, adx_threshold=1)
     with_fee = run_exit_only(
         extra, stop_mode="fixed", stop_loss_pct=0.01, take_profit_rr=2.0, adx_threshold=1,
-        fee_pct_per_side=0.0004,
+        fee_pct_per_side=0.0004, take_profit_order_type="market",
     )
     expected_fee_r = (2 * 0.0004 * entry_price) / (entry_price * 0.01)
     assert with_fee[0]["pnl_r"] == pytest.approx(no_fee[0]["pnl_r"] - expected_fee_r)
+
+
+def test_limit_take_profit_pays_maker_fee_on_the_exit_and_no_exit_slippage():
+    """익절을 지정가로 걸면(실거래 기본, 2026-09-28) 익절 청산만 메이커 수수료를 물고, 익절가보다
+    나쁘게 체결될 수 없으니 청산 슬리피지도 없다. 진입은 여전히 시장가(테이커 + 슬리피지)."""
+    df = _cross_up_df()
+    entry_price = float(df["close"].iloc[59])
+    extra = _append(df, [{
+        "high": entry_price * 1.03, "low": entry_price * 0.995, "close": entry_price * 1.02,
+    }])
+    common = dict(stop_mode="fixed", stop_loss_pct=0.01, take_profit_rr=2.0, adx_threshold=1,
+                  regime_sma_period=0, min_atr_to_stop_ratio=0.0)
+
+    free = run_backtest(extra, **common, fee_pct_per_side=0.0)
+    limit = run_backtest(extra, **common, fee_pct_per_side=0.0005, maker_fee_pct_per_side=0.0002,
+                         slippage_r_per_side=0.1, take_profit_order_type="limit")
+
+    assert limit[0]["reason"] == "take_profit"
+    # 수수료 (0.05% + 0.02%) / 1% = 0.07R, 진입 슬리피지 0.1R, 청산 슬리피지 0.
+    # (수수료는 슬리피지로 밀린 진입가에 매기므로 0.0001R 안쪽의 차이가 난다.)
+    assert limit[0]["pnl_r"] == pytest.approx(free[0]["pnl_r"] - 0.07 - 0.1, abs=1e-3)
+
+
+def test_limit_take_profit_mode_leaves_stop_loss_exits_at_market_cost():
+    """손절은 지정가 모드에서도 조건부 시장가다 — 테이커 수수료와 청산 슬리피지를 그대로 문다."""
+    df = _cross_up_df()
+    entry_price = float(df["close"].iloc[59])
+    extra = _append(df, [{
+        "high": entry_price * 1.001, "low": entry_price * 0.98, "close": entry_price * 0.985,
+    }])
+    common = dict(stop_mode="fixed", stop_loss_pct=0.01, take_profit_rr=2.0, adx_threshold=1,
+                  regime_sma_period=0, min_atr_to_stop_ratio=0.0, fee_pct_per_side=0.0005,
+                  slippage_r_per_side=0.1)
+
+    limit = run_backtest(extra, **common, take_profit_order_type="limit")
+    market = run_backtest(extra, **common, take_profit_order_type="market")
+
+    assert limit[0]["reason"] == "stop_loss"
+    assert limit[0]["pnl_r"] == pytest.approx(market[0]["pnl_r"])
+    # 손절 -1R, 진입·청산 슬리피지 각 0.1R, 수수료 (0.05% x 2) / 1% = 0.1R
+    assert limit[0]["pnl_r"] == pytest.approx(-1.3, abs=1e-3)
 
 
 def test_signal_fn_override_bypasses_default_trend_strategy():
@@ -415,8 +456,10 @@ def test_entry_slippage_reduces_r_without_moving_the_bracket():
     extra = _append(df, [{
         "high": entry_price * 1.03, "low": entry_price * 0.995, "close": entry_price * 1.02,
     }])
+    # 옛 방식(조건부 시장가 익절) — 청산도 시장가라 청산 슬리피지를 문다.
     common = dict(stop_mode="fixed", stop_loss_pct=0.01, take_profit_rr=2.0, adx_threshold=1,
-                  regime_sma_period=0, min_atr_to_stop_ratio=0.0, fee_pct_per_side=0.0)
+                  regime_sma_period=0, min_atr_to_stop_ratio=0.0, fee_pct_per_side=0.0,
+                  take_profit_order_type="market")
 
     clean = run_backtest(extra, **common)
     slipped = run_backtest(extra, **common, slippage_r_per_side=0.1)
@@ -500,6 +543,8 @@ def test_engine_defaults_match_the_live_config():
     assert defaults["regime_sma_period"] == config.RULE_REGIME_SMA_PERIOD
     assert defaults["direction_filter"] == config.RULE_DIRECTION_FILTER
     assert defaults["min_atr_to_stop_ratio"] == config.MIN_ATR_TO_STOP_RATIO
+    assert defaults["take_profit_order_type"] == config.TAKE_PROFIT_ORDER_TYPE
+    assert defaults["maker_fee_pct_per_side"] == config.MAKER_FEE_PCT_PER_SIDE
 
 
 def test_gated_signals_defaults_match_run_backtest_defaults():

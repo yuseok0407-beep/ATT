@@ -4,11 +4,13 @@ import pandas as pd
 
 from src.core.config import (
     FEE_PCT_PER_SIDE,
+    MAKER_FEE_PCT_PER_SIDE,
     MIN_ATR_TO_STOP_RATIO,
     RULE_ADX_THRESHOLD,
     RULE_REGIME_SMA_PERIOD,
     RULE_SMA_PERIOD,
     STOP_LOSS_PCT,
+    TAKE_PROFIT_ORDER_TYPE,
     TAKE_PROFIT_RR,
 )
 from src.core.futures_strategy import (
@@ -70,6 +72,38 @@ def _check_exit(bar: pd.Series, position: dict, use_breakeven: bool, breakeven_a
     if target_hit:
         return "take_profit", target_price
     return None, None
+
+
+def exit_pnl_r(side: str, entry_price: float, exit_price: float, risk: float, reason: str, *,
+               fee_pct_per_side: float, slippage_r_per_side: float,
+               take_profit_order_type: str, maker_fee_pct_per_side: float) -> float:
+    """포지션 전체가 한 번에 청산될 때의 R(수수료·슬리피지 차감 후). `run_backtest`와
+    `portfolio.simulate_portfolio`가 이 함수 하나를 쓴다 — 전에는 두 곳에 같은 식이 복사돼 있었다.
+
+    청산 체결 방식이 사유마다 다르다(실거래와 같게, 2026-09-28):
+      - 손절/최대보유/손익분기: 시장가 → 테이커 수수료, 청산 슬리피지를 문다.
+      - 익절 + `take_profit_order_type="limit"`: 익절가에 걸어 둔 지정가 → **메이커 수수료**,
+        익절가보다 나쁘게 체결될 수 없으므로 **청산 슬리피지 없음**. 메이커율은 테이커율을 넘지
+        않게 자른다(수수료 0으로 돌리는 호출이 익절에만 수수료를 무는 일이 없게).
+      - 익절 + "market": 옛 방식(조건부 시장가) → 손절과 같다.
+    지정가의 대가(가격이 익절가를 스치기만 하면 안 팔림)는 1시간봉으로 재현할 수 없어 여기에 없다 —
+    실거래 저널의 익절 체결로 따로 확인한다.
+
+    진입 쪽 슬리피지는 호출자가 이미 entry_price를 불리하게 옮겨 두었다. R의 분모 `risk`는
+    신호가~손절가다(실거래 realized_r과 같은 기준)."""
+    limit_take_profit = reason == "take_profit" and take_profit_order_type == "limit"
+    fill_exit = exit_price
+    if slippage_r_per_side and risk and not limit_take_profit:
+        slip = slippage_r_per_side * risk
+        fill_exit = exit_price - slip if side == "long" else exit_price + slip
+    move = fill_exit - entry_price
+    if side == "short":
+        move = -move
+    pnl_r = move / risk if risk else 0.0
+    if risk:
+        exit_fee = min(maker_fee_pct_per_side, fee_pct_per_side) if limit_take_profit else fee_pct_per_side
+        pnl_r -= ((fee_pct_per_side + exit_fee) * entry_price) / risk
+    return pnl_r
 
 
 def _check_exit_partial(bar: pd.Series, position: dict, fee_pct_per_side: float,
@@ -240,6 +274,8 @@ def run_backtest(
     adx_threshold: float = RULE_ADX_THRESHOLD,
     fee_pct_per_side: float = FEE_PCT_PER_SIDE,
     slippage_r_per_side: float = 0.0,
+    take_profit_order_type: str = TAKE_PROFIT_ORDER_TYPE,
+    maker_fee_pct_per_side: float = MAKER_FEE_PCT_PER_SIDE,
     regime_sma_period: int = RULE_REGIME_SMA_PERIOD,
     min_atr_to_stop_ratio: float = MIN_ATR_TO_STOP_RATIO,
     sma_period: int = RULE_SMA_PERIOD,
@@ -269,6 +305,10 @@ def run_backtest(
     1.25%에서 왕복 수수료는 0.064R이고 이 전략의 건당 기대값과 같은 크기라, 기본값이 0이면
     엔진을 직접 부르는 모든 코드가 조용히 낙관적인 결과를 낸다. 수수료 없는 결과를 일부러
     보려면 명시적으로 0을 넘길 것.
+
+    take_profit_order_type / maker_fee_pct_per_side: 익절 청산의 체결 방식(`exit_pnl_r` 참고).
+    기본값은 실거래 설정 — "limit"이면 익절 청산만 메이커 수수료에 청산 슬리피지가 없다.
+    부분 익절 경로(use_partial_tp)는 이 구분 없이 전부 시장가로 계산한다(실거래에 없는 모드).
 
     slippage_r_per_side: 진입/청산 각각에 **손절폭의 몇 배**만큼 불리한 체결을 가정한다
     (0.1이면 편도 0.1R씩, 왕복 0.2R). R로 받는 이유는 수수료와 같은 단위로 더해서 "이 전략이
@@ -359,20 +399,12 @@ def run_backtest(
                 if reason is not None:
                     # R의 분모는 **신호가~손절가**다(실거래 realized_r과 같은 기준) — 체결이
                     # 나빠진 것은 분모를 키우는 게 아니라 손익을 깎는 것으로 나타나야 한다.
-                    signal_price = position["signal_price"]
-                    risk = abs(signal_price - position["original_stop_price"])
-                    fill_exit = exit_price
-                    if slippage_r_per_side and risk:
-                        # 청산도 불리한 쪽으로 옮긴다 — 롱은 트리거보다 낮게, 숏은 높게 체결된
-                        # 것으로 본다(STOP_MARKET/TAKE_PROFIT_MARKET은 둘 다 시장가로 나간다).
-                        slip = slippage_r_per_side * risk
-                        fill_exit = exit_price - slip if position["side"] == "long" else exit_price + slip
-                    move = fill_exit - position["entry_price"]
-                    if position["side"] == "short":
-                        move = -move
-                    pnl_r = move / risk if risk else 0.0
-                    if fee_pct_per_side and risk:
-                        pnl_r -= (2 * fee_pct_per_side * position["entry_price"]) / risk
+                    risk = abs(position["signal_price"] - position["original_stop_price"])
+                    pnl_r = exit_pnl_r(
+                        position["side"], position["entry_price"], exit_price, risk, reason,
+                        fee_pct_per_side=fee_pct_per_side, slippage_r_per_side=slippage_r_per_side,
+                        take_profit_order_type=take_profit_order_type,
+                        maker_fee_pct_per_side=maker_fee_pct_per_side)
 
             if reason is not None:
                 trades.append({

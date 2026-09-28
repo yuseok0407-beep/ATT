@@ -571,9 +571,9 @@ def test_build_daily_summary_covers_both_accounts(monkeypatch):
     text = tb.build_daily_summary(_local_day("2026-09-08T06:00:00+00:00"))
 
     # 금액과 R은 **수수료를 뺀 값**이다(2026-09-24). 손절폭 1%에서 왕복 수수료는
-    # 2 x 0.0004 / 0.01 = 0.08R이고, R당 10달러이므로 0.80달러가 빠진다.
-    assert "[DEMO] 1건 · 승 1 / 패 0 · +1.92R · +19.20 USDT" in text
-    assert "수수료 0.80 차감 추정 (차감 전 +20.00)" in text
+    # 2 x 0.0005 / 0.01 = 0.10R이고, R당 10달러이므로 1.00달러가 빠진다.
+    assert "[DEMO] 1건 · 승 1 / 패 0 · +1.90R · +19.00 USDT" in text
+    assert "수수료 1.00 차감 추정 (차감 전 +20.00)" in text
     assert "[LIVE] 청산된 거래 없음" in text
 
 

@@ -44,14 +44,17 @@ from src.backtest.engine import (
     _check_exit,
     _check_exit_partial,
     entry_start_bar,
+    exit_pnl_r,
     gated_signals,
 )
 from src.core.config import (
     FEE_PCT_PER_SIDE,
     FUTURES_RISK_PER_TRADE,
+    MAKER_FEE_PCT_PER_SIDE,
     MAX_CONCURRENT_POSITIONS,
     RULE_REGIME_SMA_PERIOD,
     STOP_LOSS_PCT,
+    TAKE_PROFIT_ORDER_TYPE,
     TAKE_PROFIT_RR,
 )
 from src.core.futures_strategy import compute_bracket_prices
@@ -139,6 +142,8 @@ def simulate_portfolio(
     take_profit_rr: float = TAKE_PROFIT_RR,
     fee_pct_per_side: float = FEE_PCT_PER_SIDE,
     slippage_r_per_side: float = 0.0,
+    take_profit_order_type: str = TAKE_PROFIT_ORDER_TYPE,
+    maker_fee_pct_per_side: float = MAKER_FEE_PCT_PER_SIDE,
     regime_sma_period: int = RULE_REGIME_SMA_PERIOD,
     use_breakeven: bool = False,
     breakeven_at_r: float = 1.0,
@@ -250,16 +255,11 @@ def simulate_portfolio(
                 continue
 
             if pnl_r is None:
-                fill_exit = exit_price
-                if slippage_r_per_side and risk:
-                    slip = slippage_r_per_side * risk
-                    fill_exit = exit_price - slip if position.side == "long" else exit_price + slip
-                move = fill_exit - position.entry_price
-                if position.side == "short":
-                    move = -move
-                pnl_r = move / risk if risk else 0.0
-                if fee_pct_per_side and risk:
-                    pnl_r -= (2 * fee_pct_per_side * position.entry_price) / risk
+                pnl_r = exit_pnl_r(
+                    position.side, position.entry_price, exit_price, risk, reason,
+                    fee_pct_per_side=fee_pct_per_side, slippage_r_per_side=slippage_r_per_side,
+                    take_profit_order_type=take_profit_order_type,
+                    maker_fee_pct_per_side=maker_fee_pct_per_side)
 
             trades.append({
                 "symbol": symbol, "side": position.side, "reason": reason,

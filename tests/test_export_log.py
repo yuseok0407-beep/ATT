@@ -1,6 +1,7 @@
 import csv
 import json
 
+from src.core.config import FEE_PCT_PER_SIDE
 from src.execution import export_log
 from src.execution.export_log import (
     build_config_rows,
@@ -238,7 +239,7 @@ def test_trade_rows_carry_net_r_and_mark_estimated_fees():
     row, = build_trade_rows(entries, "demo")
 
     assert row["realized_r"] == 2.0
-    assert row["net_realized_r"] == 1.936  # 2.0 - (2 x 0.0004 / 0.0125)
+    assert row["net_realized_r"] == round(2.0 - 2 * FEE_PCT_PER_SIDE / 0.0125, 4)
     assert row["fee_estimated"] == "yes"
 
 
@@ -302,7 +303,7 @@ def test_export_env_summary_reports_net_r_alongside_gross(tmp_path, monkeypatch)
     summary = export_env("demo", tmp_path / "out", journal_path=str(journal_path))
 
     assert summary["total_r"] == 2.0
-    assert summary["total_net_r"] == 1.936
+    assert summary["total_net_r"] == round(2.0 - 2 * FEE_PCT_PER_SIDE / 0.0125, 4)
 
 
 def test_exit_slippage_measures_take_profit_fill_against_the_trigger_price():

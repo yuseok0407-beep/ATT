@@ -2,6 +2,7 @@ import pytest
 
 from datetime import datetime, timedelta, timezone
 
+from src.core.config import FEE_PCT_PER_SIDE
 from src.execution import performance
 from src.execution.performance import (
     _local_day,
@@ -408,13 +409,18 @@ def _closed_with_r(realized_r, *, entry=100.0, stop=98.75, pnl=None, **extra):
             **extra}
 
 
+# 옛 기록의 수수료 추정치 — 설정값에서 계산한다(숫자로 박아 두면 수수료율을 실측으로 고칠
+# 때마다 테스트가 깨진다, 2026-09-28).
+_FEE_R_AT_1_25PCT_STOP = 2 * FEE_PCT_PER_SIDE / 0.0125
+
+
 def test_net_r_subtracts_the_configured_round_trip_fee_for_old_records():
     """2026-09-22 이전 기록에는 실측 수수료가 없다 — 설정 수수료율과 손절폭으로 추정한다.
-    수수료R = 2 x 0.0004 / 0.0125 = 0.064R."""
+    수수료R = 2 x 편도율 / 0.0125 (편도 0.05%면 0.08R)."""
     result = summarize_r_performance([_closed_with_r(2.0)])
 
     assert result["total_r"] == pytest.approx(2.0)
-    assert result["total_net_r"] == pytest.approx(2.0 - 0.064)
+    assert result["total_net_r"] == pytest.approx(2.0 - _FEE_R_AT_1_25PCT_STOP)
     assert result["net_r_estimated_trades"] == 1
     assert result["fee_pct_per_side"] == pytest.approx(performance.FEE_PCT_PER_SIDE)
 
@@ -450,7 +456,7 @@ def test_equity_curve_carries_both_gross_and_net_r():
 
     last = result["equity_curve"][-1]
     assert last["cumulative_r"] == pytest.approx(1.0)
-    assert last["cumulative_net_r"] == pytest.approx(1.0 - 2 * 0.064)
+    assert last["cumulative_net_r"] == pytest.approx(1.0 - 2 * _FEE_R_AT_1_25PCT_STOP)
 
 
 def test_net_r_skips_trades_whose_r_was_discarded():

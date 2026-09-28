@@ -20,6 +20,7 @@ from src.core.config import (
     RULE_SMA_PERIOD,
     RULE_TIMEFRAME,
     STOP_LOSS_PCT,
+    TAKE_PROFIT_ORDER_TYPE,
     TAKE_PROFIT_RR,
 )
 from src.core.futures_risk import check_stop_before_liquidation, estimate_liquidation_price, leveraged_position_size
@@ -92,6 +93,9 @@ def current_strategy_config() -> dict:
         "max_entry_price_drift_r": MAX_ENTRY_PRICE_DRIFT_R,
         "stop_loss_pct": STOP_LOSS_PCT,
         "take_profit_rr": TAKE_PROFIT_RR,
+        # 체결 방식도 성과를 바꾼다(지정가 익절은 조건부 시장가보다 거래당 약 0.03R 싸다) —
+        # 바뀐 시점에 전략 버전 경계가 생겨야 전후 비교가 된다.
+        "take_profit_order_type": TAKE_PROFIT_ORDER_TYPE,
         "leverage": LEVERAGE,
         "risk_per_trade": FUTURES_RISK_PER_TRADE,
         "max_concurrent_positions": MAX_CONCURRENT_POSITIONS,
@@ -784,7 +788,7 @@ def _evaluate_symbol(client, symbol: str, position: dict | None, margin_equity: 
 
     result["execution"] = open_position_with_bracket(
         client, symbol, side, quantity, stop_loss_price, take_profit_price,
-        env=env, confirm_live=(env == "live"),
+        env=env, confirm_live=(env == "live"), take_profit_order_type=TAKE_PROFIT_ORDER_TYPE,
     )
     result["event"] = "entered"
     result["entered"] = True
