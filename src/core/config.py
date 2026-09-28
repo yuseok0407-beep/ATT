@@ -157,6 +157,14 @@ HEARTBEAT_STALE_SECONDS = int(os.getenv("HEARTBEAT_STALE_SECONDS", "600"))
 # 0 이하면 이 알림만 끈다.
 BREAKER_HALT_ALERT_HOURS = float(os.getenv("BREAKER_HALT_ALERT_HOURS", "6"))
 
+# 대시보드를 어디서 열 수 있게 할지(2026-09-28). 기본은 이 PC에서만(127.0.0.1).
+# 휴대폰에서 보려면 DASHBOARD_HOST=0.0.0.0 + DASHBOARD_TOKEN(접속 비밀번호)을 같이 설정한다 —
+# 대시보드에는 긴급청산·실계좌 봇 시작 버튼이 있어서, 토큰 없이 PC 밖에 여는 설정이면
+# dashboard/app.py가 시작을 거부한다. 이 PC 자신(127.0.0.1)에서 여는 요청은 토큰을 묻지 않는다.
+DASHBOARD_HOST = os.getenv("DASHBOARD_HOST", "127.0.0.1").strip()
+DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "5055"))
+DASHBOARD_TOKEN = os.getenv("DASHBOARD_TOKEN", "").strip()
+
 # 하루 한 번 전날 성과를 텔레그램으로 보낸다(2026-09-09). 로컬 시각 기준 이 시(hour)를 지나면
 # 전날치를 한 번 쏜다 — 일일 손실 한도가 리셋되는 경계(date.today())와 같은 기준이라 "하루"의
 # 정의가 대시보드와 어긋나지 않는다. -1이면 이 기능만 끈다.

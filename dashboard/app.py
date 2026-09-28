@@ -1,15 +1,21 @@
+import hashlib
+import hmac
 import logging
 import sys
+import time
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, jsonify, redirect, render_template, request
 
 logger = logging.getLogger(__name__)
 
 from src.core.config import (
+    DASHBOARD_HOST,
+    DASHBOARD_PORT,
+    DASHBOARD_TOKEN,
     FUTURES_SYMBOLS,
     LEVERAGE,
     MAX_CONCURRENT_POSITIONS,
@@ -23,7 +29,7 @@ from src.core.state import compute_consecutive_losses, get_daily_pnl_pct
 from src.data.futures_exchange import (LiveKeysNotConfiguredError, fetch_ohlcv_df, get_futures_balance,
                                         get_futures_client, get_position)
 from src.data.public_ip import get_public_ip
-from src.execution import bot_process, excursion, filter_stats
+from src.execution import bot_process, equity_log, excursion, filter_stats
 from src.execution.strategy_versions import summarize_by_version
 from src.execution.futures_orders import close_position, get_bracket_prices
 from src.execution.heartbeat import DEFAULT_PATH as HEARTBEAT_DEMO_PATH
@@ -55,6 +61,96 @@ from src.futures_rule_bot import (
 
 app = Flask(__name__)
 _clients: dict[str, object] = {}  # env("demo"/"live") -> ccxt client, 지연 생성 후 캐시
+
+# 월 +1% 자산 수익률(복리) — docs/OBJECTIVE.md의 목표. 화면의 30일 수익률 옆에 기준선으로 쓴다.
+MONTHLY_TARGET_RETURN = 0.01
+
+# 차트에서 고를 수 있는 봉 주기. 아무 문자열이나 거래소로 넘기지 않도록 목록으로 막는다.
+CHART_TIMEFRAMES = ("15m", "1h", "4h", "1d")
+
+
+# ---------- 접속 제어 (2026-09-28) ----------
+# 휴대폰에서 보려고 대시보드를 PC 밖(0.0.0.0)에 열면, 같은 와이파이의 누구나 긴급청산이나
+# 실계좌 봇 시작을 누를 수 있게 된다. 그래서 PC 밖에서 오는 요청은 토큰으로 로그인해야 한다.
+# 이 PC 자신에서 여는 요청(127.0.0.1)은 지금처럼 바로 통과한다 — 기존 사용 방식을 안 바꾸려고.
+_LOOPBACK_ADDRS = {"127.0.0.1", "::1", "::ffff:127.0.0.1"}
+_LOCAL_BIND_HOSTS = {"127.0.0.1", "localhost", "::1"}
+_AUTH_COOKIE = "auto2_dash"
+_AUTH_COOKIE_DAYS = 90
+_PUBLIC_PATHS = {"/login", "/manifest.webmanifest", "/icon.svg"}
+# 같은 PC의 프록시(예: tailscale serve)를 거쳐 들어온 요청은 주소가 127.0.0.1로 보이지만 실제로는
+# 밖에서 온 것이다 — 이런 헤더가 붙어 있으면 로컬로 믿지 않는다.
+_PROXY_HEADERS = ("X-Forwarded-For", "Forwarded", "Tailscale-User-Login")
+
+
+def _auth_digest(token: str) -> str:
+    """쿠키에는 토큰 원문 대신 이 값을 넣는다 — 쿠키가 새어도 토큰 자체는 드러나지 않게."""
+    return hmac.new(token.encode("utf-8"), b"auto2-dashboard", hashlib.sha256).hexdigest()
+
+
+def _is_local_request() -> bool:
+    if request.remote_addr not in _LOOPBACK_ADDRS:
+        return False
+    return not any(request.headers.get(h) for h in _PROXY_HEADERS)
+
+
+def _is_authorized() -> bool:
+    if _is_local_request():
+        return True
+    if not DASHBOARD_TOKEN:
+        return False
+    return hmac.compare_digest(request.cookies.get(_AUTH_COOKIE, ""), _auth_digest(DASHBOARD_TOKEN))
+
+
+def check_bind_is_safe(host: str, token: str) -> None:
+    """PC 밖에서 접속 가능한 주소로 열면서 토큰이 없으면 시작을 거부한다(조용히 열어두지 않음)."""
+    if host not in _LOCAL_BIND_HOSTS and not token:
+        raise SystemExit(
+            f"DASHBOARD_HOST={host}로 열려면 .env에 DASHBOARD_TOKEN(접속 비밀번호)을 설정해야 합니다 — "
+            "대시보드에 긴급청산·실계좌 봇 시작 버튼이 있어서 비밀번호 없이 네트워크에 열 수 없습니다.")
+
+
+@app.before_request
+def _require_auth():
+    if request.path in _PUBLIC_PATHS or _is_authorized():
+        return None
+    if request.path.startswith("/api/"):
+        return jsonify({"status": "error", "message": "로그인이 필요합니다."}), 401
+    return redirect("/login")
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    error = None
+    if request.method == "POST":
+        submitted = (request.form.get("token") or "").strip()
+        if DASHBOARD_TOKEN and hmac.compare_digest(submitted.encode("utf-8"), DASHBOARD_TOKEN.encode("utf-8")):
+            resp = redirect("/")
+            resp.set_cookie(_AUTH_COOKIE, _auth_digest(DASHBOARD_TOKEN), max_age=_AUTH_COOKIE_DAYS * 86400,
+                            httponly=True, samesite="Strict")
+            return resp
+        time.sleep(1)  # 무차별 대입을 느리게 — 사람이 한 번 틀리는 데는 지장 없다
+        error = "비밀번호가 맞지 않습니다." if DASHBOARD_TOKEN else "서버에 DASHBOARD_TOKEN이 설정되지 않았습니다."
+    return render_template("login.html", error=error)
+
+
+@app.route("/manifest.webmanifest")
+def manifest():
+    """휴대폰 '홈 화면에 추가'용 — 앱처럼 주소창 없이 열린다."""
+    return jsonify({
+        "name": "auto2 대시보드", "short_name": "auto2", "start_url": "/", "display": "standalone",
+        "background_color": "#0c0e12", "theme_color": "#0c0e12",
+        "icons": [{"src": "/icon.svg", "sizes": "any", "type": "image/svg+xml"}],
+    })
+
+
+@app.route("/icon.svg")
+def icon():
+    svg = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">'
+           '<rect width="64" height="64" rx="14" fill="#0c0e12"/>'
+           '<path d="M12 44 L26 30 L34 38 L52 18" fill="none" stroke="#2ebd85" stroke-width="6" '
+           'stroke-linecap="round" stroke-linejoin="round"/></svg>')
+    return Response(svg, mimetype="image/svg+xml")
 
 
 def _get_client(env: str = "demo"):
@@ -233,25 +329,77 @@ def api_performance():
 
 @app.route("/api/chart/<path:symbol>")
 def api_chart(symbol):
-    """대시보드의 종목 클릭 차트용 — 전략이 실제로 보는 것과 같은 타임프레임(RULE_TIMEFRAME)의
-    최근 캔들을 그대로 돌려준다. env별로 마켓 목록이 달라서(예: SOXL은 실계좌에만 있음) 같은
-    심볼이라도 env에 따라 404가 될 수 있다."""
+    """대시보드 차트용 캔들. 기본 주기는 전략이 실제로 보는 RULE_TIMEFRAME이고 `?tf=`로
+    CHART_TIMEFRAMES 중 하나를 고를 수 있다. env별로 마켓 목록이 달라서(예: SOXL은 실계좌에만
+    있음) 같은 심볼이라도 env에 따라 404가 될 수 있다.
+
+    마지막 봉은 아직 마감 안 된 봉이다 — 차트는 거래소 화면처럼 그대로 보여주고(`live_last`로
+    표시), 신호 판정에는 이 응답을 쓰지 않는다."""
     env = _resolve_env()
     if env is None:
         return jsonify({"status": "error", "message": "알 수 없는 env입니다."}), 400
+    timeframe = request.args.get("tf", RULE_TIMEFRAME)
+    if timeframe not in CHART_TIMEFRAMES and timeframe != RULE_TIMEFRAME:
+        return jsonify({"status": "error", "message": "지원하지 않는 봉 주기입니다."}), 400
     client, err = _get_client_or_error(env)
     if err:
         return err
     if symbol not in client.markets:
         return jsonify({"status": "error", "message": "알 수 없는 심볼입니다."}), 404
 
-    df = fetch_ohlcv_df(client, symbol, timeframe=RULE_TIMEFRAME, limit=100)
+    try:
+        df = fetch_ohlcv_df(client, symbol, timeframe=timeframe, limit=160)
+    except Exception as exc:
+        logger.exception("failed to fetch chart candles for %s (env=%s)", symbol, env)
+        return jsonify({"status": "error", "message": f"캔들 조회 실패: {exc}"}), 503
+    # 시각은 epoch ms로 보낸다 — timestamp는 tz 없는 UTC라 isoformat으로 보내면 브라우저가
+    # 로컬 시각으로 읽어서 9시간 어긋난다.
     candles = [
-        {"time": row.timestamp.isoformat(), "open": row.open, "high": row.high,
-         "low": row.low, "close": row.close}
+        {"t": int(row.timestamp.value // 1_000_000), "o": row.open, "h": row.high,
+         "l": row.low, "c": row.close, "v": row.volume}
         for row in df.itertuples()
     ]
-    return jsonify({"symbol": symbol, "timeframe": RULE_TIMEFRAME, "candles": candles})
+    return jsonify({"symbol": symbol, "timeframe": timeframe, "strategy_timeframe": RULE_TIMEFRAME,
+                    "timeframes": list(CHART_TIMEFRAMES), "candles": candles, "live_last": True})
+
+
+@app.route("/api/tickers")
+def api_tickers():
+    """감시 종목의 현재가·24시간 등락 — 거래소 화면의 종목 목록처럼 보여주기 위한 것.
+    한 번의 호출로 전 종목을 받는다. 실패해도 화면의 나머지는 살아 있어야 하므로 빈 값으로 200."""
+    env = _resolve_env()
+    if env is None:
+        return jsonify({"status": "error", "message": "알 수 없는 env입니다."}), 400
+    client, err = _get_client_or_error(env)
+    if err:
+        return err
+    symbols = _available_symbols(client)
+    try:
+        raw = client.fetch_tickers(symbols)
+    except Exception:
+        logger.exception("failed to fetch tickers (env=%s)", env)
+        raw = {}
+    tickers = {
+        symbol: {"last": t.get("last"), "change_pct": t.get("percentage"), "high": t.get("high"),
+                 "low": t.get("low"), "quote_volume": t.get("quoteVolume")}
+        for symbol, t in raw.items() if symbol in symbols
+    }
+    return jsonify({"env": env, "tickers": tickers})
+
+
+@app.route("/api/equity")
+def api_equity():
+    """날짜별 마진 자산과 최근 30일 수익률 — 목표(월 +1%)와 직접 비교할 수 있는 유일한 값
+    (R이나 실현손익 합계로는 못 낸다: equity_log 모듈 설명 참고)."""
+    env = _resolve_env()
+    if env is None:
+        return jsonify({"status": "error", "message": "알 수 없는 env입니다."}), 400
+    # 경로는 호출 시점에 모듈에서 읽는다 — 테스트(conftest)가 모듈 전역을 갈아끼워 격리한다.
+    path = equity_log.LIVE_DEFAULT_PATH if env == "live" else equity_log.DEFAULT_PATH
+    days = [{"day": day, "start": rec.get("start"), "end": rec.get("end")}
+            for day, rec in equity_log.read_days(path=path).items() if isinstance(rec, dict)]
+    return jsonify({"env": env, "days": days, "month": equity_log.period_return(path=path, days=30),
+                    "target_monthly_return": MONTHLY_TARGET_RETURN})
 
 
 @app.route("/api/conditions")
@@ -378,4 +526,5 @@ def api_telegram_stop():
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5055, debug=False, threaded=True)
+    check_bind_is_safe(DASHBOARD_HOST, DASHBOARD_TOKEN)
+    app.run(host=DASHBOARD_HOST, port=DASHBOARD_PORT, debug=False, threaded=True)

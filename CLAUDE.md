@@ -62,7 +62,16 @@ USDT-M 선물(레버리지 롱/숏)을 **순수 규칙 기반**으로 상시 감
   자산 경로**로 환산(월 수익률·최대 낙폭·월 1%로 회복 기간). 리스크 비율은 결과의 크기만 바꾸고
   부호는 못 바꾼다. 일일 손실 한도(자산 %)의 R 환산이 비율마다 달라 비율마다 다시 시뮬레이션한다.
 - `src/execution/futures_orders.py` — 주문 실행(브라켓 동시 발주, 고아 주문 정리)
-- `dashboard/app.py` — 선물 봇 상태를 보여주는 Flask 웹 대시보드 (http://127.0.0.1:5055)
+- `dashboard/app.py` — 선물 봇 상태를 보여주는 Flask 웹 대시보드 (http://127.0.0.1:5055).
+  화면은 `templates/index.html`(구조) + `static/dashboard.css` + `static/dashboard.js`로 나뉜다
+  (2026-09-28 개편 — 거래소형 레이아웃, 휴대폰 폭에서는 아래 메뉴로 화면 전환). 차트는 외부
+  라이브러리 없이 canvas로 직접 그린다. 새 API: `/api/tickers`(현재가·24h), `/api/equity`(날짜별
+  자산 + 30일 수익률 vs 월 +1%), `/api/chart?tf=`(`CHART_TIMEFRAMES`만 허용, 시각은 epoch ms).
+  - **휴대폰 접속**: `DASHBOARD_HOST=0.0.0.0` + `DASHBOARD_TOKEN`. 127.0.0.1에서 온 요청만 토큰 없이
+    통과하고(프록시 헤더가 붙어 있으면 로컬로 안 믿음), 나머지는 `/login`에서 토큰 입력 → HMAC 쿠키.
+    토큰 없이 PC 밖 주소로 열면 `check_bind_is_safe`가 시작을 거부한다 — 긴급청산·실계좌 봇 시작
+    버튼이 있어서. 새 라우트를 추가해도 `before_request`가 자동으로 막으므로 따로 할 일은 없다
+    (인증 없이 열어야 하는 경로만 `_PUBLIC_PATHS`에 넣을 것).
 - `src/core/signal_status.py` — "진입 조건에 지금 얼마나 가까운지" 계산. 대시보드
   `/api/conditions`와 텔레그램 `/conditions`가 **같은 함수**를 쓴다(조건을 두 군데 적으면
   실거래 로직과 어긋나므로). 실제 판정은 `futures_strategy`를 그대로 호출하고 거리/점수만 덧붙인다.

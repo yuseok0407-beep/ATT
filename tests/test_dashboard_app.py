@@ -354,3 +354,145 @@ def test_api_status_config_comes_from_the_single_strategy_config(client, monkeyp
     assert config == dashboard_app.current_strategy_config()
     # 진입 판단에 실제로 쓰이는 필터들이 화면에 빠져 있으면 "왜 진입을 안 하지"를 화면만 보고 알 수 없다
     assert "regime_sma_period" in config and "min_atr_to_stop_ratio" in config
+
+
+# ---------- 휴대폰 접속용 접근 제어 (2026-09-28) ----------
+
+_REMOTE = {"REMOTE_ADDR": "100.64.0.7"}  # 같은 와이파이/Tailscale에서 온 요청
+
+
+def test_local_requests_do_not_need_a_token(client, monkeypatch):
+    """이 PC에서 여는 기존 사용 방식은 그대로여야 한다(테스트 클라이언트 기본 주소가 127.0.0.1)."""
+    monkeypatch.setattr(dashboard_app, "DASHBOARD_TOKEN", "secret")
+    monkeypatch.setattr(dashboard_app, "get_public_ip", lambda: "1.2.3.4")
+    assert client.get("/api/public-ip").status_code == 200
+
+
+def test_remote_requests_without_login_are_refused(client, monkeypatch):
+    monkeypatch.setattr(dashboard_app, "DASHBOARD_TOKEN", "secret")
+
+    api = client.get("/api/status", environ_base=_REMOTE)
+    page = client.get("/", environ_base=_REMOTE)
+    close = client.post("/api/close/BTC/USDT:USDT", environ_base=_REMOTE)
+
+    assert api.status_code == 401
+    assert page.status_code == 302 and page.headers["Location"].endswith("/login")
+    assert close.status_code == 401  # 긴급청산 같은 조작이 인증 없이 통과하면 안 된다
+
+
+def test_remote_requests_are_refused_when_no_token_is_configured(client, monkeypatch):
+    """토큰이 비어 있으면 빈 쿠키로도 통과하지 못해야 한다(빈 문자열끼리 비교해 통과하는 사고 방지)."""
+    monkeypatch.setattr(dashboard_app, "DASHBOARD_TOKEN", "")
+    client.set_cookie(dashboard_app._AUTH_COOKIE, "")
+    assert client.get("/api/public-ip", environ_base=_REMOTE).status_code == 401
+
+
+def test_login_with_the_right_token_lets_remote_requests_through(client, monkeypatch):
+    monkeypatch.setattr(dashboard_app, "DASHBOARD_TOKEN", "secret")
+    monkeypatch.setattr(dashboard_app, "get_public_ip", lambda: "1.2.3.4")
+
+    resp = client.post("/login", data={"token": "secret"}, environ_base=_REMOTE)
+
+    assert resp.status_code == 302
+    cookie = resp.headers["Set-Cookie"]
+    assert "secret" not in cookie.split(";")[0]  # 쿠키에 토큰 원문을 넣지 않는다
+    assert "HttpOnly" in cookie
+    assert client.get("/api/public-ip", environ_base=_REMOTE).status_code == 200
+
+
+def test_login_with_a_wrong_token_is_rejected(client, monkeypatch):
+    monkeypatch.setattr(dashboard_app, "DASHBOARD_TOKEN", "secret")
+    monkeypatch.setattr(dashboard_app.time, "sleep", lambda s: None)
+
+    resp = client.post("/login", data={"token": "guess"}, environ_base=_REMOTE)
+
+    assert resp.status_code == 200
+    assert "Set-Cookie" not in resp.headers
+    assert client.get("/api/public-ip", environ_base=_REMOTE).status_code == 401
+
+
+def test_a_proxied_request_from_loopback_is_not_trusted_as_local(client, monkeypatch):
+    """같은 PC의 프록시(tailscale serve 등)를 거친 요청은 주소가 127.0.0.1이어도 밖에서 온 것이다."""
+    monkeypatch.setattr(dashboard_app, "DASHBOARD_TOKEN", "secret")
+    resp = client.get("/api/public-ip", headers={"X-Forwarded-For": "100.64.0.7"})
+    assert resp.status_code == 401
+
+
+def test_login_page_and_manifest_are_reachable_without_login(client, monkeypatch):
+    monkeypatch.setattr(dashboard_app, "DASHBOARD_TOKEN", "secret")
+    assert client.get("/login", environ_base=_REMOTE).status_code == 200
+    assert client.get("/manifest.webmanifest", environ_base=_REMOTE).status_code == 200
+
+
+def test_binding_outside_this_pc_requires_a_token():
+    with pytest.raises(SystemExit):
+        dashboard_app.check_bind_is_safe("0.0.0.0", "")
+    dashboard_app.check_bind_is_safe("0.0.0.0", "secret")
+    dashboard_app.check_bind_is_safe("127.0.0.1", "")
+
+
+# ---------- 차트 · 시세 · 자산 (2026-09-28) ----------
+
+def test_api_chart_sends_epoch_ms_and_volume(client, monkeypatch):
+    """timestamp는 tz 없는 UTC라 isoformat으로 보내면 브라우저가 로컬 시각으로 읽어 9시간 어긋난다."""
+    import pandas as pd
+    captured = {}
+
+    def _fetch(client, symbol, timeframe="1h", limit=100):
+        captured["timeframe"] = timeframe
+        return pd.DataFrame({"timestamp": pd.to_datetime([1_700_000_000_000], unit="ms"),
+                             "open": [1.0], "high": [2.0], "low": [0.5], "close": [1.5], "volume": [10.0]})
+
+    monkeypatch.setattr(dashboard_app, "fetch_ohlcv_df", _fetch)
+
+    body = client.get("/api/chart/BTC/USDT:USDT?tf=4h").get_json()
+
+    assert captured["timeframe"] == "4h"
+    assert body["candles"][0] == {"t": 1_700_000_000_000, "o": 1.0, "h": 2.0, "l": 0.5, "c": 1.5, "v": 10.0}
+
+
+def test_api_chart_rejects_an_unlisted_timeframe(client):
+    assert client.get("/api/chart/BTC/USDT:USDT?tf=3m").status_code == 400
+
+
+def test_api_tickers_returns_only_the_watched_symbols(client, monkeypatch):
+    class _TickerClient(_FakeClient):
+        def fetch_tickers(self, symbols):
+            return {"BTC/USDT:USDT": {"last": 100.0, "percentage": 1.5, "high": 110.0, "low": 90.0,
+                                      "quoteVolume": 5e6},
+                    "DOGE/USDT:USDT": {"last": 0.1}}
+
+    monkeypatch.setattr(dashboard_app, "_get_client", lambda env="demo": _TickerClient())
+
+    body = client.get("/api/tickers").get_json()
+
+    assert set(body["tickers"]) == {"BTC/USDT:USDT"}
+    assert body["tickers"]["BTC/USDT:USDT"]["change_pct"] == 1.5
+
+
+def test_api_tickers_survives_an_exchange_error(client, monkeypatch):
+    class _BrokenClient(_FakeClient):
+        def fetch_tickers(self, symbols):
+            raise TimeoutError("backend timeout")
+
+    monkeypatch.setattr(dashboard_app, "_get_client", lambda env="demo": _BrokenClient())
+
+    resp = client.get("/api/tickers")
+    assert resp.status_code == 200
+    assert resp.get_json()["tickers"] == {}
+
+
+def test_api_equity_reads_the_env_specific_log(client):
+    from datetime import datetime
+    from src.execution import equity_log
+    equity_log.record(1000.0, path=equity_log.DEFAULT_PATH, now=datetime(2026, 9, 1, 9).astimezone())
+    equity_log.record(1010.0, path=equity_log.DEFAULT_PATH, now=datetime(2026, 9, 2, 9).astimezone())
+    equity_log.record(500.0, path=equity_log.LIVE_DEFAULT_PATH, now=datetime(2026, 9, 2, 9).astimezone())
+
+    demo = client.get("/api/equity").get_json()
+    live = client.get("/api/equity?env=live").get_json()
+
+    assert [d["day"] for d in demo["days"]] == ["2026-09-01", "2026-09-02"]
+    assert demo["month"]["return_pct"] == pytest.approx(0.01)
+    assert demo["target_monthly_return"] == 0.01
+    assert live["month"] is None  # 하루치뿐이라 수익률을 못 낸다

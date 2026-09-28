@@ -2,1309 +2,252 @@
 <html lang="ko">
 <head>
 <meta charset="utf-8">
-<title>auto2 선물 봇 대시보드</title>
-<style>
-  :root {
-    --bg: #0f1115; --panel: #171a21; --border: #262b36; --text: #e6e8ee;
-    --muted: #8b93a7; --green: #34d399; --red: #f87171; --blue: #60a5fa; --amber: #fbbf24;
-  }
-  * { box-sizing: border-box; }
-  body {
-    background: var(--bg); color: var(--text); margin: 0; padding: 24px;
-    font-family: -apple-system, "Segoe UI", Pretendard, sans-serif;
-  }
-  h1 { font-size: 18px; font-weight: 600; margin: 0 0 4px; }
-  .sub { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 20px; }
-  .symbol-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
-  .card {
-    background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
-  }
-  .card .label { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
-  .card .value { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
-  .value.green { color: var(--green); }
-  .value.red { color: var(--red); }
-  .value.amber { color: var(--amber); }
-  .value.blue { color: var(--blue); }
-  section { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
-  section h2 { font-size: 14px; margin: 0 0 12px; color: var(--muted); font-weight: 600; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
-  th { color: var(--muted); font-weight: 500; }
-  td.reason { white-space: normal; color: var(--muted); max-width: 380px; }
-  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
-  .badge.entered { background: rgba(52,211,153,.15); color: var(--green); }
-  .badge.closed { background: rgba(96,165,250,.15); color: var(--blue); }
-  .badge.no_signal { background: rgba(139,147,167,.15); color: var(--muted); }
-  .badge.holding_position { background: rgba(96,165,250,.15); color: var(--blue); }
-  .badge.skipped_max_positions { background: rgba(251,191,36,.15); color: var(--amber); }
-  .badge.circuit_breaker_blocked, .badge.rejected_unsafe_stop, .badge.rejected_zero_quantity { background: rgba(248,113,113,.15); color: var(--red); }
-  .badge.config_changed { background: rgba(139,147,167,.15); color: var(--muted); }
-  .close-btn {
-    background: rgba(248,113,113,.15); color: var(--red); border: 1px solid rgba(248,113,113,.4);
-    border-radius: 6px; padding: 4px 10px; font-size: 12px; font-weight: 600; cursor: pointer;
-  }
-  .close-btn:hover { background: rgba(248,113,113,.3); }
-  .close-btn:disabled { opacity: .5; cursor: not-allowed; }
-  .reset-streak-btn {
-    background: rgba(96,165,250,.15); color: var(--blue); border: 1px solid rgba(96,165,250,.4);
-    border-radius: 6px; padding: 2px 8px; font-size: 11px; font-weight: 600; cursor: pointer; margin-left: 8px;
-  }
-  .reset-streak-btn:hover { background: rgba(96,165,250,.3); }
-  .start-btn {
-    background: rgba(52,211,153,.15); color: var(--green); border: 1px solid rgba(52,211,153,.4);
-    border-radius: 6px; padding: 6px 14px; font-size: 13px; font-weight: 600; cursor: pointer;
-  }
-  .start-btn:hover { background: rgba(52,211,153,.3); }
-  .start-btn:disabled, .stop-btn:disabled { opacity: .5; cursor: not-allowed; }
-  .stop-btn {
-    background: rgba(248,113,113,.15); color: var(--red); border: 1px solid rgba(248,113,113,.4);
-    border-radius: 6px; padding: 6px 14px; font-size: 13px; font-weight: 600; cursor: pointer;
-  }
-  .stop-btn:hover { background: rgba(248,113,113,.3); }
-  .bot-controls { display: flex; gap: 8px; margin-top: 10px; }
-  .empty { color: var(--muted); font-size: 13px; padding: 16px 0; text-align: center; }
-  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
-  .dot.on { background: var(--green); box-shadow: 0 0 6px var(--green); }
-  .dot.off { background: var(--muted); }
-  .symbol-card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
-  .symbol-card .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
-  .symbol-card .ticker { font-weight: 700; font-size: 14px; }
-  .symbol-card .row { display: flex; justify-content: space-between; font-size: 13px; padding: 3px 0; }
-  .symbol-card .row .k { color: var(--muted); }
-  .symbol-card .row .v { font-variant-numeric: tabular-nums; }
-  .stat-row { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
-  .stat { flex: 1; min-width: 120px; }
-  .stat .label { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
-  .stat .value { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
-  .subtable { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 6px; }
-  .subtable th, .subtable td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
-  .subtable th { color: var(--muted); font-weight: 500; }
-  .subtable td.green { color: var(--green); }
-  .subtable td.red { color: var(--red); }
-  .version-head { margin-top: 14px; font-size: 13px; }
-  .version-head b { font-size: 15px; }
-  .subtable tr.current-version td { background: rgba(139,147,167,.10); font-weight: 600; }
-  .subtable td.version-detail { color: var(--muted); font-size: 12px; max-width: 340px; }
-  .reason-chips { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
-  .reason-chip {
-    background: rgba(139,147,167,.12); border: 1px solid var(--border); border-radius: 999px;
-    padding: 3px 10px; font-size: 12px; color: var(--muted);
-  }
-  .reason-chip b { color: var(--text); }
-  /* 진입 조건 근접도 */
-  .cond-list { display: grid; gap: 8px; }
-  .cond-row {
-    display: grid; grid-template-columns: 84px 1fr auto; gap: 12px; align-items: center;
-    padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px;
-    background: rgba(139,147,167,.04);
-  }
-  .cond-row.ready { border-color: rgba(52,211,153,.5); background: rgba(52,211,153,.08); }
-  .cond-row.blocked { opacity: .55; }
-  .cond-name { font-weight: 600; font-size: 13px; }
-  .cond-side { font-size: 11px; color: var(--muted); margin-top: 2px; }
-  .cond-side.long { color: var(--green); }
-  .cond-side.short { color: var(--red); }
-  .cond-bars { display: grid; gap: 5px; }
-  .cond-metric { display: grid; grid-template-columns: 88px 1fr 96px; gap: 8px; align-items: center; font-size: 11px; }
-  .cond-metric .k { color: var(--muted); }
-  .cond-metric .v { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
-  .cond-metric .v.ok { color: var(--green); }
-  .cond-metric .v.no { color: var(--amber); }
-  .mini-track { background: rgba(139,147,167,.15); border-radius: 999px; height: 6px; overflow: hidden; }
-  .mini-fill { height: 100%; border-radius: 999px; transition: width .3s ease; background: var(--blue); }
-  .mini-fill.ok { background: var(--green); }
-  .mini-fill.no { background: var(--amber); }
-  .cond-score { text-align: right; min-width: 96px; }
-  .cond-score .pct { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
-  .cond-score .cap { font-size: 11px; color: var(--muted); }
-  .cond-blockers { grid-column: 1 / -1; font-size: 11px; color: var(--muted); margin-top: 2px; }
-  .cond-note { font-size: 11px; color: var(--muted); margin-top: 10px; line-height: 1.6; }
-  .gauge-track {
-    background: rgba(139,147,167,.15); border-radius: 999px; height: 10px; overflow: hidden; margin: 6px 0 4px;
-  }
-  .gauge-fill { height: 100%; border-radius: 999px; transition: width .3s ease; background: var(--green); }
-  .gauge-fill.amber { background: var(--amber); }
-  .gauge-fill.red { background: var(--red); }
-  .gauge-caption { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); }
-  .config-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-top: 12px; }
-  .config-item { background: rgba(139,147,167,.08); border-radius: 8px; padding: 8px 12px; }
-  .config-item .k { color: var(--muted); font-size: 12px; }
-  .config-item .v { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; margin-top: 2px; }
-  .heartbeat-line { font-size: 12px; color: var(--muted); margin-top: 4px; }
-  .heartbeat-line.stale { color: var(--amber); }
-  .notify-btn {
-    background: rgba(96,165,250,.15); color: var(--blue); border: 1px solid rgba(96,165,250,.4);
-    border-radius: 6px; padding: 4px 10px; font-size: 12px; font-weight: 600; cursor: pointer; margin-top: 8px;
-  }
-  .notify-btn:hover { background: rgba(96,165,250,.3); }
-  .notify-btn.on { background: rgba(52,211,153,.15); color: var(--green); border-color: rgba(52,211,153,.4); }
-  .idle-row { display: flex; flex-wrap: wrap; gap: 8px; }
-  .idle-chip {
-    background: rgba(139,147,167,.10); border: 1px solid var(--border); border-radius: 999px;
-    padding: 5px 12px; font-size: 13px; color: var(--muted); cursor: pointer; font-weight: 600;
-  }
-  .idle-chip:hover { background: rgba(139,147,167,.2); color: var(--text); }
-  .symbol-card .ticker { cursor: pointer; }
-  .symbol-card .ticker:hover { text-decoration: underline; }
-  .chart-overlay {
-    display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 50;
-    align-items: center; justify-content: center;
-  }
-  .chart-overlay.open { display: flex; }
-  .chart-panel {
-    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
-    padding: 18px; width: min(720px, 92vw);
-  }
-  .chart-panel .chart-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
-  .chart-panel .chart-title { font-size: 15px; font-weight: 700; }
-  .chart-panel .chart-sub { color: var(--muted); font-size: 12px; }
-  .chart-close {
-    background: none; border: none; color: var(--muted); font-size: 20px; cursor: pointer; line-height: 1;
-  }
-  .chart-close:hover { color: var(--text); }
-  .chart-legend { display: flex; gap: 14px; font-size: 12px; color: var(--muted); margin-top: 8px; flex-wrap: wrap; }
-  .chart-legend .dot { width: 8px; height: 8px; border-radius: 2px; }
-
-  /* 데모/실계좌 전환 — 실계좌 화면은 어딜 봐도 절대 헷갈릴 수 없게 확실히 다르게 보여야 한다 */
-  .env-toggle { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; margin-bottom: 14px; }
-  .env-toggle button {
-    background: var(--panel); color: var(--muted); border: none; padding: 6px 16px;
-    font-size: 13px; font-weight: 700; cursor: pointer; letter-spacing: .03em;
-  }
-  .env-toggle button.active[data-env="demo"] { background: rgba(96,165,250,.18); color: var(--blue); }
-  .env-toggle button.active[data-env="live"] { background: rgba(248,113,113,.22); color: var(--red); }
-  .env-banner {
-    display: none; background: rgba(248,113,113,.12); border: 1px solid var(--red); color: var(--red);
-    border-radius: 8px; padding: 10px 14px; font-size: 13px; font-weight: 600; margin-bottom: 14px;
-  }
-  .env-banner .ip-line {
-    margin-top: 6px; font-size: 12px; font-weight: 500; color: rgba(248,113,113,.85);
-    font-variant-numeric: tabular-nums;
-  }
-  .env-banner .ip-line #public-ip { font-weight: 700; color: var(--red); }
-  .env-banner .ip-line a { color: var(--red); text-decoration: underline; margin: 0 2px; }
-  body.env-live .env-banner { display: block; }
-  body.env-live .card, body.env-live section, body.env-live .symbol-card {
-    border-color: rgba(248,113,113,.5);
-  }
-  /* 무보호 포지션 경보 — 손절 없는 레버리지 포지션은 화면에서 즉시 튀어야 한다(2026-09-09).
-     지금까지는 손절가 칸에 "-" 한 글자로만 표시돼서 정상 상태와 육안 구분이 안 됐다. */
-  .alert-banner {
-    display: none; background: rgba(248,113,113,.15); border: 1px solid rgba(248,113,113,.6);
-    border-radius: 10px; padding: 12px 16px; margin-bottom: 16px; font-size: 13px;
-    color: var(--red); font-weight: 600; line-height: 1.6;
-  }
-  .alert-banner.show { display: block; }
-  .alert-banner .detail { color: var(--text); font-weight: 400; font-size: 12px; margin-top: 4px; }
-  .symbol-card.unprotected { border-color: var(--red); box-shadow: 0 0 0 1px rgba(248,113,113,.35); }
-  .warn-badge {
-    background: rgba(248,113,113,.2); color: var(--red); border-radius: 999px;
-    padding: 1px 8px; font-size: 11px; font-weight: 700;
-  }
-  /* 손절(-1R)~익절(+2R) 사이에서 지금 어디인지 + 보유 중 최고점 */
-  .rbar { position: relative; height: 8px; border-radius: 999px; background: rgba(139,147,167,.18); margin: 12px 0 4px; }
-  .rbar-fill { position: absolute; top: 0; bottom: 0; border-radius: 999px; background: var(--green); }
-  .rbar-fill.neg { background: var(--red); }
-  .rbar-mark { position: absolute; top: -3px; bottom: -3px; width: 2px; }
-  .rbar-mark.entry { background: var(--muted); }
-  .rbar-mark.peak { background: var(--amber); }
-  .rbar-legend { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
-  .reason-chip.bad { border-color: rgba(248,113,113,.4); color: var(--red); }
-  /* R배수 성과 + 자산곡선 (2026-09-09) */
-  .curve-head { display: flex; justify-content: space-between; align-items: center; margin: 14px 0 6px; }
-  .curve-toggle button {
-    background: transparent; color: var(--muted); border: 1px solid var(--border);
-    border-radius: 6px; padding: 2px 10px; font-size: 11px; cursor: pointer; margin-left: 4px;
-  }
-  .curve-toggle button.active { color: var(--text); border-color: var(--blue); background: rgba(96,165,250,.12); }
-  .curve-wrap { background: rgba(139,147,167,.06); border-radius: 8px; padding: 8px; }
-  .curve-wrap svg { display: block; width: 100%; height: 150px; }
-  .side-table td .pill { font-size: 11px; color: var(--muted); }
-  .mfe-note { font-size: 12px; color: var(--muted); margin-top: 10px; line-height: 1.7; }
-</style>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0c0e12">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/icon.svg">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
+<link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
+<title>auto2</title>
 </head>
-<body>
-  <h1>auto2 선물 감시 봇</h1>
-  <div class="env-toggle" id="env-toggle">
+<body data-mview="home">
+
+<header class="topbar">
+  <div class="brand">auto2</div>
+  <div class="seg env-seg" id="env-toggle" role="tablist" aria-label="계좌">
     <button data-env="demo" class="active" onclick="switchEnv('demo')">DEMO</button>
     <button data-env="live" onclick="switchEnv('live')">LIVE</button>
   </div>
-  <div class="env-banner">
-    ⚠ LIVE — 실거래 계정입니다. 아래 시작/중지/긴급 청산은 전부 실제 자금에 영향을 줍니다.
-    <div class="ip-line">
-      현재 공인 IP: <span id="public-ip">확인 중…</span>
-      <a href="#" onclick="fetchPublicIp(); return false;">새로고침</a>
-      — 바이낸스 API 키의 IP 화이트리스트와 다르면 연결이 -2015 오류로 실패합니다.
-    </div>
+  <div class="top-status" id="top-bot-status"><span class="dot"></span><span>확인 중</span></div>
+  <div class="top-meta">
+    <span class="hide-sm">{{ symbols|length }}종목 · {{ leverage }}x · 최대 {{ max_concurrent }}포지션</span>
+    <span id="last-updated">불러오는 중</span>
   </div>
-  <div class="sub">{{ symbols|join(', ') }} · {{ leverage }}x · 최대 동시 {{ max_concurrent }}포지션 · <span id="last-updated">불러오는 중…</span></div>
+</header>
 
-  <div class="alert-banner" id="unprotected-banner"></div>
-
-  <div class="grid">
-    <div class="card"><div class="label">마진 자산</div><div class="value" id="margin-equity">–</div></div>
-    <div class="card"><div class="label">보유 포지션</div><div class="value" id="open-count">–</div></div>
-    <div class="card">
-      <div class="label">감시 봇</div>
-      <div class="value" style="font-size:15px"><span class="dot off" id="bot-status-dot"></span><span id="bot-status-text">확인 중…</span></div>
-      <div class="bot-controls">
-        <button class="start-btn" id="bot-start-btn" onclick="startBot()" disabled>시작</button>
-        <button class="stop-btn" id="bot-stop-btn" onclick="stopBot()" disabled>중지</button>
-      </div>
-      <div class="heartbeat-line" id="heartbeat-line"></div>
-      <button class="notify-btn" id="notify-btn" onclick="toggleNotify()">🔔 알림 켜기</button>
-    </div>
-    <div class="card">
-      <div class="label">텔레그램 봇 (알림·원격 시작/중지)</div>
-      <div class="value" style="font-size:15px"><span class="dot off" id="telegram-status-dot"></span><span id="telegram-status-text">확인 중…</span></div>
-      <div class="bot-controls">
-        <button class="start-btn" id="telegram-start-btn" onclick="startTelegram()" disabled>시작</button>
-        <button class="stop-btn" id="telegram-stop-btn" onclick="stopTelegram()" disabled>중지</button>
-      </div>
-    </div>
+<div class="banner live-banner">
+  <div><b>LIVE · 실거래 계정</b> — 시작/중지/청산 버튼은 전부 실제 자금에 영향을 줍니다.</div>
+  <div class="banner-sub">
+    이 PC 공인 IP <b id="public-ip" class="num">확인 중</b>
+    <a href="#" onclick="fetchPublicIp(); return false;">다시 확인</a>
+    · 바이낸스 API 키 IP 화이트리스트와 다르면 -2015 오류로 연결이 실패합니다.
   </div>
+</div>
+<div class="banner alert-banner" id="unprotected-banner"></div>
 
-  <section>
-    <h2>종목별 상태</h2>
-    <div class="symbol-grid" id="symbol-grid"></div>
-    <div class="idle-row" id="idle-row" style="margin-top:10px"></div>
+<main class="layout">
+
+  <!-- 계좌 요약 -->
+  <section class="strip" data-m="home" id="account-strip">
+    <div class="kpi kpi-main"><div class="k">마진 자산</div><div class="v num" id="kpi-equity">–</div>
+      <div class="s" id="kpi-equity-sub">&nbsp;</div></div>
+    <div class="kpi"><div class="k">오늘 손익</div><div class="v num" id="kpi-today">–</div>
+      <div class="s" id="kpi-today-sub">&nbsp;</div></div>
+    <div class="kpi"><div class="k">최근 30일</div><div class="v num" id="kpi-month">–</div>
+      <div class="s" id="kpi-month-sub">목표 월 +1.00%</div></div>
+    <div class="kpi"><div class="k">미실현 손익</div><div class="v num" id="kpi-upnl">–</div>
+      <div class="s" id="kpi-upnl-sub">&nbsp;</div></div>
+    <div class="kpi"><div class="k">포지션</div><div class="v num" id="kpi-positions">–</div>
+      <div class="s" id="kpi-positions-sub">&nbsp;</div></div>
+    <div class="kpi"><div class="k">누적 순R</div><div class="v num" id="kpi-netr">–</div>
+      <div class="s" id="kpi-netr-sub">수수료 차감</div></div>
   </section>
 
-  <div class="chart-overlay" id="chart-overlay" onclick="if (event.target === this) closeChart()">
-    <div class="chart-panel">
-      <div class="chart-head">
-        <div>
-          <div class="chart-title" id="chart-title">–</div>
-          <div class="chart-sub" id="chart-sub">–</div>
+  <!-- 종목 목록 -->
+  <section class="panel watch" data-m="chart">
+    <div class="panel-head"><h2>종목</h2><span class="muted small" id="watch-meta"></span></div>
+    <div class="watch-cols"><span>종목</span><span>현재가</span><span>24h</span><span>근접</span></div>
+    <div class="watch-list" id="watch-list"></div>
+  </section>
+
+  <!-- 차트 -->
+  <section class="panel chart" data-m="chart">
+    <div class="chart-top">
+      <div class="chart-title">
+        <span class="sym" id="chart-symbol">–</span>
+        <span class="num chart-last" id="chart-last">–</span>
+        <span class="num small" id="chart-change"></span>
+      </div>
+      <div class="seg tf-seg" id="tf-seg"></div>
+    </div>
+    <div class="chart-ohlc num" id="chart-ohlc">&nbsp;</div>
+    <div class="chart-box" id="chart-box">
+      <canvas id="chart-canvas"></canvas>
+      <div class="chart-msg" id="chart-msg">불러오는 중</div>
+    </div>
+    <div class="chart-legend" id="chart-legend"></div>
+  </section>
+
+  <!-- 봇 제어 · 리스크 -->
+  <aside class="side" data-m="home">
+    <section class="panel">
+      <div class="panel-head"><h2>감시 봇</h2><span class="tag" id="bot-env-tag">DEMO</span></div>
+      <div class="bot-state"><span class="dot" id="bot-status-dot"></span><span id="bot-status-text">확인 중</span></div>
+      <div class="muted small" id="heartbeat-line">&nbsp;</div>
+      <div class="breaker-line" id="breaker-line"></div>
+      <div class="btn-row">
+        <button class="btn btn-up" id="bot-start-btn" onclick="startBot()" disabled>시작</button>
+        <button class="btn btn-down" id="bot-stop-btn" onclick="stopBot()" disabled>중지</button>
+      </div>
+      <button class="btn btn-ghost btn-block" id="notify-btn" onclick="toggleNotify()">브라우저 알림 켜기</button>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head"><h2>리스크</h2></div>
+      <div class="meter">
+        <div class="meter-cap"><span>일일 손실 한도 사용</span><span class="num" id="daily-pnl-text">–</span></div>
+        <div class="track"><div class="fill" id="daily-pnl-gauge"></div></div>
+        <div class="meter-cap muted"><span>0%</span><span id="daily-loss-limit-text">–</span></div>
+      </div>
+      <div class="meter">
+        <div class="meter-cap"><span>연속 손실</span>
+          <span><span class="num" id="streak-text">–</span>
+            <button class="link-btn" id="reset-streak-btn" onclick="resetStreak()" hidden>리셋</button></span></div>
+        <div class="track steps" id="streak-steps"></div>
+      </div>
+      <div class="meter">
+        <div class="meter-cap"><span>동시 포지션</span><span class="num" id="slots-text">–</span></div>
+        <div class="track steps" id="slot-steps"></div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head"><h2>텔레그램</h2><span class="muted small">알림 · 원격 시작/중지</span></div>
+      <div class="bot-state"><span class="dot" id="telegram-status-dot"></span><span id="telegram-status-text">확인 중</span></div>
+      <div class="btn-row">
+        <button class="btn btn-up" id="telegram-start-btn" onclick="startTelegram()" disabled>시작</button>
+        <button class="btn btn-down" id="telegram-stop-btn" onclick="stopTelegram()" disabled>중지</button>
+      </div>
+    </section>
+  </aside>
+
+  <!-- 하단 탭 -->
+  <section class="panel dock">
+    <nav class="tabs" id="dock-tabs">
+      <button data-tab="positions" class="active">포지션 <span class="count" id="tab-pos-count">0</span></button>
+      <button data-tab="conditions">진입 조건</button>
+      <button data-tab="history">판단·거래 내역</button>
+      <button data-tab="performance">성과</button>
+      <button data-tab="settings">설정·점검</button>
+    </nav>
+
+    <!-- 포지션 -->
+    <div class="pane active" data-pane="positions" data-m="home">
+      <h3 class="m-title">보유 포지션</h3>
+      <div class="table-wrap desk-only">
+        <table class="grid-table" id="pos-table">
+          <thead><tr>
+            <th>종목</th><th class="r">수량</th><th class="r">진입가</th><th class="r">현재가</th>
+            <th class="r">청산가</th><th class="r">손절</th><th class="r">익절</th>
+            <th class="r">미실현 손익</th><th>진행 (R)</th><th></th>
+          </tr></thead>
+          <tbody id="pos-body"></tbody>
+        </table>
+      </div>
+      <div class="pos-cards mob-only" id="pos-cards"></div>
+      <div class="empty" id="pos-empty">보유 중인 포지션이 없습니다.</div>
+    </div>
+
+    <!-- 진입 조건 -->
+    <div class="pane" data-pane="conditions" data-m="cond">
+      <h3 class="m-title">진입 조건 근접도</h3>
+      <div class="pane-meta"><span id="cond-meta"></span></div>
+      <div class="chips" id="filter-chips"></div>
+      <div class="cond-list" id="cond-list"><div class="cond-row"><span class="muted">계산 중 — 종목마다 캔들을 새로 받아서 처음엔 30초쯤 걸립니다.</span></div></div>
+      <p class="note" id="cond-note"></p>
+    </div>
+
+    <!-- 내역 -->
+    <div class="pane" data-pane="history" data-m="hist">
+      <h3 class="m-title">판단·거래 내역</h3>
+      <div class="pane-meta">
+        <div class="seg small-seg" id="hist-filter">
+          <button data-f="all" class="active">전체</button>
+          <button data-f="trades">진입·청산</button>
+          <button data-f="issues">차단·오류</button>
         </div>
-        <button class="chart-close" onclick="closeChart()">✕</button>
+        <span class="muted small">최근 30건</span>
       </div>
-      <canvas id="chart-canvas" width="672" height="320" style="width:100%;height:320px"></canvas>
-      <div class="chart-legend" id="chart-legend"></div>
-    </div>
-  </div>
-
-  <section>
-    <h2>진입 조건 근접도 <span id="cond-meta" style="font-weight:400"></span></h2>
-    <div class="reason-chips" id="filter-chips" style="margin:0 0 12px"></div>
-    <div class="cond-list" id="cond-list"></div>
-    <div class="cond-note" id="cond-note"></div>
-  </section>
-
-  <section>
-    <h2>리스크 현황</h2>
-    <div>
-      <div class="gauge-caption"><span>일일 손익</span><span id="daily-pnl-text">–</span></div>
-      <div class="gauge-track"><div class="gauge-fill" id="daily-pnl-gauge" style="width:0%"></div></div>
-      <div class="gauge-caption"><span>0%</span><span id="daily-loss-limit-text">일일 손실 한도 -–%</span></div>
-    </div>
-    <div class="config-grid" id="config-grid"></div>
-    <div class="config-grid" id="consecutive-loss-grid"></div>
-    <div class="reason-chips" id="issue-chips"></div>
-    <div class="cond-note" id="issue-note"></div>
-  </section>
-
-  <section>
-    <h2>성과 요약</h2>
-    <div class="stat-row">
-      <div class="stat"><div class="label">총 거래 수</div><div class="value" id="perf-trades">–</div></div>
-      <div class="stat"><div class="label">승률</div><div class="value" id="perf-winrate">–</div></div>
-      <div class="stat"><div class="label">총 실현손익</div><div class="value" id="perf-total-pnl">–</div></div>
-      <div class="stat"><div class="label">평균 손익/거래</div><div class="value" id="perf-avg-pnl">–</div></div>
-    </div>
-    <div class="stat-row" id="perf-r-grid" style="margin-top:12px"></div>
-    <div class="curve-head">
-      <span style="font-size:12px;color:var(--muted)">누적 성과 곡선 · <span id="perf-r-coverage"></span></span>
-      <span class="curve-toggle">
-        <button id="curve-btn-r" class="active" onclick="setCurveMode('r')">순R (수수료후)</button>
-        <button id="curve-btn-usd" onclick="setCurveMode('usd')">실현손익</button>
-      </span>
-    </div>
-    <div class="curve-wrap"><svg id="equity-curve" viewBox="0 0 600 150" preserveAspectRatio="none"></svg></div>
-    <div class="mfe-note" id="perf-config-note"></div>
-    <div class="mfe-note" id="perf-mfe"></div>
-    <table class="subtable side-table" id="perf-side-table" style="display:none;margin-top:12px">
-      <thead><tr><th>방향</th><th>거래수</th><th>승률</th><th>총R</th></tr></thead>
-      <tbody id="perf-side-body"></tbody>
-    </table>
-    <div class="version-head" id="perf-version-head"></div>
-    <table class="subtable" id="perf-version-table" style="display:none;margin-top:6px">
-      <thead><tr><th>버전</th><th>시작</th><th>내용</th><th>거래수</th><th>승률</th><th>순R</th><th>건당 순R</th></tr></thead>
-      <tbody id="perf-version-body"></tbody>
-    </table>
-    <div class="reason-chips" id="perf-reasons" style="margin-top:12px"></div>
-    <table class="subtable" id="perf-symbol-table" style="display:none">
-      <thead><tr><th>종목</th><th>거래수</th><th>승률</th><th>총손익</th></tr></thead>
-      <tbody id="perf-symbol-body"></tbody>
-    </table>
-    <div class="empty" id="perf-empty">아직 청산된 거래가 없습니다.</div>
-  </section>
-
-  <section>
-    <h2>최근 판단/거래 내역</h2>
-    <div id="entries-wrap">
-      <table id="entries-table" style="display:none">
-        <thead><tr><th>시각</th><th>종목</th><th>결과</th><th>신호</th><th>진입가</th><th>청산가</th><th>손절가</th><th>익절가</th><th>실현손익</th><th>사유</th></tr></thead>
-        <tbody id="entries-body"></tbody>
-      </table>
+      <div class="hist-cards mob-only" id="entries-cards"></div>
+      <div class="table-wrap desk-only">
+        <table class="grid-table" id="entries-table">
+          <thead><tr><th>시각</th><th>종목</th><th>결과</th><th>신호</th><th class="r">진입가</th>
+            <th class="r">청산가</th><th class="r">손절</th><th class="r">익절</th><th class="r">실현손익</th><th>사유</th></tr></thead>
+          <tbody id="entries-body"></tbody>
+        </table>
+      </div>
       <div class="empty" id="entries-empty">아직 기록이 없습니다.</div>
     </div>
-  </section>
 
-<script>
-function fmtUsd(n) {
-  if (n === null || n === undefined) return '–';
-  return '$' + Number(n).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
-}
-function fmtPrice(n) {
-  if (n === null || n === undefined) return '–';
-  n = Number(n);
-  // 가격대가 종목마다 크게 다르다(BTC 수만 달러 vs XRP 1달러 미만) — 소수점 자리를 고정하면
-  // 저가 종목은 손절/익절가가 진입가와 구분 안 될 정도로 뭉개진다. 자릿수를 가격대에 맞게 조정.
-  const abs = Math.abs(n);
-  let digits;
-  if (abs >= 1000) digits = 1;
-  else if (abs >= 100) digits = 2;
-  else if (abs >= 1) digits = 4;
-  else if (abs >= 0.01) digits = 6;
-  else digits = 8;
-  return n.toLocaleString('en-US', {minimumFractionDigits: digits, maximumFractionDigits: digits});
-}
-function fmtPct(n, digits) {
-  if (n === null || n === undefined) return '–';
-  return (n * 100).toFixed(digits === undefined ? 1 : digits) + '%';
-}
-
-// 손절 주문이 없는 포지션은 화면 맨 위에서 경고한다 — 10배 레버리지에서 일어날 수 있는 가장
-// 비싼 실패인데 지금까지는 카드 안의 "-" 하나로만 표시됐다(2026-09-09).
-function renderUnprotectedBanner(symbols) {
-  const banner = document.getElementById('unprotected-banner');
-  if (!symbols.length) {
-    banner.className = 'alert-banner';
-    banner.innerHTML = '';
-    return;
-  }
-  banner.className = 'alert-banner show';
-  banner.innerHTML = `🚨 손절 주문이 없는 포지션: ${symbols.map(shortSymbol).join(', ')}
-    <div class="detail">레버리지 포지션이 손절 없이 열려 있습니다. 아래 카드에서 즉시 청산하거나
-    거래소에서 손절 주문을 직접 확인하세요.</div>`;
-}
-
-// 거래소가 주문을 거부한 기록은 저널엔 남지만 알림에선 노이즈로 빠져 있고 "최근 내역" 30줄에서도
-// 금방 밀려나서, 실제로는 몇 달치가 조용히 쌓이기만 했다(TSLA -2027 141건 등). 코드별 건수로
-// 묶어서 스팸 없이 드러나게 한다.
-function renderIssues(issues) {
-  const chips = document.getElementById('issue-chips');
-  const note = document.getElementById('issue-note');
-  const rejections = issues.rejections || [];
-  const hours = issues.since_hours || 24;
-  if (!rejections.length) {
-    chips.innerHTML = `<span class="reason-chip">최근 ${hours}시간 거래소 거부 없음</span>`;
-    note.innerHTML = '';
-    return;
-  }
-  chips.innerHTML = `<span style="font-size:12px;color:var(--muted);align-self:center">최근 ${hours}시간 거부</span>`
-    + rejections.map(r => `<span class="reason-chip bad">${r.code} × ${r.count}
-        <span style="color:var(--muted)">${r.symbols.join(', ')}</span></span>`).join('');
-  note.innerHTML = rejections.filter(r => r.hint)
-    .map(r => `${r.code} — ${r.hint}`).join('<br>');
-}
-
-// 저널에 안 남는 진입 차단 사유(레짐숏/저변동/같은봉/가격이탈)의 일별 집계. 필터가 실제로 몇 번
-// 일하고 있는지 확인할 유일한 창구다 — 없으면 방금 넣은 필터가 도는지조차 알 수 없다.
-function renderFilterStats(stats, events) {
-  const chips = document.getElementById('filter-chips');
-  // 날짜 키도 Flask가 정렬해서 내보내므로 순서를 서버에 맡기지 않고 여기서 최신순으로 세운다.
-  const days = Object.keys(stats).sort().reverse();
-  if (!days.length) {
-    chips.innerHTML = '<span class="reason-chip">아직 집계된 차단이 없습니다</span>';
-    return;
-  }
-  chips.innerHTML = days.map(day => {
-    const counts = stats[day];
-    const parts = events.filter(e => counts[e.key]).map(e => `${e.label} ${counts[e.key]}`);
-    return `<span class="reason-chip">${day.slice(5)} · ${parts.length ? parts.join(' · ') : '차단 없음'}</span>`;
-  }).join('');
-}
-
-
-// ---- R배수 성과 + 누적 곡선 (2026-09-09) ----
-// 달러 요약과 나란히 두는 이유: 달러는 "얼마 벌었나", R은 "계획 대비 잘하고 있나"이고
-// 백테스트 기대치와 비교할 수 있는 건 후자뿐이다(사이징을 바꿔도 R은 그대로 비교된다).
-let curveMode = 'r';
-let lastRData = null;
-
-function fmtR(v) { return v === null || v === undefined ? '–' : (v >= 0 ? '+' : '') + Number(v).toFixed(2) + 'R'; }
-
-function setCurveMode(mode) {
-  curveMode = mode;
-  document.getElementById('curve-btn-r').classList.toggle('active', mode === 'r');
-  document.getElementById('curve-btn-usd').classList.toggle('active', mode === 'usd');
-  if (lastRData) drawEquityCurve(lastRData.equity_curve || []);
-}
-
-function drawEquityCurve(points) {
-  const svg = document.getElementById('equity-curve');
-  // R 모드는 순R(수수료 차감) 곡선을 그린다 — 위 스탯과 같은 기준이어야 화면이 한 가지
-  // 이야기를 한다. 옛 기록만 있는 저널에서는 cumulative_net_r이 없을 수 있어 총R로 떨어진다.
-  const key = curveMode === 'r'
-    ? (points.length && points[0].cumulative_net_r !== undefined ? 'cumulative_net_r' : 'cumulative_r')
-    : 'cumulative_pnl';
-  if (points.length < 2) {
-    svg.innerHTML = '<text x="300" y="75" fill="#8b93a7" font-size="11" text-anchor="middle">아직 곡선을 그릴 만큼 청산된 거래가 없습니다</text>';
-    return;
-  }
-
-  const W = 600, H = 150, PAD = 8;
-  const values = points.map(p => p[key]);
-  // 0선을 항상 포함시킨다 — 안 그러면 전 구간 손실인 곡선이 "우상향"처럼 보인다.
-  const lo = Math.min(0, ...values), hi = Math.max(0, ...values);
-  const span = (hi - lo) || 1;
-  const x = i => PAD + (i / (points.length - 1)) * (W - PAD * 2);
-  const y = v => H - PAD - ((v - lo) / span) * (H - PAD * 2);
-
-  const line = values.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
-  const area = `${x(0).toFixed(1)},${y(0).toFixed(1)} ${line} ${x(values.length - 1).toFixed(1)},${y(0).toFixed(1)}`;
-  const last = values[values.length - 1];
-  const color = last >= 0 ? 'var(--green)' : 'var(--red)';
-
-  // 설정이 바뀐 지점에 세로선을 긋는다 — 필터를 넣기 전후의 거래가 한 곡선에 섞여 있으면
-  // 기울기가 달라진 게 시장 때문인지 규칙 때문인지 구분할 수 없다. 라벨은 SVG가 아니라 아래
-  // HTML 줄에 쓴다(viewBox가 preserveAspectRatio="none"이라 SVG 텍스트는 가로로 늘어난다).
-  const marks = ((lastRData && lastRData.config_changes) || []).map(ch => {
-    const idx = points.findIndex(p => (p.timestamp || '') > (ch.timestamp || ''));
-    if (idx === 0) return null;                       // 곡선에 보이는 구간보다 이전 — 표시 안 함
-    // 경계는 "직전 거래와 다음 거래 사이"라 두 점의 중간에 긋는다. -1이면 변경 이후 청산이
-    // 아직 없다는 뜻이라 곡선 맨 오른쪽에 긋는다.
-    return idx === -1 ? x(points.length - 1) : x(idx - 0.5);
-  }).filter(v => v !== null);
-
-  svg.innerHTML = `
-    <polygon points="${area}" fill="${color}" opacity="0.12"></polygon>
-    <line x1="${PAD}" y1="${y(0).toFixed(1)}" x2="${W - PAD}" y2="${y(0).toFixed(1)}"
-          stroke="#8b93a7" stroke-width="1" stroke-dasharray="3 3" opacity="0.6"></line>
-    ${marks.map(mx => `<line x1="${mx.toFixed(1)}" y1="${PAD}" x2="${mx.toFixed(1)}" y2="${H - PAD}"
-          stroke="var(--amber)" stroke-width="1" stroke-dasharray="4 3" opacity="0.75"></line>`).join('')}
-    <polyline points="${line}" fill="none" stroke="${color}" stroke-width="1.6"
-              vector-effect="non-scaling-stroke"></polyline>`;
-}
-
-const CONFIG_LABELS = {
-  timeframe: '타임프레임', adx_threshold: 'ADX 임계값', sma_period: 'SMA 기간',
-  regime_sma_period: '레짐 SMA', min_atr_to_stop_ratio: '최소 변동성', max_entry_price_drift_r: '진입 괴리 한도',
-  direction_filter: '방향 확인',
-  stop_loss_pct: '손절폭', take_profit_rr: '손익비', leverage: '레버리지', risk_per_trade: '거래당 리스크',
-  max_concurrent_positions: '최대 동시 포지션', max_daily_loss_pct: '일일 손실 한도',
-  max_consecutive_losses: '연속 손실 한도', consecutive_loss_cooldown_hours: '연속손실 쿨다운(시간)',
-  symbols: '감시 종목', logic_revision: '규칙 코드 개정',
-};
-
-function renderConfigNote(r) {
-  const note = document.getElementById('perf-config-note');
-  const since = r.since_config_change;
-  if (!since) {
-    // 설정 스냅샷은 봇이 시작할 때 기록된다 — 아직 한 번도 없으면 이 곡선 전체가 어떤 규칙으로
-    // 나온 건지 저널만으로는 알 수 없다는 뜻이라, 그 사실을 숨기지 않고 그대로 적는다.
-    note.textContent = '설정 기록이 아직 없습니다 — 봇을 다시 시작하면 지금 설정이 저널에 남고, 그 이후 구간이 여기 표시됩니다.';
-    return;
-  }
-  const when = new Date(since.timestamp).toLocaleString('ko-KR', { dateStyle: 'short', timeStyle: 'short' });
-  const changed = Object.entries(since.changes || {})
-    .map(([k, v]) => `${CONFIG_LABELS[k] || k} ${Array.isArray(v.from) ? '변경' : `${v.from ?? '–'}→${v.to}`}`)
-    .join(', ');
-  const head = changed ? `설정 변경(${when}): ${changed}` : `설정 기록(${when})`;
-  note.textContent = since.trades
-    ? `${head} · 이후 ${since.trades}건, ${since.total_r === null ? 'R 없음' : fmtR(since.total_r)} (${fmtUsd(since.realized_pnl)})`
-    : `${head} · 이후 아직 청산된 거래가 없습니다`;
-}
-
-// 전략 버전별 성과 — 규칙이 바뀐 전후 거래를 나눠서 본다. 거래는 진입 시각으로 버전에 배정되고
-// (청산이 재시작 뒤여도 진입 때의 규칙이 만든 거래다), 과거 버전 경계는 복원한 추정 시각이다.
-function renderVersions(v) {
-  const head = document.getElementById('perf-version-head');
-  const table = document.getElementById('perf-version-table');
-  const body = document.getElementById('perf-version-body');
-  const versions = v.versions || [];
-  if (!versions.length) { head.textContent = ''; table.style.display = 'none'; return; }
-  head.innerHTML = `현재 전략 <b>${v.current}</b> · 지금까지 <b>${v.revisions}</b>회 개정`
-    + (v.unassigned_trades ? ` · 버전 이전 거래 ${v.unassigned_trades}건` : '');
-  body.innerHTML = versions.slice().reverse().map(row => {
-    const start = new Date(row.start).toLocaleString('ko-KR', { dateStyle: 'short', timeStyle: 'short' });
-    const changed = Object.entries(row.changes || {}).filter(([, c]) => c && c.from !== null && c.from !== undefined)
-      .map(([k, c]) => `${CONFIG_LABELS[k] || k} ${Array.isArray(c.from) ? '변경' : `${c.from}→${c.to}`}`).join(', ');
-    const detail = row.reconstructed ? `${row.title} — ${row.detail} (경계 시각 추정)` : (changed || row.detail || row.title);
-    const net = row.trades_with_r ? fmtR(row.total_net_r) : '–';
-    const cls = (row.total_net_r || 0) >= 0 ? 'green' : 'red';
-    return `<tr class="${row.label === v.current ? 'current-version' : ''}">
-      <td>${row.label}</td><td>${start}</td><td class="version-detail">${detail}</td>
-      <td>${row.trades}</td><td>${row.trades_with_r ? fmtPct(row.win_rate) : '–'}</td>
-      <td class="${row.trades_with_r ? cls : ''}">${net}</td>
-      <td>${row.trades_with_r ? fmtR(row.avg_net_r) : '–'}</td></tr>`;
-  }).join('');
-  table.style.display = 'table';
-}
-
-function renderRPerformance(r) {
-  lastRData = r;
-  const grid = document.getElementById('perf-r-grid');
-  // **순R(수수료 차감)을 앞에 둔다.** 총R은 가격만으로 잰 값이라 수수료가 안 들어있고,
-  // 이 전략은 손절폭 1.25%에서 왕복 수수료가 0.064R인데 건당 기대값이 그와 같은 크기라
-  // 총R만 보면 부호가 반대인 숫자를 믿게 된다(2026-09-22: 데모 총R +2.50 -> 순R -5.25).
-  const netR = r.total_net_r;
-  grid.innerHTML = `
-    <div class="stat"><div class="label">순 R (수수료 차감)</div>
-      <div class="value ${(netR || 0) >= 0 ? 'green' : 'red'}">${fmtR(netR)}</div></div>
-    <div class="stat"><div class="label">거래당 기대값 (순)</div>
-      <div class="value ${(r.avg_net_r || 0) >= 0 ? 'green' : 'red'}">${fmtR(r.avg_net_r)}</div></div>
-    <div class="stat"><div class="label">최대 낙폭 (순 R)</div>
-      <div class="value red">${fmtR(r.max_drawdown_net_r)}</div></div>
-    <div class="stat"><div class="label">최대 낙폭 (실현)</div>
-      <div class="value red">${fmtUsd(r.max_drawdown_usd)}</div></div>`;
-
-  drawEquityCurve(r.equity_curve || []);
-  renderConfigNote(r);
-
-  // 위 달러 줄과 모수가 다를 수 있다 — 진입가가 청산과 안 맞아 R을 못 믿는 거래는 R 통계에서만
-  // 빠진다. 설명 없이 두 줄의 거래수가 다르면 어느 쪽이 틀린 건지 알 수 없다.
-  const excluded = (r.trades_total || 0) - (r.num_trades || 0);
-  const parts = [`R 기준 ${r.num_trades}건`];
-  if (excluded > 0) parts.push(`진입가가 청산과 맞지 않아 ${excluded}건 제외 (달러 통계에는 포함)`);
-  // 수수료 전 값도 같이 적는다 — 백테스트 결과와 비교할 때 어느 쪽 숫자인지 헷갈리지 않게.
-  parts.push(`수수료 전 ${fmtR(r.total_r)}`);
-  if (r.net_r_estimated_trades) {
-    // 실측 수수료는 2026-09-22 이후 청산에만 있다. 추정치를 실측처럼 보여주면 안 된다.
-    parts.push(`${r.net_r_estimated_trades}건은 실측 수수료가 없어 편도 ${((r.fee_pct_per_side || 0) * 100).toFixed(3)}%로 추정`);
-  }
-  document.getElementById('perf-r-coverage').textContent = parts.join(' · ');
-
-  const sides = Object.entries(r.by_side || {});
-  const sideTable = document.getElementById('perf-side-table');
-  if (!sides.length) {
-    sideTable.style.display = 'none';
-  } else {
-    sideTable.style.display = 'table';
-    document.getElementById('perf-side-body').innerHTML = sides.map(([side, s]) => {
-      const label = side === 'long' ? '롱' : side === 'short' ? '숏' : side;
-      return `<tr>
-        <td>${label}</td><td>${s.trades}</td>
-        <td>${fmtPct(s.trades ? s.wins / s.trades : null)}</td>
-        <td><span style="color:var(--${s.total_r >= 0 ? 'green' : 'red'})">${fmtR(s.total_r)}</span></td>
-      </tr>`;
-    }).join('');
-  }
-
-  // "익절 코앞까지 갔다가 손절났다"가 실제로 얼마나 되는지 — 보유 중 최고점이 청산 기록에
-  // 남기 시작한(2026-09-09) 거래부터만 셀 수 있어서, 아직 없으면 그렇다고 말해준다.
-  const mfe = r.mfe || {};
-  const note = document.getElementById('perf-mfe');
-  if (!mfe.losers_measured) {
-    note.textContent = '되돌림 통계: 최고점 기록이 있는 청산이 아직 없습니다 (기록은 2026-09-09부터 쌓입니다).';
-  } else {
-    const pct = (mfe.losers_reaching_1r / mfe.losers_measured * 100).toFixed(0);
-    note.innerHTML = `되돌림 통계: 손실 거래 ${mfe.losers_measured}건 중 <b>${mfe.losers_reaching_1r}건(${pct}%)</b>이
-      손절 전에 +1R 이상 갔었습니다 · 손실 거래의 최고점 중앙값 ${fmtR(mfe.median_loser_peak_r)}`;
-  }
-}
-
-function shortSymbol(s) { return s.split('/')[0]; }
-
-// 진입가/손절가/현재가로 R배수를 계산한다. 손절가까지가 정확히 -1R이라, 손익($)과 달리
-// 사이징과 무관하게 "계획 대비 지금 어디쯤인지"를 바로 읽을 수 있다.
-function rMultiples(position, s) {
-  const entry = position.entryPrice, stop = s.stop_loss_price;
-  if (!entry || !stop) return null;
-  const risk = Math.abs(entry - stop);
-  if (!(risk > 0)) return null;
-  const dir = position.side === 'long' ? 1 : -1;
-  const now = dir * (position.markPrice - entry) / risk;
-  const target = s.take_profit_price ? dir * (s.take_profit_price - entry) / risk : 2;
-  const peak = s.excursion && typeof s.excursion.max_favorable_r === 'number'
-    ? s.excursion.max_favorable_r : null;
-  return { now, target, peak };
-}
-
-// 손절 -1R부터 익절까지의 막대 위에 지금 위치와 보유 중 최고점을 같이 찍는다.
-// "양전했다가 익절 못 닿고 흘러내려 손절"이 실제로 얼마나 자주 나는지 보려던 것 —
-// 최고점 표식(주황)이 현재 위치보다 한참 오른쪽에 있으면 지금 되돌림 중이라는 뜻.
-function renderRBar(r) {
-  if (!r) return '';
-  const lo = -1.15, hi = Math.max(r.target, r.peak || 0, r.now) + 0.15;
-  const pos = v => Math.max(0, Math.min(100, ((v - lo) / (hi - lo)) * 100));
-  const zero = pos(0), cur = pos(r.now);
-  const fmt = v => (v >= 0 ? '+' : '') + v.toFixed(2) + 'R';
-  const peakMark = r.peak === null ? ''
-    : `<div class="rbar-mark peak" style="left:${pos(r.peak)}%" title="보유 중 최고 ${fmt(r.peak)}"></div>`;
-  const peakText = r.peak === null ? '' : ` · 최고 ${fmt(r.peak)}`;
-  return `<div class="rbar">
-      <div class="rbar-fill ${r.now < 0 ? 'neg' : ''}" style="left:${Math.min(zero, cur)}%;width:${Math.abs(cur - zero)}%"></div>
-      <div class="rbar-mark entry" style="left:${zero}%"></div>
-      ${peakMark}
-    </div>
-    <div class="rbar-legend">
-      <span>손절 -1R</span>
-      <span style="color:${r.now >= 0 ? 'var(--green)' : 'var(--red)'}">${fmt(r.now)}${peakText}</span>
-      <span>익절 ${fmt(r.target)}</span>
-    </div>`;
-}
-
-const REASON_LABELS = {
-  stop_loss: '손절', take_profit: '익절', manual: '수동청산', breakeven_stop: '손익분기청산', unknown: '기타',
-};
-
-let notifyEnabled = localStorage.getItem('notifyEnabled') === 'true';
-let notifyInitialized = false;
-const seenEntryKeys = new Set();
-
-// 새로고침/새로 열 때는 항상 DEMO로 시작한다 — localStorage 등에 저장하지 않는다(의도적).
-// 실계좌 화면을 마지막으로 보고 있었더라도 다시 열면 데모부터 보여줘서, 계좌를 착각한 채로
-// 긴급청산 등을 누르는 사고를 막는다.
-let currentEnv = 'demo';
-
-function showStatusUnavailable(message) {
-  // 계좌 전환 직후나 조회 실패 시 화면에 "이전 계좌의 숫자"가 그대로 남아있으면 지금 보고 있는
-  // 계좌인 것처럼 오인할 수 있다(실전에서 실제로 겪음 — LIVE로 전환했는데 연결이 실패하자
-  // 직전 DEMO 숫자가 LIVE 배너 아래 그대로 남아있었음, 2026-08-22). 그런 사고를 막기 위해
-  // 실패/전환 시점엔 숫자를 전부 지우고 명확한 상태만 보여준다.
-  document.getElementById('last-updated').textContent = message;
-  document.getElementById('margin-equity').textContent = '–';
-  document.getElementById('open-count').textContent = '–';
-  document.getElementById('symbol-grid').innerHTML = `<div class="empty">${message}</div>`;
-  document.getElementById('idle-row').innerHTML = '';
-  // 경보/거부요약/차단통계도 같은 이유로 지운다 — 데모의 무보호 경보가 LIVE 화면에 그대로
-  // 남아있으면 어느 계좌 얘기인지 오인한다.
-  renderUnprotectedBanner([]);
-  document.getElementById('issue-chips').innerHTML = '';
-  document.getElementById('issue-note').innerHTML = '';
-  document.getElementById('filter-chips').innerHTML = '';
-}
-
-async function fetchPublicIp() {
-  const el = document.getElementById('public-ip');
-  if (!el) return;
-  el.textContent = '확인 중…';
-  try {
-    const res = await fetch('/api/public-ip');
-    const data = await res.json();
-    el.textContent = data.ip || '확인 불가';
-  } catch (e) {
-    el.textContent = '확인 불가';
-  }
-}
-
-function switchEnv(env) {
-  if (env === currentEnv) return;
-  currentEnv = env;
-  document.querySelectorAll('#env-toggle button').forEach(b => b.classList.toggle('active', b.dataset.env === env));
-  document.body.classList.toggle('env-live', env === 'live');
-  // 계좌가 바뀌면 이전 계좌의 과거 기록을 "새로 발생한 이벤트"로 오인해 알림을 쏘지 않도록 리셋
-  seenEntryKeys.clear();
-  notifyInitialized = false;
-  showStatusUnavailable('불러오는 중…');
-  refresh();
-  refreshBotStatus();
-  fetchPerformance();
-  fetchConditions();
-  if (env === 'live') fetchPublicIp();  // 바이낸스 IP 화이트리스트와 비교할 수 있게 매번 전환 시 갱신
-}
-
-function updateNotifyBtn() {
-  const btn = document.getElementById('notify-btn');
-  if (notifyEnabled && Notification.permission === 'granted') {
-    btn.textContent = '🔔 알림 켜짐';
-    btn.className = 'notify-btn on';
-  } else {
-    btn.textContent = '🔔 알림 켜기';
-    btn.className = 'notify-btn';
-  }
-}
-
-async function toggleNotify() {
-  if (!('Notification' in window)) { alert('이 브라우저는 알림을 지원하지 않습니다.'); return; }
-  if (!notifyEnabled) {
-    const perm = await Notification.requestPermission();
-    if (perm !== 'granted') { alert('알림 권한이 거부되었습니다.'); return; }
-    notifyEnabled = true;
-  } else {
-    notifyEnabled = false;
-  }
-  localStorage.setItem('notifyEnabled', notifyEnabled);
-  updateNotifyBtn();
-}
-
-function notifyNewEntry(e) {
-  if (!notifyEnabled || Notification.permission !== 'granted') return;
-  const symbol = e.symbol ? shortSymbol(e.symbol) : '';
-  if (e.event === 'entered') {
-    new Notification(`${symbol} 진입`, { body: `${e.signal || ''} @ ${fmtPrice(e.entry_price)}` });
-  } else if (e.event === 'closed') {
-    new Notification(`${symbol} 청산 (${REASON_LABELS[e.reason] || e.reason || ''})`, {
-      body: `실현손익 ${fmtUsd(e.realized_pnl)}`,
-    });
-  }
-}
-
-async function openChart(symbol, refPrices) {
-  const overlay = document.getElementById('chart-overlay');
-  const title = document.getElementById('chart-title');
-  const sub = document.getElementById('chart-sub');
-  title.textContent = shortSymbol(symbol);
-  sub.textContent = '불러오는 중…';
-  document.getElementById('chart-legend').innerHTML = '';
-  overlay.className = 'chart-overlay open';
-
-  let data;
-  try {
-    const res = await fetch('/api/chart/' + encodeURIComponent(symbol) + '?env=' + currentEnv);
-    data = await res.json();
-    if (!res.ok) throw new Error(data.message || '차트를 불러오지 못했습니다.');
-  } catch (e) {
-    sub.textContent = e.message || '차트를 불러오지 못했습니다.';
-    return;
-  }
-
-  const candles = data.candles || [];
-  if (candles.length === 0) {
-    sub.textContent = '캔들 데이터가 없습니다.';
-    return;
-  }
-  const last = candles[candles.length - 1];
-  sub.textContent = `${data.timeframe} · 최근 ${candles.length}봉 · 현재가 ${fmtPrice(last.close)}`;
-  drawChart(candles, refPrices || {});
-}
-
-function closeChart() {
-  document.getElementById('chart-overlay').className = 'chart-overlay';
-}
-
-function drawChart(candles, refPrices) {
-  const canvas = document.getElementById('chart-canvas');
-  const ctx = canvas.getContext('2d');
-  const W = canvas.width, H = canvas.height;
-  ctx.clearRect(0, 0, W, H);
-
-  const closes = candles.map(c => c.close);
-  const allValues = closes.slice();
-  ['entry_price', 'stop_loss_price', 'take_profit_price'].forEach(k => {
-    if (refPrices[k] !== null && refPrices[k] !== undefined) allValues.push(refPrices[k]);
-  });
-  const min = Math.min(...allValues), max = Math.max(...allValues);
-  const pad = (max - min) * 0.08 || 1;
-  const lo = min - pad, hi = max + pad;
-
-  const marginL = 64, marginR = 12, marginT = 12, marginB = 12;
-  const plotW = W - marginL - marginR, plotH = H - marginT - marginB;
-  const xAt = i => marginL + (closes.length === 1 ? 0 : (i / (closes.length - 1)) * plotW);
-  const yAt = v => marginT + plotH - ((v - lo) / (hi - lo)) * plotH;
-
-  ctx.fillStyle = '#8b93a7';
-  ctx.font = '11px sans-serif';
-  ctx.textAlign = 'right';
-  ctx.fillText(fmtPrice(hi), marginL - 8, marginT + 10);
-  ctx.fillText(fmtPrice(lo), marginL - 8, marginT + plotH);
-
-  function refLine(price, color) {
-    if (price === null || price === undefined) return;
-    const py = yAt(price);
-    ctx.strokeStyle = color;
-    ctx.setLineDash([4, 4]);
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(marginL, py);
-    ctx.lineTo(W - marginR, py);
-    ctx.stroke();
-    ctx.setLineDash([]);
-  }
-  refLine(refPrices.entry_price, '#8b93a7');
-  refLine(refPrices.stop_loss_price, '#f87171');
-  refLine(refPrices.take_profit_price, '#34d399');
-
-  ctx.strokeStyle = '#60a5fa';
-  ctx.lineWidth = 1.5;
-  ctx.beginPath();
-  closes.forEach((c, i) => {
-    const px = xAt(i), py = yAt(c);
-    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
-  });
-  ctx.stroke();
-
-  const legendItems = [];
-  if (refPrices.entry_price != null) legendItems.push(['#8b93a7', `진입 ${fmtPrice(refPrices.entry_price)}`]);
-  if (refPrices.stop_loss_price != null) legendItems.push(['#f87171', `손절 ${fmtPrice(refPrices.stop_loss_price)}`]);
-  if (refPrices.take_profit_price != null) legendItems.push(['#34d399', `익절 ${fmtPrice(refPrices.take_profit_price)}`]);
-  document.getElementById('chart-legend').innerHTML = legendItems.map(
-    ([color, label]) => `<span><span class="dot" style="display:inline-block;background:${color}"></span> ${label}</span>`
-  ).join('');
-}
-
-async function closePosition(symbol) {
-  if (!confirm(shortSymbol(symbol) + ` 포지션을 지금 즉시 시장가로 청산할까요? (${currentEnv.toUpperCase()})`)) return;
-  const btn = document.getElementById('close-btn-' + shortSymbol(symbol));
-  if (btn) { btn.disabled = true; btn.textContent = '청산 중…'; }
-  try {
-    const res = await fetch('/api/close/' + encodeURIComponent(symbol) + '?env=' + currentEnv, { method: 'POST' });
-    const data = await res.json();
-    if (!res.ok || data.status === 'error') {
-      alert('청산 실패: ' + (data.message || '알 수 없는 오류'));
-    }
-  } catch (e) {
-    alert('청산 요청 중 네트워크 오류가 발생했습니다.');
-  }
-  refresh();
-}
-
-async function resetStreak() {
-  if (!confirm(`연속 손실 카운트를 0으로 리셋할까요? (${currentEnv.toUpperCase()}) 서킷브레이커 임계치 자체는 그대로 유지됩니다.`)) return;
-  try {
-    const res = await fetch('/api/risk/reset-streak?env=' + currentEnv, { method: 'POST' });
-    const data = await res.json();
-    if (!res.ok || data.status === 'error') {
-      alert('리셋 실패: ' + (data.message || '알 수 없는 오류'));
-    }
-  } catch (e) {
-    alert('리셋 요청 중 네트워크 오류가 발생했습니다.');
-  }
-  refresh();
-}
-
-function formatUptime(seconds) {
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  return h > 0 ? `${h}시간 ${m}분` : `${m}분`;
-}
-
-function formatAge(seconds) {
-  if (seconds < 60) return `${Math.floor(seconds)}초 전`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}분 전`;
-  return `${Math.floor(seconds / 3600)}시간 전`;
-}
-
-async function fetchPerformance() {
-  let data;
-  try {
-    const res = await fetch('/api/performance?env=' + currentEnv);
-    data = await res.json();
-  } catch (e) {
-    return;
-  }
-
-  document.getElementById('perf-trades').textContent = data.num_trades;
-  document.getElementById('perf-winrate').textContent = fmtPct(data.win_rate);
-  const totalPnlEl = document.getElementById('perf-total-pnl');
-  totalPnlEl.textContent = fmtUsd(data.total_realized_pnl);
-  totalPnlEl.className = 'value ' + (data.total_realized_pnl >= 0 ? 'green' : 'red');
-  document.getElementById('perf-avg-pnl').textContent = fmtUsd(data.avg_realized_pnl);
-
-  renderRPerformance(data.r || {});
-  renderVersions(data.versions || {});
-
-  document.getElementById('perf-reasons').innerHTML = Object.entries(data.reason_counts || {}).map(
-    ([reason, count]) => `<span class="reason-chip">${REASON_LABELS[reason] || reason} <b>${count}</b></span>`
-  ).join('');
-
-  const table = document.getElementById('perf-symbol-table');
-  const body = document.getElementById('perf-symbol-body');
-  const emptyEl = document.getElementById('perf-empty');
-  const perSymbol = Object.entries(data.per_symbol || {});
-
-  if (perSymbol.length === 0) {
-    table.style.display = 'none';
-    emptyEl.style.display = 'block';
-  } else {
-    table.style.display = 'table';
-    emptyEl.style.display = 'none';
-    body.innerHTML = perSymbol.map(([symbol, s]) => {
-      const winRate = s.trades ? s.wins / s.trades : null;
-      const pnlColor = s.total_pnl >= 0 ? 'green' : 'red';
-      return `<tr>
-        <td>${shortSymbol(symbol)}</td>
-        <td>${s.trades}</td>
-        <td>${fmtPct(winRate)}</td>
-        <td><span style="color:var(--${pnlColor})">${fmtUsd(s.total_pnl)}</span></td>
-      </tr>`;
-    }).join('');
-  }
-}
-
-async function startBot() {
-  const btn = document.getElementById('bot-start-btn');
-  btn.disabled = true;
-  btn.textContent = '시작 중…';
-  try {
-    const res = await fetch('/api/bot/start?env=' + currentEnv, { method: 'POST' });
-    const data = await res.json();
-    if (!res.ok) alert('봇 시작에 실패했습니다: ' + (data.message || ''));
-  } catch (e) {
-    alert('봇 시작 요청 중 네트워크 오류가 발생했습니다.');
-  }
-  btn.textContent = '시작';
-  refreshBotStatus();
-}
-
-async function stopBot() {
-  if (!confirm(`감시 봇을 중지할까요? (${currentEnv.toUpperCase()}) 이미 걸려 있는 포지션/주문(SL·TP)은 그대로 유지됩니다.`)) return;
-  const btn = document.getElementById('bot-stop-btn');
-  btn.disabled = true;
-  btn.textContent = '중지 중… (최대 15초)';
-  try {
-    const res = await fetch('/api/bot/stop?env=' + currentEnv, { method: 'POST' });
-    if (!res.ok) alert('봇 중지에 실패했습니다.');
-  } catch (e) {
-    alert('봇 중지 요청 중 네트워크 오류가 발생했습니다.');
-  }
-  btn.textContent = '중지';
-  refreshBotStatus();
-}
-
-async function refreshBotStatus() {
-  let data;
-  try {
-    const res = await fetch('/api/bot/status?env=' + currentEnv);
-    data = await res.json();
-  } catch (e) {
-    return;
-  }
-
-  const dot = document.getElementById('bot-status-dot');
-  const text = document.getElementById('bot-status-text');
-  const startBtn = document.getElementById('bot-start-btn');
-  const stopBtn = document.getElementById('bot-stop-btn');
-  const heartbeatLine = document.getElementById('heartbeat-line');
-
-  if (data.running) {
-    dot.className = 'dot on';
-    const uptime = data.started_at ? Math.max(0, Math.floor(Date.now() / 1000 - data.started_at)) : null;
-    text.textContent = '실행 중' + (uptime !== null ? ` (가동 ${formatUptime(uptime)})` : '');
-    startBtn.disabled = true;
-    stopBtn.disabled = false;
-
-    const hb = data.heartbeat;
-    if (hb) {
-      const stale = hb.age_seconds > 180;  // 30초 주기 폴링 기준 3분 이상 조용하면 정체 의심
-      heartbeatLine.className = 'heartbeat-line' + (stale ? ' stale' : '');
-      heartbeatLine.textContent = (stale ? '⚠ 마지막 사이클 ' : '마지막 사이클 ') + formatAge(hb.age_seconds)
-        + ` · 사이클 #${hb.cycle_count}`;
-    } else {
-      heartbeatLine.className = 'heartbeat-line stale';
-      heartbeatLine.textContent = '⚠ 사이클 기록 없음 (재시작된 봇이라면 잠시 후 갱신됩니다)';
-    }
-  } else {
-    dot.className = 'dot off';
-    text.textContent = '중지됨';
-    startBtn.disabled = false;
-    stopBtn.disabled = true;
-    heartbeatLine.textContent = '';
-  }
-}
-
-async function startTelegram() {
-  const btn = document.getElementById('telegram-start-btn');
-  btn.disabled = true;
-  btn.textContent = '시작 중…';
-  try {
-    const res = await fetch('/api/telegram/start', { method: 'POST' });
-    const data = await res.json();
-    if (!res.ok) alert('텔레그램 봇 시작에 실패했습니다: ' + (data.message || ''));
-  } catch (e) {
-    alert('텔레그램 봇 시작 요청 중 네트워크 오류가 발생했습니다.');
-  }
-  btn.textContent = '시작';
-  refreshTelegramStatus();
-}
-
-async function stopTelegram() {
-  const btn = document.getElementById('telegram-stop-btn');
-  btn.disabled = true;
-  btn.textContent = '중지 중… (최대 15초)';
-  try {
-    const res = await fetch('/api/telegram/stop', { method: 'POST' });
-    if (!res.ok) alert('텔레그램 봇 중지에 실패했습니다.');
-  } catch (e) {
-    alert('텔레그램 봇 중지 요청 중 네트워크 오류가 발생했습니다.');
-  }
-  btn.textContent = '중지';
-  refreshTelegramStatus();
-}
-
-async function refreshTelegramStatus() {
-  let data;
-  try {
-    const res = await fetch('/api/telegram/status');
-    data = await res.json();
-  } catch (e) {
-    return;
-  }
-
-  const dot = document.getElementById('telegram-status-dot');
-  const text = document.getElementById('telegram-status-text');
-  const startBtn = document.getElementById('telegram-start-btn');
-  const stopBtn = document.getElementById('telegram-stop-btn');
-
-  if (data.running) {
-    dot.className = 'dot on';
-    const uptime = data.started_at ? Math.max(0, Math.floor(Date.now() / 1000 - data.started_at)) : null;
-    text.textContent = '실행 중' + (uptime !== null ? ` (가동 ${formatUptime(uptime)})` : '');
-    startBtn.disabled = true;
-    stopBtn.disabled = false;
-  } else {
-    dot.className = 'dot off';
-    text.textContent = '중지됨';
-    startBtn.disabled = false;
-    stopBtn.disabled = true;
-  }
-}
-
-async function refresh() {
-  const requestedEnv = currentEnv;
-  let data;
-  try {
-    const res = await fetch('/api/status?env=' + requestedEnv);
-    data = await res.json();
-    if (!res.ok) {
-      if (requestedEnv !== currentEnv) return;  // 그 사이 다른 탭으로 전환됨 — 이 오류는 이제 무의미
-      showStatusUnavailable((data && data.message ? data.message : '거래소 응답 실패') + ' — 재시도 중…');
-      return;
-    }
-  } catch (e) {
-    if (requestedEnv !== currentEnv) return;
-    showStatusUnavailable('연결 실패 — 재시도 중…');
-    return;
-  }
-
-  // 빠르게 DEMO<->LIVE를 오가면 두 요청이 겹칠 수 있다 — 응답이 지금 보고 있는 탭과 다른 계좌면
-  // 화면을 절대 갱신하지 않는다(다른 계좌의 숫자가 잠깐이라도 잘못 표시되는 걸 막기 위함).
-  if (data.env && data.env !== currentEnv) return;
-
-  document.getElementById('last-updated').textContent = '마지막 갱신: ' + new Date().toLocaleTimeString('ko-KR');
-  document.getElementById('margin-equity').textContent = fmtUsd(data.margin_equity);
-  document.getElementById('open-count').textContent = data.open_position_count + ' / ' + data.max_concurrent;
-
-  if (data.risk_limits) {
-    const pnlPct = data.daily_pnl_pct || 0;
-    const limitPct = data.risk_limits.max_daily_loss_pct;
-    const usedRatio = limitPct ? Math.min(1, Math.abs(Math.min(0, pnlPct)) / limitPct) : 0;
-    const gauge = document.getElementById('daily-pnl-gauge');
-    gauge.style.width = (usedRatio * 100) + '%';
-    gauge.className = 'gauge-fill' + (usedRatio > 0.8 ? ' red' : usedRatio > 0.5 ? ' amber' : '');
-    const pnlText = document.getElementById('daily-pnl-text');
-    pnlText.textContent = fmtPct(pnlPct);
-    pnlText.style.color = pnlPct >= 0 ? 'var(--green)' : 'var(--red)';
-    document.getElementById('daily-loss-limit-text').textContent = `일일 손실 한도 -${fmtPct(limitPct)}`;
-
-    const streak = data.risk_limits.consecutive_losses || 0;
-    const streakLimit = data.risk_limits.max_consecutive_losses;
-    const streakColor = streak >= streakLimit ? 'var(--red)' : streak >= streakLimit - 1 ? 'orange' : 'inherit';
-    document.getElementById('consecutive-loss-grid').innerHTML = `
-      <div class="config-item">
-        <div class="k">연속 손실</div>
-        <div class="v" style="color:${streakColor}">
-          ${streak} / ${streakLimit}
-          ${streak > 0 ? `<button class="reset-streak-btn" onclick="resetStreak()">리셋</button>` : ''}
+    <!-- 성과 -->
+    <div class="pane" data-pane="performance" data-m="perf">
+      <h3 class="m-title">성과</h3>
+      <div class="stat-grid" id="perf-r-grid"></div>
+      <div class="stat-grid" id="perf-usd-grid"></div>
+
+      <div class="curve-head">
+        <span class="muted small" id="perf-r-coverage"></span>
+        <div class="seg small-seg" id="curve-seg">
+          <button data-mode="r" class="active">순R</button>
+          <button data-mode="usd">실현손익</button>
+          <button data-mode="equity">자산</button>
         </div>
       </div>
-    `;
-  }
+      <div class="curve-box"><canvas id="curve-canvas"></canvas><div class="chart-msg" id="curve-msg"></div></div>
+      <p class="note" id="perf-config-note"></p>
+      <p class="note" id="perf-mfe"></p>
 
-  if (data.config) {
-    const c = data.config;
-    document.getElementById('config-grid').innerHTML = `
-      <div class="config-item"><div class="k">ADX 임계값</div><div class="v">${c.adx_threshold}</div></div>
-      <div class="config-item"><div class="k">SMA 기간</div><div class="v">${c.sma_period}</div></div>
-      <div class="config-item"><div class="k">방향 확인</div><div class="v">${c.direction_filter || 'rsi'}</div></div>
-      <div class="config-item"><div class="k">손절폭</div><div class="v">${fmtPct(c.stop_loss_pct)}</div></div>
-      <div class="config-item"><div class="k">손익비(RR)</div><div class="v">${c.take_profit_rr}</div></div>
-      <div class="config-item"><div class="k">레버리지</div><div class="v">${data.leverage}x</div></div>
-      <div class="config-item"><div class="k">최대 동시 포지션</div><div class="v">${data.max_concurrent}</div></div>
-      <div class="config-item"><div class="k">레짐 SMA (숏 차단)</div>
-        <div class="v">${c.regime_sma_period ? c.regime_sma_period : '꺼짐'}</div></div>
-      <div class="config-item"><div class="k">최소 변동성 (ATR/손절폭)</div>
-        <div class="v">${c.min_atr_to_stop_ratio ? c.min_atr_to_stop_ratio : '꺼짐'}</div></div>
-      <div class="config-item"><div class="k">진입 괴리 한도</div>
-        <div class="v">${c.max_entry_price_drift_r}R</div></div>
-      <div class="config-item"><div class="k">거래당 리스크</div>
-        <div class="v">${fmtPct(c.risk_per_trade)}</div></div>
-    `;
-  }
+      <div class="two-col">
+        <div>
+          <h4>방향별</h4>
+          <table class="grid-table compact" id="perf-side-table">
+            <thead><tr><th>방향</th><th class="r">거래</th><th class="r">승률</th><th class="r">총R</th></tr></thead>
+            <tbody id="perf-side-body"></tbody>
+          </table>
+        </div>
+        <div>
+          <h4>종목별 <span class="chips inline" id="perf-reasons"></span></h4>
+          <table class="grid-table compact" id="perf-symbol-table">
+            <thead><tr><th>종목</th><th class="r">거래</th><th class="r">승률</th><th class="r">총손익</th></tr></thead>
+            <tbody id="perf-symbol-body"></tbody>
+          </table>
+        </div>
+      </div>
 
-  renderUnprotectedBanner(data.unprotected_symbols || []);
-  renderIssues(data.recent_issues || {});
-  renderFilterStats(data.filter_stats || {}, data.filter_events || []);
+      <h4 id="perf-version-head"></h4>
+      <div class="table-wrap">
+        <table class="grid-table compact" id="perf-version-table">
+          <thead><tr><th>버전</th><th>시작</th><th>내용</th><th class="r">거래</th><th class="r">승률</th>
+            <th class="r">순R</th><th class="r">건당 순R</th></tr></thead>
+          <tbody id="perf-version-body"></tbody>
+        </table>
+      </div>
+      <div class="empty" id="perf-empty">아직 청산된 거래가 없습니다.</div>
+    </div>
 
-  const allSymbols = Object.entries(data.symbols);
-  const active = allSymbols.filter(([, s]) => s.has_position && s.position);
-  const idle = allSymbols.filter(([, s]) => !(s.has_position && s.position));
+    <!-- 설정·점검 -->
+    <div class="pane" data-pane="settings" data-m="perf">
+      <h3 class="m-title">설정·점검</h3>
+      <h4>전략 설정 <span class="muted small">(봇이 저널에 기록하는 것과 같은 값)</span></h4>
+      <div class="kv-grid" id="config-grid"></div>
+      <h4>거래소 거부</h4>
+      <div class="chips" id="issue-chips"></div>
+      <p class="note" id="issue-note"></p>
+    </div>
+  </section>
+</main>
 
-  const grid = document.getElementById('symbol-grid');
-  grid.innerHTML = active.map(([symbol, s]) => {
-    const p = s.position;
-    const pnlClass = p.unrealizedPnl >= 0 ? 'green' : 'red';
-    const refPrices = JSON.stringify({
-      entry_price: p.entryPrice, stop_loss_price: s.stop_loss_price, take_profit_price: s.take_profit_price,
-    }).replace(/"/g, '&quot;');
-    return `<div class="symbol-card ${s.unprotected ? 'unprotected' : ''}">
-      <div class="header"><span class="ticker" onclick='openChart(${JSON.stringify(symbol)}, ${refPrices})'>
-        <span class="dot on"></span>${shortSymbol(symbol)}</span>
-      <span style="font-size:12px;color:var(--muted)">${s.unprotected ? '<span class="warn-badge">손절 없음</span> ' : ''}${p.side === 'long' ? '롱' : '숏'}${s.leverage ? ' · ' + s.leverage + 'x' : ''}</span></div>
-      <div class="row"><span class="k">진입가</span><span class="v">${fmtPrice(p.entryPrice)}</span></div>
-      <div class="row"><span class="k">현재가</span><span class="v">${fmtPrice(p.markPrice)}</span></div>
-      <div class="row"><span class="k">미실현손익</span><span class="v ${pnlClass}">${fmtUsd(p.unrealizedPnl)}</span></div>
-      <div class="row"><span class="k">청산가</span><span class="v" style="color:var(--amber)">${fmtPrice(p.liquidationPrice)}</span></div>
-      <div class="row"><span class="k">손절가</span><span class="v" style="color:var(--red)">${fmtPrice(s.stop_loss_price)}</span></div>
-      <div class="row"><span class="k">익절가</span><span class="v" style="color:var(--green)">${fmtPrice(s.take_profit_price)}</span></div>
-      ${renderRBar(rMultiples(p, s))}
-      <button class="close-btn" id="close-btn-${shortSymbol(symbol)}" style="width:100%;margin-top:10px"
-        onclick="closePosition('${symbol}')">긴급 청산</button>
-    </div>`;
-  }).join('') || '<div class="empty">보유 중인 포지션이 없습니다.</div>';
+<nav class="mnav" id="mnav">
+  <button data-m="home" class="active"><svg viewBox="0 0 24 24"><path d="M4 11l8-7 8 7v9h-5v-6H9v6H4z"/></svg>계좌</button>
+  <button data-m="chart"><svg viewBox="0 0 24 24"><path d="M4 19V5M4 19h16M8 15l4-5 3 3 5-6"/></svg>차트</button>
+  <button data-m="cond"><svg viewBox="0 0 24 24"><path d="M5 7h14M5 12h9M5 17h5"/></svg>조건</button>
+  <button data-m="hist"><svg viewBox="0 0 24 24"><path d="M12 7v5l3 2M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>내역</button>
+  <button data-m="perf"><svg viewBox="0 0 24 24"><path d="M6 20V11M12 20V5M18 20v-7"/></svg>성과</button>
+</nav>
 
-  document.getElementById('idle-row').innerHTML = idle.map(([symbol]) =>
-    `<span class="idle-chip" onclick='openChart(${JSON.stringify(symbol)}, {})'>${shortSymbol(symbol)}</span>`
-  ).join('');
-
-  const entries = data.recent_entries || [];
-
-  for (const e of entries) {
-    const key = `${e.timestamp}|${e.symbol}|${e.event}`;
-    if (!seenEntryKeys.has(key)) {
-      seenEntryKeys.add(key);
-      if (notifyInitialized) notifyNewEntry(e);
-    }
-  }
-  notifyInitialized = true;
-
-  const table = document.getElementById('entries-table');
-  const body = document.getElementById('entries-body');
-  const emptyEl = document.getElementById('entries-empty');
-
-  if (entries.length === 0) {
-    table.style.display = 'none';
-    emptyEl.style.display = 'block';
-  } else {
-    table.style.display = 'table';
-    emptyEl.style.display = 'none';
-    body.innerHTML = entries.map(e => {
-      const ts = e.timestamp ? new Date(e.timestamp).toLocaleString('ko-KR') : '–';
-      const badge = e.event || 'no_signal';  // execution 블롭은 이제 안 내려온다(전 기록에 event 있음)
-      const isClosed = e.event === 'closed';
-      const pnlClass = isClosed ? (e.realized_pnl >= 0 ? 'green' : 'red') : '';
-      const pnlCell = isClosed
-        ? `<span style="color:var(--${e.realized_pnl >= 0 ? 'green' : 'red'})">${fmtUsd(e.realized_pnl)}</span>`
-        : '–';
-      return `<tr>
-        <td>${ts}</td>
-        <td>${e.symbol ? shortSymbol(e.symbol) : '–'}</td>
-        <td><span class="badge ${badge}">${badge}</span></td>
-        <td>${e.signal || '–'}</td>
-        <td>${fmtPrice(e.entry_price)}</td>
-        <td>${isClosed ? fmtPrice(e.exit_price) : '–'}</td>
-        <td>${fmtPrice(e.stop_loss_price)}</td>
-        <td>${fmtPrice(e.take_profit_price)}</td>
-        <td>${pnlCell}</td>
-        <td class="reason">${e.reason || ''}</td>
-      </tr>`;
-    }).join('');
-  }
-}
-
-updateNotifyBtn();
-refresh();
-refreshBotStatus();
-refreshTelegramStatus();
-fetchPerformance();
-
-// --- 진입 조건 근접도 ---------------------------------------------------
-// 서버(/api/conditions)가 core.signal_status로 계산한 값을 그대로 그린다 — 여기서 조건을
-// 다시 판정하지 않는다(대시보드/텔레그램/실거래봇이 같은 정의를 쓰게 하기 위함).
-function miniBar(ratio, state) {
-  const pct = Math.max(0, Math.min(1, ratio)) * 100;
-  return '<div class="mini-track"><div class="mini-fill ' + state + '" style="width:' + pct + '%"></div></div>';
-}
-
-// state: 'ok'(조건 충족) | 'no'(미충족 게이트) | ''(중립 — 통과/실패가 아니라 '거리'인 항목)
-// SMA까지의 거리를 미충족처럼 호박색으로 칠하면 모든 줄이 경고로 보여서 오히려 안 읽힌다.
-function condMetric(key, ratio, valueText, state) {
-  return '<div class="cond-metric"><span class="k">' + key + '</span>' + miniBar(ratio, state) +
-         '<span class="v ' + state + '">' + valueText + '</span></div>';
-}
-
-function renderConditions(data) {
-  const list = document.getElementById('cond-list');
-  const meta = document.getElementById('cond-meta');
-  const note = document.getElementById('cond-note');
-  meta.textContent = '· ' + data.timeframe + ' · ADX≥' + data.adx_threshold +
-                     ' · SMA' + data.sma_period + ' 돌파 · 레짐 SMA' + data.regime_sma_period;
-
-  if (!data.symbols || !data.symbols.length) {
-    list.innerHTML = '<div class="cond-note">표시할 종목이 없습니다.</div>';
-    return;
-  }
-
-  list.innerHTML = data.symbols.map(function (r) {
-    const name = r.symbol.split('/')[0];
-    if (r.candidate_side === null) {
-      return '<div class="cond-row blocked"><div><div class="cond-name">' + name + '</div></div>' +
-             '<div class="cond-blockers">' + (r.blockers.join(' · ') || '계산 불가') + '</div>' +
-             '<div class="cond-score"><div class="pct">–</div></div></div>';
-    }
-    const isLong = r.candidate_side === 'LONG';
-    const sideText = r.ready ? ('🔥 지금 ' + (r.signal === 'LONG' ? '롱' : '숏') + ' 신호')
-                             : ((isLong ? '롱' : '숏') + ' 대기');
-    // SMA까지의 거리: cross_near_pct 이내면 꽉 찬 막대(가까울수록 길게)
-    const crossRatio = 1 - Math.min(1, Math.abs(r.distance_pct) / data.cross_near_pct);
-    const adxRatio = r.adx_threshold ? r.adx / r.adx_threshold : 1;
-    // 방향 확인 지표는 설정(direction_filter)에 따라 RSI일 수도 +DI/-DI일 수도 있다 —
-    // 이름과 문구는 서버(signal_status)가 만들어 보내므로 여기서 지표를 가정하지 않는다.
-    const dirRatio = typeof r.direction_score === 'number' ? r.direction_score : 0;
-    const dirName = r.direction_filter === 'di' ? 'DI' : (r.direction_filter === 'none' ? '방향' : 'RSI');
-
-    let rowClass = 'cond-row';
-    if (r.ready) rowClass += ' ready';
-    else if (r.regime_blocks_short) rowClass += ' blocked';
-
-    return '<div class="' + rowClass + '">' +
-      '<div><div class="cond-name">' + name + '</div>' +
-      '<div class="cond-side ' + (isLong ? 'long' : 'short') + '">' + sideText + '</div></div>' +
-      '<div class="cond-bars">' +
-        condMetric('SMA' + r.sma_period + '까지', crossRatio,
-                   r.distance_pct.toFixed(2) + '%', r.ready ? 'ok' : '') +
-        condMetric('ADX', adxRatio, r.adx.toFixed(1) + ' / ' + r.adx_threshold,
-                   r.adx_ok ? 'ok' : 'no') +
-        condMetric(dirName, dirRatio, r.direction_label || '–',
-                   r.direction_ok ? 'ok' : 'no') +
-      '</div>' +
-      '<div class="cond-score"><div class="pct">' + Math.round(r.proximity * 100) + '%</div>' +
-      '<div class="cap">' + (r.regime_blocks_short ? '숏 차단' : '근접도') + '</div></div>' +
-      '<div class="cond-blockers">' + (r.blockers.join(' · ') || '조건 충족') + '</div>' +
-    '</div>';
-  }).join('');
-
-  const parts = ['막대가 길수록 조건에 가깝습니다. 근접도는 세 조건의 곱이라 하나만 멀어도 낮게 나옵니다.',
-                 '진입 신호는 SMA를 "막 돌파하는 순간"만 잡으므로, 거리가 0%에 가까워도 실제 돌파 전까지는 대기입니다.'];
-  if (data.errors && data.errors.length) {
-    parts.push('조회 실패: ' + data.errors.map(function (e) { return e.symbol.split('/')[0]; }).join(', '));
-  }
-  note.innerHTML = parts.join('<br>');
-}
-
-async function fetchConditions() {
-  const requestedEnv = currentEnv;
-  try {
-    const res = await fetch('/api/conditions?env=' + requestedEnv);
-    if (!res.ok) return;
-    const data = await res.json();
-    // 응답을 기다리는 사이 사용자가 DEMO/LIVE 탭을 바꿨으면 낡은 결과를 그리지 않는다
-    if (data.env !== currentEnv) return;
-    renderConditions(data);
-  } catch (e) { /* 일시적 실패는 다음 주기에 다시 시도 */ }
-}
-
-setInterval(refresh, 5000);
-setInterval(refreshBotStatus, 5000);
-setInterval(refreshTelegramStatus, 5000);
-setInterval(fetchPerformance, 15000);
-// 서버가 20초 캐시를 두므로 그보다 촘촘히 부를 이유가 없다
-setInterval(fetchConditions, 20000);
-fetchConditions();
-</script>
+<script src="{{ url_for('static', filename='dashboard.js') }}"></script>
 </body>
 </html>
