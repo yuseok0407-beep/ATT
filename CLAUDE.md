@@ -58,6 +58,9 @@ USDT-M 선물(레버리지 롱/숏)을 **순수 규칙 기반**으로 상시 감
   (2026-09-28). 진입 슬리피지(신호 봉 종가 대비), **청산 슬리피지(손절/익절 발동가 대비)**, 수수료,
   그 합을 평균·p90·최악으로. 거래별 값은 `export_log`가 계산한다(`adverse_slippage_r` — 양수가
   손해). 익절 조건주문은 발동 뒤 시장가라 되돌림에서 체결돼 평균 0.076R을 잃는다(손절은 0.005R).
+- `src/backtest/sizing.py` / `scripts/run_risk_sizing.py` — R 결과를 **거래당 리스크 x%의 복리
+  자산 경로**로 환산(월 수익률·최대 낙폭·월 1%로 회복 기간). 리스크 비율은 결과의 크기만 바꾸고
+  부호는 못 바꾼다. 일일 손실 한도(자산 %)의 R 환산이 비율마다 달라 비율마다 다시 시뮬레이션한다.
 - `src/execution/futures_orders.py` — 주문 실행(브라켓 동시 발주, 고아 주문 정리)
 - `dashboard/app.py` — 선물 봇 상태를 보여주는 Flask 웹 대시보드 (http://127.0.0.1:5055)
 - `src/core/signal_status.py` — "진입 조건에 지금 얼마나 가까운지" 계산. 대시보드
@@ -106,10 +109,17 @@ USDT-M 선물(레버리지 롱/숏)을 **순수 규칙 기반**으로 상시 감
     진입 체결가**(`actual_entry_price`)를 남긴다(`_aggregate_closing_trades`가 같은
     `fetch_my_trades` 응답에서 뽑으므로 추가 조회 없음). 그 이전 기록은 `FEE_PCT_PER_SIDE`와
     손절폭으로 추정하고, 추정임을 화면에 밝힌다.
+  - **실계좌 실측 수수료는 편도 0.05%**(테이커 기본 등급, 2026-09-28)이고 `FEE_PCT_PER_SIDE`
+    기본값도 0.0005다(그 전 0.0004). 바꾸면 백테스트 결과가 바뀌므로 `GATE_VERSION`을 같이 올린다(v2).
   - 수수료율의 정의는 `config.FEE_PCT_PER_SIDE` **한 곳**이다 — 예전엔 스크립트 7개에 각각
     `0.0004`로 복사돼 있었고 `run_backtest`의 기본값은 그와 무관하게 `0.0`이었다.
-- 포지션 진입은 항상 반대방향 reduceOnly STOP_MARKET(손절) + TAKE_PROFIT_MARKET(익절) 주문을 동시에 건다
-  (`futures_orders.open_position_with_bracket`).
+- 포지션 진입은 항상 반대방향 reduceOnly STOP_MARKET(손절) + 익절 주문을 동시에 건다
+  (`futures_orders.open_position_with_bracket`). **익절은 2026-09-28부터 익절가에 걸어 두는
+  reduce-only 지정가**다(`TAKE_PROFIT_ORDER_TYPE=limit`, `market`이면 옛 TAKE_PROFIT_MARKET).
+  조건부 시장가 익절은 발동 뒤 시장가라 되돌림 순간에 체결돼 평균 0.076R을 잃었다(손절은 0.005R).
+  지정가 익절은 **algo가 아니라 일반 주문 목록**에 있다 — 익절가를 읽는 코드는
+  `get_bracket_prices`를 쓸 것(두 목록을 다 본다). 백테스트도 같은 규칙이다(`engine.exit_pnl_r`:
+  익절 청산만 메이커 수수료·청산 슬리피지 없음).
 - 이 두 주문은 바이낸스의 algo/conditional 주문 계열이라 `cancel_all_orders(symbol)` 한 번으로는 안 지워진다 —
   `params={"trigger": True}`를 추가로 호출해야 한다 (`futures_orders.cleanup_stale_orders` 참고, 실전에서
   버그로 실제 발견되어 고친 부분).

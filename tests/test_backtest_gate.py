@@ -247,7 +247,8 @@ def test_a_rejected_pass_no_longer_counts_as_adoptable(tmp_path, monkeypatch):
     남아 있으면 **기각한 설정 때문에 홀드아웃 봉인이 풀린다** — 실제로 E0007에서 걸린 구멍이다."""
     runner = _load_runner()
     monkeypatch.setattr(runner, "LEDGER_PATH", tmp_path / "experiments.tsv")
-    runner.append_ledger({"run_id": "E0001", "verdict": "PASS", "window": "search"})
+    runner.append_ledger({"run_id": "E0001", "verdict": "PASS", "window": "search",
+                          "gate_version": gate.GATE_VERSION})
     assert len(runner.adoptable_passes(runner.read_ledger())) == 1
 
     runner.append_ledger({"run_id": "E0002", "verdict": "REJECTED", "window": "search",
@@ -260,11 +261,22 @@ def test_a_rejected_pass_no_longer_counts_as_adoptable(tmp_path, monkeypatch):
     assert rows[0]["verdict"] == "PASS"
 
 
+def test_a_pass_under_an_older_gate_version_does_not_unlock_the_holdout(tmp_path, monkeypatch):
+    """v1 PASS(E0027·E0031)가 v2 비용 모델에서 FAIL했다 — 옛 기준의 PASS로 봉인이 풀리면 안 된다."""
+    runner = _load_runner()
+    monkeypatch.setattr(runner, "LEDGER_PATH", tmp_path / "experiments.tsv")
+    runner.append_ledger({"run_id": "E0001", "verdict": "PASS", "window": "search",
+                          "gate_version": gate.GATE_VERSION - 1})
+
+    assert runner.adoptable_passes(runner.read_ledger()) == []
+
+
 def test_rejection_requires_a_reason(tmp_path, monkeypatch):
     """이유 없는 기각은 나중에 재현할 수 없다."""
     runner = _load_runner()
     monkeypatch.setattr(runner, "LEDGER_PATH", tmp_path / "experiments.tsv")
-    runner.append_ledger({"run_id": "E0001", "verdict": "PASS", "window": "search"})
+    runner.append_ledger({"run_id": "E0001", "verdict": "PASS", "window": "search",
+                          "gate_version": gate.GATE_VERSION})
 
     assert runner._reject("E0001", "") == 2
     assert runner.adoptable_passes(runner.read_ledger()) != []

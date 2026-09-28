@@ -159,10 +159,16 @@ def rejected_ids(rows: list[dict]) -> set[str]:
 
 
 def adoptable_passes(rows: list[dict]) -> list[dict]:
-    """탐색 구간에서 PASS했고 아직 기각되지 않은 행."""
+    """탐색 구간에서 **지금 게이트 버전으로** PASS했고 아직 기각되지 않은 행.
+
+    버전 조건이 필요한 이유(2026-09-28): 게이트 v1의 PASS(E0027·E0031)가 v2 비용 모델로 다시
+    재니 둘 다 FAIL했다(E0036·E0037). 옛 기준으로 통과한 행이 새 기준에서 홀드아웃을 열 수
+    있으면, 기준을 고친 의미가 없어진다 — 프로토콜의 "버전이 다른 행끼리 비교하지 않는다"를
+    잠금에도 적용한 것."""
     dropped = rejected_ids(rows)
     return [row for row in rows
             if row.get("verdict") == "PASS" and row.get("window") == "search"
+            and str(row.get("gate_version", "")).strip() == str(gate.GATE_VERSION)
             and row.get("run_id") not in dropped]
 
 
