@@ -114,12 +114,14 @@ def start(key: str = "demo") -> dict:
         return status
 
     _clear_stop_request(key)  # 지난번 종료 요청이 남아 있으면 켜자마자 꺼진다
-    # 봇은 띄운 쪽(대시보드 콘솔 창, 텔레그램 봇)과 **완전히 분리된** 프로세스로 띄운다(2026-09-28).
+    # 봇은 띄운 쪽(대시보드 콘솔 창, 텔레그램 봇)과 **분리된** 프로세스로 띄운다(2026-09-28).
     # 예전엔 콘솔을 물려받아서, 대시보드 창을 닫으면 Windows가 그 콘솔에 붙은 봇까지 같이 죽였다.
-    # 콘솔이 없으니 화면 출력은 버리고(로그는 각 스크립트가 logs/*.log 파일에 따로 쓴다), 로깅이
-    # 시작되기 전에 죽는 경우의 오류만 logs/{key}_process.err에 남긴다.
+    # CREATE_NO_WINDOW = 창이 없는 **자기만의** 콘솔. DETACHED_PROCESS(콘솔 없음)는 쓰면 안 된다 —
+    # venv의 python.exe는 진짜 인터프리터를 자식으로 다시 띄우는 실행기라, 콘솔 없는 실행기의
+    # 자식이 새 콘솔 **창**을 만들어 봇마다 창이 하나씩 떴다(그 창을 닫으면 봇이 죽는다).
+    # 화면 출력은 버리고(로그는 각 스크립트가 logs/*.log에 쓴다), 로깅 시작 전 오류만 파일에 남긴다.
     if sys.platform == "win32":
-        creationflags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        creationflags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
         popen_kwargs = {"creationflags": creationflags}
     else:
         popen_kwargs = {"start_new_session": True}

@@ -144,6 +144,7 @@ def test_stop_never_sends_ctrl_break_on_windows(monkeypatch):
 def test_start_detaches_the_bot_from_the_launching_console(monkeypatch):
     """대시보드 창을 닫아도 봇이 살아 있어야 한다 — 콘솔을 물려받지 않게 분리해서 띄운다."""
     monkeypatch.setattr(bot_process.sys, "platform", "win32")
+    monkeypatch.setattr(bot_process.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
     monkeypatch.setattr(bot_process.subprocess, "DETACHED_PROCESS", 0x8, raising=False)
     monkeypatch.setattr(bot_process.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, raising=False)
     with patch("src.execution.bot_process.get_status", return_value={"running": False, "pid": None, "started_at": None}), \
@@ -152,7 +153,9 @@ def test_start_detaches_the_bot_from_the_launching_console(monkeypatch):
         bot_process.start("live")
 
     kwargs = mock_popen.call_args.kwargs
-    assert kwargs["creationflags"] & 0x8  # DETACHED_PROCESS
+    assert kwargs["creationflags"] & 0x08000000  # CREATE_NO_WINDOW — 창 없는 자기 콘솔
+    # DETACHED_PROCESS를 쓰면 venv 실행기의 자식(진짜 파이썬)이 콘솔 창을 새로 띄운다
+    assert not kwargs["creationflags"] & 0x8
     assert kwargs["stdout"] is bot_process.subprocess.DEVNULL
 
 
