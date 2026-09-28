@@ -21,6 +21,19 @@ def client(monkeypatch):
     return dashboard_app.app.test_client()
 
 
+@pytest.fixture(autouse=True)
+def _clear_exchange_cache():
+    """거래소 응답 캐시는 모듈 전역이라 테스트끼리 섞이지 않게 매번 비운다."""
+    dashboard_app._cache.clear()
+    yield
+    dashboard_app._cache.clear()
+
+
+def _positions(mapping=None):
+    mapping = mapping or {}
+    return lambda client, symbols: {s: mapping.get(s) for s in symbols}
+
+
 def test_api_status_returns_503_when_balance_fetch_fails(client, monkeypatch):
     """실전 재현: 데모 거래소 백엔드가 타임아웃(ccxt RequestTimeout -1007)나면 잔고 조회부터
     실패한다 — 예전엔 처리 안 된 예외가 그대로 터져 Flask 기본 500 HTML 페이지가 나갔다."""
@@ -37,16 +50,15 @@ def test_api_status_returns_503_when_balance_fetch_fails(client, monkeypatch):
 
 
 def test_api_status_isolates_one_symbols_exchange_error_from_the_rest(client, monkeypatch):
-    """BTC 포지션 조회가 타임아웃나도 ETH 상태는 정상적으로 돌아와야 한다 —
+    """BTC의 손절/익절 주문 조회가 타임아웃나도 ETH 상태는 정상적으로 돌아와야 한다 —
     futures_rule_bot.run_once()의 심볼별 예외 격리와 동일한 이유."""
     monkeypatch.setattr(dashboard_app, "get_futures_balance", lambda client: {"USDT": {"total": 1000.0}})
+    monkeypatch.setattr(dashboard_app, "get_positions", _positions({"BTC/USDT:USDT": _position()}))
 
-    def _get_position(client, symbol):
-        if symbol == "BTC/USDT:USDT":
-            raise TimeoutError("backend timeout")
-        return None
+    def _brackets(client, symbol):
+        raise TimeoutError("backend timeout")
 
-    monkeypatch.setattr(dashboard_app, "get_position", _get_position)
+    monkeypatch.setattr(dashboard_app, "get_bracket_prices", _brackets)
 
     resp = client.get("/api/status")
     assert resp.status_code == 200
@@ -57,9 +69,62 @@ def test_api_status_isolates_one_symbols_exchange_error_from_the_rest(client, mo
     assert body["margin_equity"] == 1000.0
 
 
+def test_api_status_marks_symbols_unavailable_when_the_positions_call_fails(client, monkeypatch):
+    """포지션은 한 번의 요청으로 받는다 — 그게 실패하면 잔고는 보여주되 종목은 전부 상태 불명."""
+    monkeypatch.setattr(dashboard_app, "get_futures_balance", lambda client: {"USDT": {"total": 1000.0}})
+
+    def _raise(client, symbols):
+        raise TimeoutError("backend timeout")
+
+    monkeypatch.setattr(dashboard_app, "get_positions", _raise)
+
+    body = client.get("/api/status").get_json()
+
+    assert all("error" in s for s in body["symbols"].values())
+    assert body["margin_equity"] == 1000.0
+
+
+def test_api_status_asks_the_exchange_once_for_many_viewers(client, monkeypatch):
+    """PC와 휴대폰이 동시에 열어도 거래소 요청은 캐시 TTL마다 한 번 — 바이낸스 한도는 IP 단위라
+    화면 수만큼 요청이 늘면 IP가 차단된다(2026-09-28, 418 -1003)."""
+    calls = {"balance": 0, "positions": 0}
+
+    def _balance(client):
+        calls["balance"] += 1
+        return {"USDT": {"total": 1000.0}}
+
+    def _get_positions(client, symbols):
+        calls["positions"] += 1
+        return {s: None for s in symbols}
+
+    monkeypatch.setattr(dashboard_app, "get_futures_balance", _balance)
+    monkeypatch.setattr(dashboard_app, "get_positions", _get_positions)
+
+    for _ in range(3):
+        assert client.get("/api/status").status_code == 200
+
+    assert calls == {"balance": 1, "positions": 1}
+
+
+def test_a_failed_status_is_not_cached(client, monkeypatch):
+    state = {"fail": True}
+
+    def _balance(client):
+        if state["fail"]:
+            raise TimeoutError("backend timeout")
+        return {"USDT": {"total": 1000.0}}
+
+    monkeypatch.setattr(dashboard_app, "get_futures_balance", _balance)
+    monkeypatch.setattr(dashboard_app, "get_positions", _positions())
+
+    assert client.get("/api/status").status_code == 503
+    state["fail"] = False
+    assert client.get("/api/status").status_code == 200
+
+
 def test_api_status_defaults_to_demo_env(client, monkeypatch):
     monkeypatch.setattr(dashboard_app, "get_futures_balance", lambda client: {"USDT": {"total": 1000.0}})
-    monkeypatch.setattr(dashboard_app, "get_position", lambda client, symbol: None)
+    monkeypatch.setattr(dashboard_app, "get_positions", lambda client, symbols: {s: None for s in symbols})
 
     resp = client.get("/api/status")
     assert resp.status_code == 200
@@ -129,7 +194,7 @@ def test_api_status_demo_and_live_use_different_journal_and_state_paths(client, 
     captured = {"journal_paths": [], "state_paths": []}
 
     monkeypatch.setattr(dashboard_app, "get_futures_balance", lambda client: {"USDT": {"total": 1000.0}})
-    monkeypatch.setattr(dashboard_app, "get_position", lambda client, symbol: None)
+    monkeypatch.setattr(dashboard_app, "get_positions", lambda client, symbols: {s: None for s in symbols})
     monkeypatch.setattr(dashboard_app, "read_entries",
                          lambda path=None: captured["journal_paths"].append(path) or [])
     monkeypatch.setattr(dashboard_app, "get_daily_pnl_pct",
@@ -237,8 +302,7 @@ def test_api_status_flags_a_position_without_a_stop_order(client, monkeypatch):
     """손절 없는 레버리지 포지션은 화면 맨 위 경보로 올라가야 한다 — 지금까지는 카드 안
     손절가 칸의 "-" 한 글자로만 표시돼서 정상 상태와 구분이 안 됐다."""
     monkeypatch.setattr(dashboard_app, "get_futures_balance", lambda client: {"USDT": {"total": 1000.0}})
-    monkeypatch.setattr(dashboard_app, "get_position",
-                        lambda client, symbol: _position() if symbol == "BTC/USDT:USDT" else None)
+    monkeypatch.setattr(dashboard_app, "get_positions", _positions({"BTC/USDT:USDT": _position()}))
     monkeypatch.setattr(dashboard_app, "get_bracket_prices", lambda client, symbol: (None, 102.0))
 
     body = client.get("/api/status").get_json()
@@ -250,8 +314,7 @@ def test_api_status_flags_a_position_without_a_stop_order(client, monkeypatch):
 
 def test_api_status_does_not_flag_a_protected_position(client, monkeypatch):
     monkeypatch.setattr(dashboard_app, "get_futures_balance", lambda client: {"USDT": {"total": 1000.0}})
-    monkeypatch.setattr(dashboard_app, "get_position",
-                        lambda client, symbol: _position() if symbol == "BTC/USDT:USDT" else None)
+    monkeypatch.setattr(dashboard_app, "get_positions", _positions({"BTC/USDT:USDT": _position()}))
     monkeypatch.setattr(dashboard_app, "get_bracket_prices", lambda client, symbol: (99.0, 102.0))
 
     body = client.get("/api/status").get_json()
@@ -265,7 +328,7 @@ def test_api_status_includes_recent_exchange_rejections(client, monkeypatch):
     from datetime import datetime, timedelta, timezone
     recent = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
     monkeypatch.setattr(dashboard_app, "get_futures_balance", lambda client: {"USDT": {"total": 1000.0}})
-    monkeypatch.setattr(dashboard_app, "get_position", lambda client, symbol: None)
+    monkeypatch.setattr(dashboard_app, "get_positions", lambda client, symbols: {s: None for s in symbols})
     monkeypatch.setattr(dashboard_app, "read_entries", lambda path=None: [
         {"timestamp": recent, "event": "rejected_exchange_error", "symbol": "TSLA/USDT:USDT",
          "reason": 'binance {"code":-2027,"msg":"Exceeded the maximum allowable position"}'},
@@ -280,7 +343,7 @@ def test_api_status_includes_recent_exchange_rejections(client, monkeypatch):
 def test_api_status_includes_todays_filter_blocks(client, monkeypatch, tmp_path):
     """저널에 안 남는 차단 사유(레짐숏/저변동/…)를 볼 수 있는 유일한 창구."""
     monkeypatch.setattr(dashboard_app, "get_futures_balance", lambda client: {"USDT": {"total": 1000.0}})
-    monkeypatch.setattr(dashboard_app, "get_position", lambda client, symbol: None)
+    monkeypatch.setattr(dashboard_app, "get_positions", lambda client, symbols: {s: None for s in symbols})
     stats_path = str(tmp_path / "stats.json")
     filter_stats.record("skipped_low_volatility", "BTC/USDT:USDT", "bar1",
                         path=stats_path, today="2026-09-09")
@@ -297,8 +360,7 @@ def test_api_status_includes_todays_filter_blocks(client, monkeypatch, tmp_path)
 def test_api_status_includes_the_excursion_of_an_open_position(client, monkeypatch, tmp_path):
     """"지금 +0.4R인데 아까 +1.6R까지 갔었다"를 카드에 그리기 위한 데이터."""
     monkeypatch.setattr(dashboard_app, "get_futures_balance", lambda client: {"USDT": {"total": 1000.0}})
-    monkeypatch.setattr(dashboard_app, "get_position",
-                        lambda client, symbol: _position() if symbol == "BTC/USDT:USDT" else None)
+    monkeypatch.setattr(dashboard_app, "get_positions", _positions({"BTC/USDT:USDT": _position()}))
     monkeypatch.setattr(dashboard_app, "get_bracket_prices", lambda client, symbol: (99.0, 102.0))
     excursion_path = str(tmp_path / "exc.json")
     excursion.update("BTC/USDT:USDT", entry_price=100.0, stop_loss_price=99.0,
@@ -315,7 +377,7 @@ def test_api_status_strips_the_raw_order_blob_from_recent_entries(client, monkey
     """진입 기록 하나의 execution(주문 원본 응답)이 6KB인데 화면은 이 중 아무것도 안 쓴다 —
     30줄이면 36KB이고 5초마다 나간다. 저널 파일에는 그대로 남는다."""
     monkeypatch.setattr(dashboard_app, "get_futures_balance", lambda client: {"USDT": {"total": 1000.0}})
-    monkeypatch.setattr(dashboard_app, "get_position", lambda client, symbol: None)
+    monkeypatch.setattr(dashboard_app, "get_positions", lambda client, symbols: {s: None for s in symbols})
     monkeypatch.setattr(dashboard_app, "read_entries", lambda path=None: [
         {"timestamp": "2026-09-09T01:00:00+00:00", "event": "entered", "symbol": "BTC/USDT:USDT",
          "entry_price": 100.0, "execution": {"entry_order": {"info": {"x": "y" * 1000}}}},
@@ -347,7 +409,7 @@ def test_api_status_config_comes_from_the_single_strategy_config(client, monkeyp
     """화면의 설정과 저널에 기록되는 설정 스냅샷이 갈라지면 둘 중 뭘 믿을지 알 수 없다 —
     둘 다 futures_rule_bot.current_strategy_config() 하나에서 나온다."""
     monkeypatch.setattr(dashboard_app, "get_futures_balance", lambda client: {"USDT": {"total": 1000.0}})
-    monkeypatch.setattr(dashboard_app, "get_position", lambda client, symbol: None)
+    monkeypatch.setattr(dashboard_app, "get_positions", lambda client, symbols: {s: None for s in symbols})
 
     config = client.get("/api/status").get_json()["config"]
 

@@ -43,6 +43,7 @@ from src.data.futures_exchange import (
     get_max_leverage,
     get_notional_cap,
     get_position,
+    get_positions,
     set_leverage,
     set_margin_mode,
 )
@@ -841,7 +842,9 @@ def run_once(client, env: str = "demo", consecutive_losses: int = None, daily_pn
 
     cycle = {"margin_equity": margin_equity, "daily_pnl_pct": daily_pnl_pct, "symbols": {}}
 
-    positions = {symbol: get_position(client, symbol) for symbol in symbols}
+    # 한 번의 요청으로 전 종목 — 종목마다 부르면 사이클당 12번이고, 같은 IP를 쓰는 대시보드와
+    # 합쳐 바이낸스 요청 한도를 넘겨 IP가 차단된 적이 있다(2026-09-28, 418 -1003).
+    positions = get_positions(client, list(symbols))
     open_count = sum(1 for p in positions.values() if p is not None)
 
     # 청산 감지/고아 주문 정리/미기록 포지션 백필은 서킷브레이커 통과 여부와 무관하게 항상

@@ -1377,11 +1377,13 @@ if (savedTab && document.querySelector(`#dock-tabs button[data-tab="${savedTab}"
 refreshAll();
 refreshTelegramStatus();
 
-every(refreshStatus, 5000);
-every(refreshBotStatus, 5000);
-every(refreshTelegramStatus, 10000);
-every(fetchTickers, 5000);
-every(fetchPerformance, 15000);
-every(fetchConditions, 20000);   // 서버가 20초 캐시를 두므로 그보다 촘촘히 부를 이유가 없다
+// 거래소에 묻는 것(상태·시세·조건·차트)은 서버가 캐시를 공유하지만, 주기 자체도 여유 있게 둔다 —
+// 바이낸스 요청 한도는 IP 단위라 두 봇과 같이 쓴다(2026-09-28 IP 차단 사고).
+every(refreshStatus, 10000);
+every(refreshBotStatus, 10000);     // 로컬 파일만 읽음
+every(refreshTelegramStatus, 15000);
+every(fetchTickers, 30000);         // 서버 캐시 30초
+every(fetchPerformance, 30000);     // 저널만 읽음
+every(fetchConditions, 60000);      // 서버 캐시 60초 — 신호는 마감 봉 기준이라 자주 안 바뀐다
 every(loadChart, 30000);
 every(fetchEquity, 60000);

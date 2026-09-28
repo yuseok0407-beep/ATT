@@ -33,7 +33,8 @@ def _base_patches(balance_total=10_000, positions=None):
     positions = positions or {}
     return [
         patch("src.futures_rule_bot.get_futures_balance", return_value={"USDT": {"total": balance_total}}),
-        patch("src.futures_rule_bot.get_position", side_effect=lambda client, symbol: positions.get(symbol)),
+        patch("src.futures_rule_bot.get_positions",
+              side_effect=lambda client, symbols: {s: positions.get(s) for s in symbols}),
         patch("src.futures_rule_bot.cleanup_stale_orders"),
         patch("src.futures_rule_bot.check_and_log_closed_trade"),
         patch("src.futures_rule_bot.check_and_log_untracked_position"),

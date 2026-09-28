@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import logging
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -27,7 +28,7 @@ from src.core.risk import MAX_CONSECUTIVE_LOSSES, MAX_DAILY_LOSS_PCT
 from src.core.signal_status import collect_conditions
 from src.core.state import compute_consecutive_losses, get_daily_pnl_pct
 from src.data.futures_exchange import (LiveKeysNotConfiguredError, fetch_ohlcv_df, get_futures_balance,
-                                        get_futures_client, get_position)
+                                        get_futures_client, get_position, get_positions)
 from src.data.public_ip import get_public_ip
 from src.execution import bot_process, equity_log, excursion, filter_stats
 from src.execution.strategy_versions import summarize_by_version
@@ -67,6 +68,42 @@ MONTHLY_TARGET_RETURN = 0.01
 
 # 차트에서 고를 수 있는 봉 주기. 아무 문자열이나 거래소로 넘기지 않도록 목록으로 막는다.
 CHART_TIMEFRAMES = ("15m", "1h", "4h", "1d")
+
+
+# ---------- 거래소 요청 캐시 (2026-09-28) ----------
+# 바이낸스 요청 한도는 IP 단위(USDT-M 분당 가중치 2400)라 대시보드와 두 봇이 한 한도를 나눠 쓴다.
+# 예전엔 화면 하나가 5초마다 잔고·포지션(종목마다)·시세를 전부 새로 물어서 LIVE 화면 하나가 분당
+# 약 1300을 썼고, PC와 휴대폰에서 같이 열자 한도를 넘겨 IP가 차단됐다(418 -1003) — 차단 동안에는
+# 봇도 캔들을 못 받아 "실행 중"인데 아무것도 못 했다. 그래서 거래소에 묻는 값은 여기서 TTL 동안
+# 공유한다. 화면이 몇 개든 거래소 요청 수는 같다.
+STATUS_TTL = 5
+LEVERAGE_TTL = 600
+TICKER_TTL = 30
+CONDITIONS_TTL = 60   # 신호는 마감 봉으로만 판정하므로 1분 안에 달라질 일이 거의 없다
+CHART_TTL = 20
+
+_cache: dict = {}
+_cache_guard = threading.Lock()
+_cache_locks: dict = {}
+
+
+def _cached(key, ttl: float, compute):
+    """key의 값을 ttl초 동안 재사용한다. 계산 중에 같은 key로 들어온 요청은 기다렸다가 같은 결과를
+    받는다(동시에 두 번 거래소에 묻지 않음). compute가 예외를 내면 캐시하지 않고 그대로 올린다."""
+    with _cache_guard:
+        lock = _cache_locks.setdefault(key, threading.Lock())
+    with lock:
+        hit = _cache.get(key)
+        if hit is not None and time.monotonic() - hit[0] < ttl:
+            return hit[1]
+        value = compute()
+        _cache[key] = (time.monotonic(), value)
+        return value
+
+
+def _invalidate(prefix: str, env: str) -> None:
+    """청산·리셋처럼 사용자가 상태를 바꾼 직후엔 캐시된 옛 화면을 보여주지 않는다."""
+    _cache.pop((prefix, env), None)
 
 
 # ---------- 접속 제어 (2026-09-28) ----------
@@ -229,19 +266,45 @@ def api_status():
         return err
 
     try:
+        # 화면이 여러 개(PC·휴대폰) 열려 있어도 거래소에는 STATUS_TTL마다 한 번만 묻는다
+        return jsonify(_cached(("status", env), STATUS_TTL, lambda: _build_status(env, client)))
+    except _ExchangeUnavailable as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 503
+
+
+class _ExchangeUnavailable(Exception):
+    """잔고 조회처럼 화면 전체가 의미 없어지는 실패 — 캐시하지 않고 503으로 알린다."""
+
+
+def _leverages(env: str, client, symbols: list[str]) -> dict:
+    """종목별 레버리지는 봇이 시작할 때 한 번 정하고 안 바뀐다 — 10분에 한 번만 묻는다."""
+    def fetch():
+        try:
+            return client.fetch_leverages(symbols)
+        except Exception:
+            logger.exception("failed to fetch per-symbol leverage — falling back to configured default")
+            return {}
+    return _cached(("leverages", env), LEVERAGE_TTL, fetch)
+
+
+def _build_status(env: str, client) -> dict:
+    try:
         balance = get_futures_balance(client)
         margin_equity = (balance.get("USDT") or {}).get("total") or 0.0
     except Exception as exc:
         logger.exception("failed to fetch futures balance (env=%s)", env)
-        return jsonify({"status": "error", "message": f"거래소 응답 실패: {exc}"}), 503
+        raise _ExchangeUnavailable(f"거래소 응답 실패: {exc}") from exc
 
     paths = _paths_for(env)
     available_symbols = _available_symbols(client)
+    leverages = _leverages(env, client, available_symbols)
+    # 전 종목 포지션을 한 번의 요청으로(가중치 5). 예전처럼 종목마다 부르면 12배였고, 5초 주기와
+    # 여러 화면이 겹쳐 바이낸스가 IP를 차단했다(2026-09-28, 418 -1003).
     try:
-        leverages = client.fetch_leverages(available_symbols)
-    except Exception:
-        logger.exception("failed to fetch per-symbol leverage — falling back to configured default for all symbols")
-        leverages = {}
+        positions, positions_error = get_positions(client, available_symbols), None
+    except Exception as exc:
+        logger.exception("failed to fetch positions (env=%s) — marking all symbols unavailable", env)
+        positions, positions_error = {}, exc
 
     symbols = {}
     open_count = 0
@@ -249,7 +312,9 @@ def api_status():
     excursions = excursion.read_all(path=paths["excursion"])
     for symbol in available_symbols:
         try:
-            position = get_position(client, symbol)
+            if positions_error is not None:
+                raise positions_error
+            position = positions.get(symbol)
             stop_loss_price, take_profit_price = (None, None)
             if position is not None:
                 open_count += 1
@@ -286,7 +351,7 @@ def api_status():
     daily_pnl_pct = get_daily_pnl_pct(margin_equity, path=paths["state"])
     consecutive_losses = compute_consecutive_losses(all_entries)
 
-    return jsonify({
+    return {
         "env": env,
         "symbols": symbols,
         "leverage": LEVERAGE,
@@ -310,7 +375,7 @@ def api_status():
         # 전략 설정은 futures_rule_bot.current_strategy_config() 한 곳에서만 정의한다 —
         # 저널에 기록되는 설정 스냅샷과 화면에 뜨는 설정이 다르면 둘 중 뭘 믿을지 알 수 없다.
         "config": current_strategy_config(),
-    })
+    }
 
 
 @app.route("/api/performance")
@@ -348,7 +413,8 @@ def api_chart(symbol):
         return jsonify({"status": "error", "message": "알 수 없는 심볼입니다."}), 404
 
     try:
-        df = fetch_ohlcv_df(client, symbol, timeframe=timeframe, limit=160)
+        df = _cached(("chart", env, symbol, timeframe), CHART_TTL,
+                     lambda: fetch_ohlcv_df(client, symbol, timeframe=timeframe, limit=160))
     except Exception as exc:
         logger.exception("failed to fetch chart candles for %s (env=%s)", symbol, env)
         return jsonify({"status": "error", "message": f"캔들 조회 실패: {exc}"}), 503
@@ -374,8 +440,10 @@ def api_tickers():
     if err:
         return err
     symbols = _available_symbols(client)
+    # 전 종목 24시간 시세는 가중치 40짜리 요청이다 — TICKER_TTL 동안 모든 화면이 공유한다.
+    # 실패는 캐시하지 않는다(다음 요청이 다시 시도).
     try:
-        raw = client.fetch_tickers(symbols)
+        raw = _cached(("tickers", env), TICKER_TTL, lambda: client.fetch_tickers(symbols))
     except Exception:
         logger.exception("failed to fetch tickers (env=%s)", env)
         raw = {}
@@ -417,7 +485,10 @@ def api_conditions():
     if err:
         return err
 
-    payload = collect_conditions(_available_symbols(client))
+    symbols = _available_symbols(client)
+    # 종목마다 캔들 400여 개를 받는 무거운 계산이다 — 동시에 여러 화면이 불러도 한 번만 돈다.
+    payload = dict(_cached(("conditions", env), CONDITIONS_TTL,
+                           lambda: collect_conditions(symbols)))
     payload["env"] = env
     return jsonify(payload)
 
@@ -447,6 +518,7 @@ def api_close(symbol):
     paths = _paths_for(env)
     record_manual_close(client, symbol, journal_path=paths["journal"], last_trade_path=paths["last_trade"],
                          excursion_path=paths["excursion"])
+    _invalidate("status", env)
     return jsonify(result)
 
 
@@ -461,6 +533,7 @@ def api_risk_reset_streak():
         return jsonify({"status": "error", "message": "알 수 없는 env입니다."}), 400
     paths = _paths_for(env)
     entry = reset_consecutive_losses(journal_path=paths["journal"])
+    _invalidate("status", env)
     return jsonify({"status": "ok", "entry": entry})
 
 

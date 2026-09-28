@@ -1,3 +1,5 @@
+import threading
+
 import ccxt
 import pandas as pd
 
@@ -51,11 +53,39 @@ def get_futures_client(env: str = "demo") -> ccxt.binance:
     return client
 
 
+_market_data_client: ccxt.binance | None = None
+_market_data_lock = threading.Lock()
+
+
 def get_futures_market_data_client() -> ccxt.binance:
     """선물 시세/캔들 조회 전용 클라이언트 (키 없이 공개 데이터만). 지표 계산은 반드시 이걸로
     해야 한다 — SOXL처럼 바이낸스 현물에는 없고 선물에만 있는 심볼도 있어서, 현물 클라이언트로는
-    조회 자체가 실패한다."""
-    return ccxt.binance({"enableRateLimit": True, "options": {"defaultType": "future"}})
+    조회 자체가 실패한다.
+
+    **프로세스당 하나를 만들어 재사용한다**(2026-09-28). 예전엔 부를 때마다 새로 만들었는데,
+    새 클라이언트는 첫 조회에서 거래소 정보(load_markets)를 통째로 다시 받는다 — 감시 루프가
+    종목마다 이걸 불러서 봇 두 개 × 12종목이 30초마다 거래소 정보를 24번 받았고, 대시보드 요청과
+    겹쳐 바이낸스가 IP를 차단했다(418 -1003). 시장 목록도 USDT-M(linear)만 받는다 — 이 클라이언트는
+    선물 캔들만 보므로 현물(가중치 20)·코인선물 목록까지 받을 이유가 없다."""
+    global _market_data_client
+    with _market_data_lock:
+        if _market_data_client is None:
+            _market_data_client = ccxt.binance({
+                "enableRateLimit": True,
+                "options": {"defaultType": "future", "fetchMarkets": ["linear"]},
+            })
+        return _market_data_client
+
+
+def get_positions(client: ccxt.binance, symbols: list[str]) -> dict[str, dict | None]:
+    """여러 종목의 보유 포지션을 **한 번의 요청으로**. 포지션이 없는 종목은 None.
+    종목마다 get_position을 부르면 요청이 종목 수만큼 늘어난다(positionRisk 가중치 5 × 12)."""
+    result = {symbol: None for symbol in symbols}
+    for position in client.fetch_positions(symbols):
+        symbol = position.get("symbol")
+        if symbol in result and (position.get("contracts") or 0) != 0:
+            result[symbol] = position
+    return result
 
 
 def get_futures_balance(client: ccxt.binance) -> dict:
