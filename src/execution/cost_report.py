@@ -15,7 +15,7 @@ import statistics as st
 from collections import defaultdict
 
 # 이 표본 수 전에는 비용 측정값으로 백테스트 게이트의 스트레스 기준을 바꾸지 않는다
-# (PROFITABILITY_GROWTH_PLAN.md 3.4 — 30건 남짓이면 드문 큰 슬리피지 한 건이 평균을 좌우한다).
+# (docs/PROFITABILITY_GROWTH_PLAN.md 3.4 — 30건 남짓이면 드문 큰 슬리피지 한 건이 평균을 좌우한다).
 MIN_SAMPLES_FOR_DECISION = 100
 
 METRICS = ("entry_slippage_r", "exit_slippage_r", "fee_r", "execution_cost_r")

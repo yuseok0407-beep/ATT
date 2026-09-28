@@ -216,7 +216,7 @@ ADX 35는 그 두 경계 사이의 좁은 창일 뿐이다.** 두 구간 모두 
 
 ## 2. 우선순위별 다음 작업
 
-### 2026-09-28 — 외부 계획서(`PROFITABILITY_GROWTH_PLAN.md`) 검토 결과
+### 2026-09-28 — 외부 계획서([docs/PROFITABILITY_GROWTH_PLAN.md](docs/PROFITABILITY_GROWTH_PLAN.md)) 검토 결과
 
 다른 AI로 쓴 개선 계획서를 이 저장소 현황과 대조했다. 진단(비용이 엣지와 같은 크기, 종목 집중,
 게이트 이진 판정의 흔들림)과 원칙(게이트 안 낮추기, 사이징은 마지막)은 이미 이 문서·
