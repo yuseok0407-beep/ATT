@@ -247,8 +247,9 @@ def test_collect_requests_enough_candles_for_the_regime_sma():
         return _df(_trend())
 
     collect_conditions(["A/USDT:USDT"], fetch=fetch)
-    expected = (max(101, signal_status.RULE_REGIME_SMA_PERIOD + 2)
-                if signal_status.RULE_REGIME_SMA_PERIOD > 0 else 101)
+    expected = signal_status.closed_bars_needed(signal_status.RULE_REGIME_SMA_PERIOD,
+                                                signal_status.RULE_HTF_HOURS) + 1
+    assert expected >= max(101, signal_status.RULE_REGIME_SMA_PERIOD + 2)
     assert seen["limit"] == expected
 
 

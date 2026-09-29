@@ -113,6 +113,8 @@ def test_bars_needed_covers_signal_regime_and_htf_warmup():
     assert closed_bars_needed(400, 0) == 401
     assert closed_bars_needed(0, 0) == 100
     assert closed_bars_needed(400, 8) == htf_required_bars(8)
+    # 거래소는 한 번에 1000개까지만 준다 — 요청(마감봉 + 진행 중 1개)이 그걸 넘지 않는다
+    assert htf_required_bars(12) + 1 == 1000
 
 
 def test_gated_signals_with_htf_is_a_subset_that_drops_only_counter_trend():

@@ -228,7 +228,10 @@ def test_evaluate_symbol_drops_the_still_forming_last_candle_before_signal_detec
 
         # 버릴 여유분(+1)을 항상 확보해야 한다. 레짐 필터가 켜져 있으면 장기 SMA 몫까지 더 받는다
         # (하드코딩 대신 config에서 계산 — 필터 기간을 바꿔도 이 테스트가 같이 따라간다).
-        expected_limit = max(101, RULE_REGIME_SMA_PERIOD + 2) if RULE_REGIME_SMA_PERIOD > 0 else 101
+        # 상위봉 필터(RULE_HTF_HOURS)가 켜져 있으면 그 warm-up 몫도 — 봇과 같은 함수로 계산한다.
+        from src.core.futures_strategy import closed_bars_needed
+        expected_limit = closed_bars_needed(RULE_REGIME_SMA_PERIOD, bot.RULE_HTF_HOURS) + 1
+        assert expected_limit >= max(101, RULE_REGIME_SMA_PERIOD + 2)
         assert mock_fetch.call_args.kwargs.get("limit") == expected_limit
 
         # detect_signal에 넘어간 데이터의 마지막 행은 원본의 "진행중" 스파이크 행이면 안 된다

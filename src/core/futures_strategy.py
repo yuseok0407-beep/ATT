@@ -249,6 +249,10 @@ def passes_volatility_floor(ratio: float | None,
 # 상위봉 DI를 계산할 때 실거래가 확보하는 상위봉 개수. 백테스트는 전체 이력으로 계산하는데,
 # DI의 지수평활은 이만큼 지나면 시작점의 영향이 (13/14)^100 ≈ 0.06%로 사라지므로 둘이 같아진다.
 HTF_LOOKBACK_BARS = 100
+# 캔들 한 번 조회로 받을 수 있는 최대 개수(진행 중 봉 포함). 1500을 요청해도 1000개만 온다
+# (2026-09-29 실측). 12시간봉이면 이 한도에 걸려 상위봉 약 83개로 판단하는데, 캐시 12종목
+# 10,725개 시점에서 전체 이력 판정과 99.9% 같았다(불일치 14건은 전부 +DI≈-DI인 순간).
+MAX_FETCH_BARS = 1000
 
 
 def htf_required_bars(htf_hours: int, bar_hours: float = 1.0) -> int:
@@ -259,7 +263,8 @@ def htf_required_bars(htf_hours: int, bar_hours: float = 1.0) -> int:
     `htf_direction_series`가 버린다."""
     if htf_hours <= 0:
         return 0
-    return int(round((HTF_LOOKBACK_BARS + 1) * htf_hours / bar_hours))
+    wanted = int(round((HTF_LOOKBACK_BARS + 1) * htf_hours / bar_hours))
+    return min(wanted, MAX_FETCH_BARS - 1)  # -1 = 조회 쪽이 더하는 진행 중 봉 몫
 
 
 def htf_direction_series(df: pd.DataFrame, htf_hours: int, di_period: int = 14) -> pd.Series:
