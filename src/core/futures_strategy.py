@@ -23,7 +23,9 @@ VALID_SIDES = ("long", "short")
 # 1: 규칙 봇 개시 / 2: 마감봉 신호(08-25) / 3: 같은 신호봉 재진입 잠금 + 진입가 괴리 검사(09-08)
 # 4: 봉 마감 직후(+3초)에 맞춰 판정(09-28) — 규칙은 같지만 진입 지연이 중간값 39초 → 수 초로
 #    줄어 진입 슬리피지·가격이탈 차단 빈도가 달라진다. 전후 비교를 하려고 버전 경계를 만든다.
-STRATEGY_LOGIC_REVISION = 4
+# 5: 상위봉 방향 일치 게이트(09-29, `htf_hours`). 설정 항목 `htf_hours`가 새로 추적되기 시작해
+#    첫 기록이 from=None이라 그것만으로는 버전이 안 생긴다 — 새 진입 규칙이므로 경계를 강제한다.
+STRATEGY_LOGIC_REVISION = 5
 
 # SMA 돌파의 **방향**을 무엇으로 확인하는가. 값의 정의와 기본값은 `config.RULE_DIRECTION_FILTER`
 # 한 곳에 있다 — 설정이므로 바꿔도 STRATEGY_LOGIC_REVISION은 안 올린다(저널의 config_changed가
