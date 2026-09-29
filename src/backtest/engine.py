@@ -7,6 +7,7 @@ from src.core.config import (
     MAKER_FEE_PCT_PER_SIDE,
     MIN_ATR_TO_STOP_RATIO,
     RULE_ADX_THRESHOLD,
+    RULE_HTF_HOURS,
     RULE_REGIME_SMA_PERIOD,
     RULE_SMA_PERIOD,
     STOP_LOSS_PCT,
@@ -15,9 +16,11 @@ from src.core.config import (
 )
 from src.core.futures_strategy import (
     DEFAULT_DIRECTION_FILTER,
+    apply_htf_filter,
     apply_regime_filter,
     compute_bracket_prices,
     detect_signal,
+    htf_direction_series,
     passes_volatility_floor,
 )
 from src.core.indicators import atr
@@ -204,6 +207,7 @@ def gated_signals(
     rsi_threshold: float = 50.0,
     require_rsi_confirm: bool = True,
     direction_filter: str = DEFAULT_DIRECTION_FILTER,
+    htf_hours: int = RULE_HTF_HOURS,
     signal_fn: Callable[[pd.DataFrame], str | None] | None = None,
 ) -> dict[int, str]:
     """봉 위치 -> 진입 게이트를 모두 통과한 신호("LONG"/"SHORT"). 통과 못 한 봉은 아예 없다.
@@ -213,10 +217,11 @@ def gated_signals(
     때문에 어떤 진입이 버려지는지는 포트폴리오 쪽에서 결정할 일이고, "그 봉에 진입 후보가
     있었는가"는 그 결정과 무관하게 같아야 한다.
 
-    순서는 실거래 봇 `_evaluate_symbol`과 같다: 신호 -> 레짐 게이트 -> 저변동 게이트. 판정은
-    `futures_strategy`의 같은 함수를 그대로 부른다(조건을 두 군데 적지 않기 위함).
+    순서는 실거래 봇 `_evaluate_symbol`과 같다: 신호 -> 레짐 게이트 -> 상위봉 게이트 -> 저변동
+    게이트. 판정은 `futures_strategy`의 같은 함수를 그대로 부른다(조건을 두 군데 적지 않기 위함).
 
-    각 시점의 레짐 SMA와 ATR은 그 시점까지의 종가만으로 계산되므로 미래 정보를 쓰지 않는다."""
+    각 시점의 레짐 SMA와 ATR은 그 시점까지의 종가만으로 계산되므로 미래 정보를 쓰지 않는다.
+    상위봉 방향도 그 봉이 마감된 시각에 이미 마감된 상위봉만 쓴다(`htf_direction_series`)."""
     regime_above = regime_valid = None
     if regime_sma_period > 0:
         regime_sma = df["close"].rolling(regime_sma_period).mean()
@@ -228,6 +233,9 @@ def gated_signals(
         # atr_to_stop_ratio()와 같은 정의(ATR / 종가 / 손절폭%)를 시리즈로 한 번에 계산한다 —
         # 봉마다 그 함수를 부르면 매번 ATR 전체를 다시 계산해서 종목당 수만 번이 된다.
         vol_ratio = atr(df, atr_period) / df["close"] / stop_loss_pct
+
+    # 상위봉 방향도 시리즈로 한 번에 — 봉마다 다시 묶으면 종목당 수천 번 재계산이 된다.
+    htf_dir = htf_direction_series(df, htf_hours) if htf_hours > 0 else None
 
     out: dict[int, str] = {}
     for i in range(entry_start_bar(len(df), regime_sma_period), len(df)):
@@ -246,6 +254,11 @@ def gated_signals(
         if regime_above is not None:
             above = bool(regime_above.iloc[i]) if regime_valid.iloc[i] else None
             signal = apply_regime_filter(signal, above)
+            if signal is None:
+                continue
+
+        if htf_dir is not None:
+            signal = apply_htf_filter(signal, htf_dir.iloc[i])
             if signal is None:
                 continue
 
@@ -283,6 +296,7 @@ def run_backtest(
     rsi_threshold: float = 50.0,
     require_rsi_confirm: bool = True,
     direction_filter: str = DEFAULT_DIRECTION_FILTER,
+    htf_hours: int = RULE_HTF_HOURS,
     signal_fn: Callable[[pd.DataFrame], str | None] | None = None,
     target_series: pd.Series | None = None,
     use_partial_tp: bool = False,
@@ -339,6 +353,9 @@ def run_backtest(
     (실거래 봇과 같은 함수 — 조건을 두 군데 적지 않기 위함). 각 시점의 레짐 SMA와 ATR은 그
     시점까지의 종가만으로 계산되므로 미래 정보를 쓰지 않는다.
 
+    htf_hours: 상위봉 방향 일치 게이트(`futures_strategy.apply_htf_filter`). 기본값은 config의
+    실거래값이고 0이면 꺼진다. signal_fn을 넘겨도 적용된다(레짐·저변동 게이트와 같다).
+
     target_series: 주어지면 각 봉의 값을 그 시점의 익절 목표가로 쓴다(예: 볼린저밴드 중간선) —
     df와 같은 인덱스를 가져야 한다. stop_mode로 계산된 target_price는 이 경우 무시되고 손절가만
     그대로 쓰인다.
@@ -362,7 +379,7 @@ def run_backtest(
         regime_sma_period=regime_sma_period, min_atr_to_stop_ratio=min_atr_to_stop_ratio,
         sma_period=sma_period, rsi_period=rsi_period, rsi_threshold=rsi_threshold,
         require_rsi_confirm=require_rsi_confirm, direction_filter=direction_filter,
-        signal_fn=signal_fn,
+        htf_hours=htf_hours, signal_fn=signal_fn,
     )
 
     trades: list[dict] = []

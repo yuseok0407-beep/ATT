@@ -360,7 +360,7 @@ def simulate_many(df_by_symbol: dict[str, pd.DataFrame], *, seeds=range(20), **k
     if signals is None:
         gate_keys = ("stop_loss_pct", "atr_period", "adx_threshold", "regime_sma_period",
                       "min_atr_to_stop_ratio", "sma_period", "rsi_period", "rsi_threshold",
-                      "require_rsi_confirm", "signal_fn")
+                      "require_rsi_confirm", "direction_filter", "htf_hours", "signal_fn")
         gate_args = {k: v for k, v in signal_params.items() if k in gate_keys}
         signals = {s: gated_signals(df, **gate_args) for s, df in df_by_symbol.items()}
 

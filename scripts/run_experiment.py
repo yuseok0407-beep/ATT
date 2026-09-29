@@ -32,6 +32,8 @@ for _stream in (sys.stdout, sys.stderr):
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+import statistics as st  # noqa: E402
+
 import pandas as pd  # noqa: E402
 
 from src.backtest import gate  # noqa: E402
@@ -48,6 +50,7 @@ from src.core.config import (  # noqa: E402
     MAX_CONCURRENT_POSITIONS,
     MIN_ATR_TO_STOP_RATIO,
     RULE_ADX_THRESHOLD,
+    RULE_HTF_HOURS,
     RULE_REGIME_SMA_PERIOD,
     RULE_SMA_PERIOD,
     STOP_LOSS_PCT,
@@ -90,6 +93,9 @@ SEARCHABLE = {
     "breakeven_after_partial": int,  # 부분 익절 뒤 남은 물량의 손절을 진입가로. 1/0
     # SMA 돌파의 방향을 무엇으로 확인하는가: "rsi"(실거래 현재) / "di"(+DI>-DI) / "none"
     "direction_filter": str,
+    # 상위봉 방향 일치 게이트(2026-09-29). 신호봉을 이 시간 단위로 묶은 마감 상위봉의 +DI/-DI가
+    # 신호와 반대면 진입하지 않는다. 0=끔. 실거래 봇에도 구현돼 있다(`RULE_HTF_HOURS`).
+    "htf_hours": int,
 }
 
 LEDGER_COLUMNS = [
@@ -125,6 +131,7 @@ def _defaults() -> dict:
         "partial_fraction": 0.5,
         "breakeven_after_partial": 1,
         "direction_filter": DEFAULT_DIRECTION_FILTER,
+        "htf_hours": RULE_HTF_HOURS,
     }
 
 
@@ -231,7 +238,7 @@ def _signal_lookup(symbol: str, df: pd.DataFrame, params: dict, cache_dir: Path 
 
 
 def _run_one(df_by_symbol: dict[str, pd.DataFrame], params: dict, *, seeds: int,
-             breaker_reset: str, slippage: float, signals_by_symbol: dict) -> dict:
+             breaker_reset: str, slippage: float, signals_by_symbol: dict) -> tuple[dict, list[dict]]:
     results = simulate_many(
         df_by_symbol, seeds=range(seeds),
         signals_by_symbol=signals_by_symbol,
@@ -251,7 +258,25 @@ def _run_one(df_by_symbol: dict[str, pd.DataFrame], params: dict, *, seeds: int,
         partial_fraction=params["partial_fraction"],
         breakeven_after_partial=bool(params["breakeven_after_partial"]),
     )
-    return gate.summarize(results, df_by_symbol)
+    return gate.summarize(results, df_by_symbol), results
+
+
+def _info(results: list[dict], df_by_symbol: dict[str, pd.DataFrame]) -> dict:
+    """판정에 안 쓰는 참고 지표 — 승률과 시간 4분할 구간별 총R(각각 seed 중앙값).
+
+    원장 칼럼에 넣지 않는 이유: 칼럼을 늘리면 이미 쓰인 헤더와 어긋나 옛 행이 밀린다. 구간별
+    총R은 NEXT_STEPS의 "게이트 보조 연속지표"(최악 구간이 얼마나 나쁜가)를 화면에라도 남기려는 것 —
+    이진 판정 `oos_pass_rate`가 0 근처 잡음에 뒤집히는 걸 사람이 볼 수 있게."""
+    win_rates, splits = [], []
+    for result in results:
+        trades = result["trades"]
+        if trades:
+            win_rates.append(sum(1 for t in trades if t["pnl_r"] > 0) / len(trades))
+        splits.append(gate.run_metrics(result, df_by_symbol)["splits"])
+    return {
+        "win_rate": st.median(win_rates) if win_rates else None,
+        "splits": [st.median(col) for col in zip(*splits)] if splits else [],
+    }
 
 
 def _reject(run_id: str, reason: str) -> int:
@@ -399,15 +424,17 @@ def main() -> int:
             df, stop_loss_pct=params["stop_loss_pct"],
             regime_sma_period=params["regime_sma_period"],
             min_atr_to_stop_ratio=params["min_atr_to_stop_ratio"],
+            htf_hours=params["htf_hours"],
             signal_fn=signal_fn)
     print(f"  진입 후보 {sum(len(v) for v in signals.values())}건", flush=True)
 
     print("기본 비용 시뮬레이션...", flush=True)
-    base = _run_one(df_by_symbol, params, seeds=args.seeds, breaker_reset=args.breaker_reset,
-                    slippage=0.0, signals_by_symbol=signals)
+    base, base_results = _run_one(df_by_symbol, params, seeds=args.seeds,
+                                  breaker_reset=args.breaker_reset,
+                                  slippage=0.0, signals_by_symbol=signals)
     print("스트레스 비용 시뮬레이션...", flush=True)
-    stress = _run_one(df_by_symbol, params, seeds=args.seeds, breaker_reset=args.breaker_reset,
-                      slippage=gate.STRESS_SLIPPAGE_R_PER_SIDE, signals_by_symbol=signals)
+    stress, _ = _run_one(df_by_symbol, params, seeds=args.seeds, breaker_reset=args.breaker_reset,
+                         slippage=gate.STRESS_SLIPPAGE_R_PER_SIDE, signals_by_symbol=signals)
 
     verdict = gate.evaluate(base, stress)
 
@@ -448,6 +475,9 @@ def main() -> int:
     print(f"총R 중앙 {row['total_r_median']:+} (하위5% {row['total_r_p5']:+}) · "
           f"낙폭 {row['mdd_r_median']:+} · 거래 {row['trades']:.0f}건 · "
           f"스트레스 총R {row['stress_total_r']:+}")
+    info = _info(base_results, df_by_symbol)
+    print(f"참고(판정 외): 승률 {_fmt(info['win_rate'], 3)} · 구간별 총R "
+          + " / ".join(f"{v:+.1f}" for v in info["splits"]))
 
     if args.dry_run:
         print("\n--dry-run: 원장에 남기지 않았다.")

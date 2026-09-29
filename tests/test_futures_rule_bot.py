@@ -1606,3 +1606,72 @@ def test_next_cycle_after_the_aligned_wake_goes_back_to_the_normal_poll():
 def test_next_cycle_never_busy_loops():
     hour = (1_790_600_000 // 3600) * 3600
     assert bot.seconds_until_next_cycle(hour + 2.99, 30, "1h", 3) >= 0.5
+
+
+def test_evaluate_symbol_skips_a_signal_against_the_higher_timeframe():
+    """상위봉(RULE_HTF_HOURS) 방향이 신호와 반대면 진입하지 않고, 그 차단은 skipped_htf로
+    구분해 남긴다(차단 통계가 필터가 몇 번 일했는지 셀 수 있게). 판정에는 **마감된 봉만** 넘긴다."""
+    df = _signal_df()
+    patches = _base_patches()
+    _start(patches)
+    try:
+        with patch("src.futures_rule_bot.RULE_HTF_HOURS", 4), \
+             patch("src.futures_rule_bot.fetch_ohlcv_df", return_value=df), \
+             patch("src.futures_rule_bot.detect_signal", return_value="LONG"), \
+             patch("src.futures_rule_bot.latest_htf_direction", return_value=-1.0) as mock_htf, \
+             patch("src.futures_rule_bot.open_position_with_bracket") as mock_open, \
+             patch("src.futures_rule_bot.append_entry") as mock_append:
+            cycle = bot.run_once(MagicMock(), consecutive_losses=0, daily_pnl_pct=0.0)
+
+        result = cycle["symbols"]["BTC/USDT:USDT"]
+        assert result["event"] == "skipped_htf"
+        assert result["signal_bar_timestamp"] == str(df["timestamp"].iloc[-2])
+        assert not mock_open.called
+        # 매 사이클 반복되는 차단이라 저널에는 안 남는다
+        assert not any(c.args and c.args[0].get("event") == "skipped_htf"
+                       for c in mock_append.call_args_list)
+        passed_df, hours = mock_htf.call_args.args
+        assert hours == 4
+        assert len(passed_df) == len(df) - 1  # 진행 중인 봉을 버린 뒤
+    finally:
+        _stop(patches)
+
+
+def test_evaluate_symbol_enters_when_the_higher_timeframe_agrees():
+    patches = _base_patches()
+    _start(patches)
+    try:
+        with patch("src.futures_rule_bot.RULE_HTF_HOURS", 4), \
+             patch("src.futures_rule_bot.fetch_ohlcv_df", return_value=_signal_df()), \
+             patch("src.futures_rule_bot.detect_signal", return_value="LONG"), \
+             patch("src.futures_rule_bot.latest_htf_direction", return_value=1.0), \
+             patch("src.futures_rule_bot.open_position_with_bracket") as mock_open:
+            cycle = bot.run_once(MagicMock(), consecutive_losses=0, daily_pnl_pct=0.0)
+        assert cycle["symbols"]["BTC/USDT:USDT"]["event"] == "entered"
+        assert mock_open.called
+    finally:
+        _stop(patches)
+
+
+def test_candle_request_covers_the_higher_timeframe_warmup():
+    """상위봉 필터를 켜면 상위봉 100개(+반쪽 묶음 몫)만큼 신호봉을 더 받아야 한다 — 모자라면
+    DI의 지수평활이 백테스트(전체 이력)와 다른 값에서 출발한다."""
+    from src.core.futures_strategy import closed_bars_needed
+
+    patches = _base_patches()
+    _start(patches)
+    try:
+        with patch("src.futures_rule_bot.RULE_HTF_HOURS", 4), \
+             patch("src.futures_rule_bot.fetch_ohlcv_df", return_value=_signal_df()) as mock_fetch, \
+             patch("src.futures_rule_bot.detect_signal", return_value=None):
+            bot.run_once(MagicMock(), consecutive_losses=0, daily_pnl_pct=0.0)
+        expected = closed_bars_needed(RULE_REGIME_SMA_PERIOD, 4) + 1
+        assert mock_fetch.call_args.kwargs["limit"] == expected
+        assert expected > RULE_REGIME_SMA_PERIOD + 2
+    finally:
+        _stop(patches)
+
+
+def test_strategy_config_tracks_the_higher_timeframe_setting():
+    """이 설정이 바뀌면 전략 버전 경계가 생겨야 전후 성과를 나눠 볼 수 있다."""
+    assert "htf_hours" in bot.current_strategy_config()

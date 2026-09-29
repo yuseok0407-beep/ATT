@@ -58,7 +58,7 @@ _SIGNAL_LABELS = {"LONG": "롱", "SHORT": "숏"}
 # 설정 변경 알림에서 쓰는 이름 — 대시보드 index.html의 CONFIG_LABELS와 같은 항목을 한글로.
 _CONFIG_LABELS = {
     "timeframe": "타임프레임", "adx_threshold": "ADX", "sma_period": "SMA기간",
-    "regime_sma_period": "레짐SMA", "direction_filter": "방향확인",
+    "regime_sma_period": "레짐SMA", "direction_filter": "방향확인", "htf_hours": "상위봉",
     "min_atr_to_stop_ratio": "최소변동성",
     "max_entry_price_drift_r": "진입괴리한도", "stop_loss_pct": "손절폭", "take_profit_rr": "손익비",
     "leverage": "레버리지", "risk_per_trade": "거래당리스크",

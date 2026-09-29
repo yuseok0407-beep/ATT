@@ -316,3 +316,25 @@ def test_blocker_text_names_the_indicator_actually_used():
         view = evaluate_conditions(_direction_frame(), adx_threshold=1, direction_filter=mode)
         wrong = [b for b in view["blockers"] if "방향 아님" in b and expected not in b]
         assert not wrong, f"{mode} 모드인데 블로커가 다른 지표를 말한다: {wrong}"
+
+
+def test_conditions_show_the_higher_timeframe_block():
+    """상위봉 방향이 후보 방향과 반대면 화면도 "진입 가능"이 아니어야 하고 이유를 적는다 —
+    봇이 skipped_htf로 건너뛰는데 화면이 가깝다고 보여주면 안 된다."""
+    import numpy as np
+    import pandas as pd
+    from unittest.mock import patch
+
+    from src.core.signal_status import evaluate_conditions
+
+    n = 200
+    closes = np.linspace(100, 120, n)
+    df = pd.DataFrame({"timestamp": pd.date_range("2026-01-01", periods=n, freq="h"),
+                       "high": closes * 1.01, "low": closes * 0.99, "close": closes})
+    with patch("src.core.signal_status.latest_htf_direction", return_value=1.0):
+        row = evaluate_conditions(df, "BTC/USDT:USDT", htf_hours=4, regime_sma_period=0)
+    # 종가가 SMA 위 → 후보는 숏, 상위봉은 상승 → 차단
+    assert row["candidate_side"] == "SHORT"
+    assert row["htf_blocks"] is True
+    assert row["proximity"] == 0.0
+    assert any("4시간봉 상승 흐름" in b for b in row["blockers"])

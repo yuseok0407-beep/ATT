@@ -354,7 +354,9 @@ def test_api_status_includes_todays_filter_blocks(client, monkeypatch, tmp_path)
     assert body["filter_stats"]["2026-09-09"] == {"skipped_low_volatility": 1}
     # 규칙 적용 순서 그대로 내려와야 한다(딕셔너리로 보내면 Flask가 알파벳순으로 섞는다)
     assert [e["key"] for e in body["filter_events"]] == list(filter_stats.TRACKED_EVENTS)
-    assert body["filter_events"][1]["label"] == "저변동"
+    labels = {e["key"]: e["label"] for e in body["filter_events"]}
+    assert labels["skipped_low_volatility"] == "저변동"
+    assert labels["skipped_htf"] == "상위봉역행"
 
 
 def test_api_status_includes_the_excursion_of_an_open_position(client, monkeypatch, tmp_path):

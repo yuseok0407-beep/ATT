@@ -1,11 +1,13 @@
 from typing import Callable
 
+import numpy as np
 import pandas as pd
 
 from src.core.config import (
     MIN_ATR_TO_STOP_RATIO,
     RULE_ADX_THRESHOLD,
     RULE_DIRECTION_FILTER,
+    RULE_HTF_HOURS,
     RULE_SMA_PERIOD,
     STOP_LOSS_PCT,
     TAKE_PROFIT_RR,
@@ -242,3 +244,113 @@ def passes_volatility_floor(ratio: float | None,
     if min_ratio <= 0 or ratio is None:
         return True
     return ratio >= min_ratio
+
+
+# 상위봉 DI를 계산할 때 실거래가 확보하는 상위봉 개수. 백테스트는 전체 이력으로 계산하는데,
+# DI의 지수평활은 이만큼 지나면 시작점의 영향이 (13/14)^100 ≈ 0.06%로 사라지므로 둘이 같아진다.
+HTF_LOOKBACK_BARS = 100
+
+
+def htf_required_bars(htf_hours: int, bar_hours: float = 1.0) -> int:
+    """상위봉 필터에 필요한 **마감된 신호봉** 개수. 실거래 봇과 조건 화면이 캔들 조회 개수를
+    정할 때 쓴다(백테스트는 전체 이력을 쓰므로 필요 없다). 0이면 필터가 꺼져 있다는 뜻.
+
+    +1 상위봉은 가장 오래된 묶음이 신호봉 몇 개가 빠진 채 시작될 수 있어서다 — 그 묶음은
+    `htf_direction_series`가 버린다."""
+    if htf_hours <= 0:
+        return 0
+    return int(round((HTF_LOOKBACK_BARS + 1) * htf_hours / bar_hours))
+
+
+def htf_direction_series(df: pd.DataFrame, htf_hours: int, di_period: int = 14) -> pd.Series:
+    """각 행(신호봉)마다, **그 봉이 마감된 시각에 이미 마감돼 있던** 상위봉(htf_hours시간)의
+    +DI/-DI 방향 — +1.0(+DI > -DI), -1.0(-DI > +DI), NaN(필터 꺼짐·warm-up·동률).
+    이 규칙의 **유일한 정의**이고 실거래 봇·백테스트(`engine.gated_signals`)·조건 화면이 전부
+    이걸 부른다.
+
+    왜 상위봉인가(2026-09-29): 지금 방향 확인(`direction_filter="di"`)은 1시간봉 DI(14) — 대략
+    최근 14시간의 방향이고, 레짐 필터(SMA400)는 약 17일의 방향이다. 그 사이(2~10일)의 흐름은
+    아무도 안 본다. 1시간봉 돌파가 4시간봉 흐름을 거스르는 자리라면 되돌림일 가능성이 크다는
+    가설이다(Elder의 "삼중 스크린": 큰 흐름 → 중간 흐름 → 진입 타이밍).
+
+    **미래 정보를 쓰지 않는 것이 이 함수의 핵심이다.** 1시간봉 01:00(마감 02:00) 시점에 00:00
+    4시간봉은 아직 진행 중이다 — 그 봉의 고가/저가/종가를 쓰면 백테스트가 앞으로 두 시간의
+    가격을 미리 본 셈이 된다. 그래서 상위봉은 `시작 + htf_hours <= 신호봉 마감 시각`인 것만 쓴다.
+    03:00 봉(마감 04:00)에서 비로소 00:00 4시간봉이 쓰인다 — 바이낸스도 그 순간 그 봉을 마감한다.
+
+    상위봉은 신호봉을 UTC 기준으로 묶어 만든다(거래소 조회를 늘리지 않기 위함 — 요청 한도는 IP
+    단위로 봇·대시보드가 나눠 쓴다). 묶음 경계는 epoch 기준이라 2/4/6/8/12시간이 바이낸스 캔들과
+    같은 시각(00/04/08… UTC)에 맞는다. 신호봉이 다 안 찬 묶음(조회 시작점이 묶음 중간이거나
+    데이터 결측)은 버린다 — 반쪽 봉의 고가/저가는 거래소의 상위봉과 다르다.
+
+    df에는 `timestamp`(봉 시작 시각, tz 없는 UTC) 열이 있어야 하고, 실거래는 **마감된 봉만**
+    넘겨야 한다(다른 필터와 같다)."""
+    nan = pd.Series(np.nan, index=df.index, dtype=float)
+    if htf_hours <= 0 or len(df) < 2 or "timestamp" not in df.columns:
+        return nan
+
+    ts = pd.to_datetime(df["timestamp"])
+    bar = ts.diff().median()
+    if pd.isna(bar) or bar <= pd.Timedelta(0):
+        return nan
+    span = pd.Timedelta(hours=htf_hours)
+    per_bucket = span / bar
+    if per_bucket < 1 or per_bucket != int(per_bucket):
+        raise ValueError(f"htf_hours={htf_hours}는 신호봉({bar})의 정수배여야 한다")
+
+    bucket = ts.dt.floor(span)
+    grouped = df.assign(_bucket=bucket.values).groupby("_bucket", sort=True)
+    htf = pd.DataFrame({
+        "high": grouped["high"].max(),
+        "low": grouped["low"].min(),
+        "close": grouped["close"].last(),
+        "count": grouped.size(),
+    })
+    htf = htf[htf["count"] == int(per_bucket)]
+    # warm-up 판단은 DI 자체의 NaN에 맡긴다 — 여기서 따로 "상위봉 N개 미만이면 NaN"을 걸면
+    # 전체 이력으로 계산한 값(백테스트)과 접두사로 계산한 값(실거래)이 warm-up 경계에서 갈라진다.
+    if htf.empty:
+        return nan
+
+    frame = adx(htf, di_period)
+    diff = frame["plus_di"] - frame["minus_di"]
+    direction = np.sign(diff).where(diff != 0)  # 동률과 NaN은 판단하지 않는다
+
+    available_at = (htf.index + span).values           # 이 시각부터 그 상위봉을 쓸 수 있다
+    closes_at = (ts + bar).values                      # 각 신호봉이 마감되는 시각
+    pos = np.searchsorted(available_at, closes_at, side="right") - 1
+    values = np.where(pos >= 0, direction.to_numpy()[np.clip(pos, 0, None)], np.nan)
+    return pd.Series(values, index=df.index, dtype=float)
+
+
+def apply_htf_filter(signal: str | None, htf_direction: float | None) -> str | None:
+    """상위봉 방향이 신호와 **반대**면 신호를 버린다 — 롱은 상위봉 +DI > -DI, 숏은 -DI > +DI일
+    때만 남는다. 이 규칙의 유일한 정의다(`apply_regime_filter`와 같은 방침).
+
+    htf_direction이 None/NaN(필터 꺼짐·warm-up·동률)이면 그대로 통과시킨다 — 데이터가 없다는 게
+    "방향이 반대"라는 근거는 아니므로."""
+    if signal is None or htf_direction is None or pd.isna(htf_direction):
+        return signal
+    if signal == "LONG" and htf_direction < 0:
+        return None
+    if signal == "SHORT" and htf_direction > 0:
+        return None
+    return signal
+
+
+def latest_htf_direction(df: pd.DataFrame, htf_hours: int = RULE_HTF_HOURS) -> float | None:
+    """마지막 (마감된) 봉 시점의 상위봉 방향. 실거래 봇·조건 화면용 — None이면 판단 없음."""
+    if htf_hours <= 0 or df.empty:
+        return None
+    value = htf_direction_series(df, htf_hours).iloc[-1]
+    return None if pd.isna(value) else float(value)
+
+
+def closed_bars_needed(regime_sma_period: int, htf_hours: int = RULE_HTF_HOURS) -> int:
+    """실거래 판단에 필요한 **마감된** 신호봉 개수 — 신호 계산 100봉, 레짐 SMA, 상위봉 warm-up 중
+    가장 긴 것. 캔들을 조회하는 쪽은 여기에 1(진행 중인 봉 몫)을 더해 요청한다. 봇과 조건 화면이
+    같은 값을 쓰도록 한 곳에 둔다."""
+    need = 100
+    if regime_sma_period > 0:
+        need = max(need, regime_sma_period + 1)
+    return max(need, htf_required_bars(htf_hours))

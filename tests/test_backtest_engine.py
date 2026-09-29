@@ -542,6 +542,7 @@ def test_engine_defaults_match_the_live_config():
     assert defaults["fee_pct_per_side"] == config.FEE_PCT_PER_SIDE
     assert defaults["regime_sma_period"] == config.RULE_REGIME_SMA_PERIOD
     assert defaults["direction_filter"] == config.RULE_DIRECTION_FILTER
+    assert defaults["htf_hours"] == config.RULE_HTF_HOURS
     assert defaults["min_atr_to_stop_ratio"] == config.MIN_ATR_TO_STOP_RATIO
     assert defaults["take_profit_order_type"] == config.TAKE_PROFIT_ORDER_TYPE
     assert defaults["maker_fee_pct_per_side"] == config.MAKER_FEE_PCT_PER_SIDE
@@ -559,5 +560,5 @@ def test_gated_signals_defaults_match_run_backtest_defaults():
 
     for key in ("stop_loss_pct", "atr_period", "adx_threshold", "regime_sma_period",
                 "min_atr_to_stop_ratio", "sma_period", "rsi_period", "rsi_threshold",
-                "require_rsi_confirm"):
+                "require_rsi_confirm", "direction_filter", "htf_hours"):
         assert a[key] == b[key], key

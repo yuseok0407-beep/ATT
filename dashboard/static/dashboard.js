@@ -93,6 +93,7 @@ const CONFIG_LABELS = {
   timeframe: '타임프레임', adx_threshold: 'ADX 임계값', sma_period: 'SMA 기간',
   regime_sma_period: '레짐 SMA (숏 차단)', min_atr_to_stop_ratio: '최소 변동성 (ATR/손절폭)',
   max_entry_price_drift_r: '진입 괴리 한도', direction_filter: '방향 확인',
+  htf_hours: '상위봉 방향 일치 (시간)',
   stop_loss_pct: '손절폭', take_profit_rr: '손익비', take_profit_order_type: '익절 주문 방식',
   leverage: '레버리지', risk_per_trade: '거래당 리스크',
   max_concurrent_positions: '최대 동시 포지션', max_daily_loss_pct: '일일 손실 한도',
@@ -324,7 +325,7 @@ function configValue(key, v) {
   if (v === null || v === undefined) return '–';
   if (key === 'symbols') return v.map(shortSymbol).join(', ');
   if (['stop_loss_pct', 'risk_per_trade', 'max_daily_loss_pct'].includes(key)) return fmtPct(v, 2);
-  if ((key === 'regime_sma_period' || key === 'min_atr_to_stop_ratio') && !v) return '꺼짐';
+  if ((key === 'regime_sma_period' || key === 'min_atr_to_stop_ratio' || key === 'htf_hours') && !v) return '꺼짐';
   if (key === 'max_entry_price_drift_r') return v + 'R';
   if (key === 'leverage') return v + 'x';
   if (key === 'consecutive_loss_cooldown_hours') return v ? v + '시간' : '없음 (수동 리셋)';
@@ -831,7 +832,8 @@ function condMetric(label, ratio, valueText, st) {
 }
 
 function renderConditions(data) {
-  $('cond-meta').textContent = `${data.timeframe} · ADX ≥ ${data.adx_threshold} · SMA${data.sma_period} 돌파 · 레짐 SMA${data.regime_sma_period} 위에서 숏 차단`;
+  $('cond-meta').textContent = `${data.timeframe} · ADX ≥ ${data.adx_threshold} · SMA${data.sma_period} 돌파 · 레짐 SMA${data.regime_sma_period} 위에서 숏 차단`
+    + (data.htf_hours ? ` · ${data.htf_hours}시간봉 방향 일치` : '');
   if (!data.symbols || !data.symbols.length) {
     $('cond-list').innerHTML = '<div class="cond-row"><span class="muted">표시할 종목이 없습니다.</span></div>';
     return;

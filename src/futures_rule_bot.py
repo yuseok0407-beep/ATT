@@ -16,6 +16,7 @@ from src.core.config import (
     MIN_ATR_TO_STOP_RATIO,
     RULE_ADX_THRESHOLD,
     RULE_DIRECTION_FILTER,
+    RULE_HTF_HOURS,
     RULE_REGIME_SMA_PERIOD,
     RULE_SMA_PERIOD,
     RULE_TIMEFRAME,
@@ -26,11 +27,14 @@ from src.core.config import (
 from src.core.futures_risk import check_stop_before_liquidation, estimate_liquidation_price, leveraged_position_size
 from src.core.futures_strategy import (
     STRATEGY_LOGIC_REVISION,
+    apply_htf_filter,
     apply_regime_filter,
     atr_to_stop_ratio,
+    closed_bars_needed,
     compute_bracket_prices,
     detect_signal,
     is_above_long_sma,
+    latest_htf_direction,
     passes_volatility_floor,
 )
 from src.core.risk import MAX_CONSECUTIVE_LOSSES, MAX_DAILY_LOSS_PCT, check_circuit_breaker
@@ -76,7 +80,8 @@ logger = logging.getLogger(__name__)
 # 저널엔 안 남지만 "몇 번 걸렀는지"는 필요하므로 run_once가 filter_stats로 봉 단위 집계는 남긴다
 # (2026-09-09) — 필터가 백테스트대로 도는지 확인할 유일한 수단이라.
 _SILENT_EVENTS = ("no_signal", "holding_position", "skipped_max_positions", "skipped_regime",
-                  "skipped_same_signal_bar", "skipped_price_drift", "skipped_low_volatility")
+                  "skipped_same_signal_bar", "skipped_price_drift", "skipped_low_volatility",
+                  "skipped_htf")
 
 
 # 저널에 기록해두는 "이 거래들이 어떤 규칙으로 나왔는지" — 진입 판단에 실제로 영향을 주는
@@ -113,6 +118,7 @@ def current_strategy_config() -> dict:
         "sma_period": RULE_SMA_PERIOD,
         "regime_sma_period": RULE_REGIME_SMA_PERIOD,
         "direction_filter": RULE_DIRECTION_FILTER,
+        "htf_hours": RULE_HTF_HOURS,
         "min_atr_to_stop_ratio": MIN_ATR_TO_STOP_RATIO,
         "max_entry_price_drift_r": MAX_ENTRY_PRICE_DRIFT_R,
         "stop_loss_pct": STOP_LOSS_PCT,
@@ -712,9 +718,9 @@ def _evaluate_symbol(client, symbol: str, position: dict | None, margin_equity: 
     # 마감됐을 때의 종가로 다시 계산하면 신호 자체가 안 떴어야 했던 것으로 확인됨(UPDATE_LOG.md
     # 참고). 마지막 봉을 버려서 항상 "확실히 마감된" 캔들만 쓰게 하면 백테스트가 실제로 검증한
     # 조건과 정확히 같아진다 — 대신 신호 확정이 최대 한 시간봉만큼 늦어진다.
-    # 신호 계산엔 100봉이면 충분하지만, 레짐 필터를 쓰면 장기 SMA만큼 더 필요하다.
-    # +1은 아래에서 버릴 "아직 마감 안 된" 마지막 봉 몫.
-    limit = max(101, RULE_REGIME_SMA_PERIOD + 1 + 1) if RULE_REGIME_SMA_PERIOD > 0 else 101
+    # 신호 계산엔 100봉이면 충분하지만, 레짐 필터를 쓰면 장기 SMA만큼, 상위봉 필터를 쓰면 상위봉
+    # 100개만큼 더 필요하다. +1은 아래에서 버릴 "아직 마감 안 된" 마지막 봉 몫.
+    limit = closed_bars_needed(RULE_REGIME_SMA_PERIOD, RULE_HTF_HOURS) + 1
     raw_df = fetch_ohlcv_df(market_client, symbol, timeframe=RULE_TIMEFRAME, limit=limit)
     # 진행 중인 봉의 종가 = 사실상 현재가. 아래 괴리 검사에 쓰려고 버리기 전에 챙겨둔다
     # (티커를 따로 조회하지 않아도 되므로 API 호출이 안 늘어난다).
@@ -739,6 +745,18 @@ def _evaluate_symbol(client, symbol: str, position: dict | None, margin_equity: 
                             "signal_bar_timestamp": signal_bar_timestamp})
         else:
             result["event"] = "no_signal"
+        return result
+
+    # 상위봉(RULE_HTF_HOURS) 흐름이 신호와 반대면 진입하지 않는다 — 규칙은
+    # futures_strategy.apply_htf_filter 한 곳이고 백테스트(engine.gated_signals)도 같은 순서로 부른다.
+    # 꺼져 있으면(0) latest_htf_direction이 None이라 그대로 통과한다.
+    htf_direction = latest_htf_direction(df, RULE_HTF_HOURS)
+    if apply_htf_filter(signal, htf_direction) is None:
+        result.update({
+            "event": "skipped_htf", "signal": signal, "htf_direction": htf_direction,
+            "signal_bar_timestamp": signal_bar_timestamp,
+            "reason": f"{RULE_HTF_HOURS}시간봉 방향이 신호와 반대({'+DI>-DI' if htf_direction > 0 else '-DI>+DI'})",
+        })
         return result
 
     # 저변동 구간이면 진입하지 않는다 — 손절폭 대비 ATR이 너무 작으면 익절까지 가야 할 거리가

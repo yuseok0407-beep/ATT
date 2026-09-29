@@ -12,11 +12,12 @@ LIVE_DEFAULT_PATH = "state/futures_rule_filter_stats.live.json"  # 실계좌 봇
 # 그대로다 — 신호가 살아있는 동안 POLL_INTERVAL_SECONDS마다 계속 재발생해서 저널이 터진다.
 # 하지만 "오늘 저변동으로 몇 번 걸렀나"는 방금 넣은 필터들이 백테스트대로 도는지 확인할 유일한
 # 수단이라(2026-09-09), 저널 대신 카운터 파일에 누적한다.
-TRACKED_EVENTS = ("skipped_regime", "skipped_low_volatility",
+TRACKED_EVENTS = ("skipped_regime", "skipped_htf", "skipped_low_volatility",
                   "skipped_same_signal_bar", "skipped_price_drift")
 
 EVENT_LABELS = {
     "skipped_regime": "레짐숏차단",
+    "skipped_htf": "상위봉역행",
     "skipped_low_volatility": "저변동",
     "skipped_same_signal_bar": "같은봉",
     "skipped_price_drift": "가격이탈",

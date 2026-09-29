@@ -40,6 +40,13 @@ RULE_REGIME_SMA_PERIOD = int(os.getenv("RULE_REGIME_SMA_PERIOD", "400"))
 # 코드 상수가 아니라 설정으로 둔 이유: 저널의 config_changed가 자동으로 경계를 남기고
 # 전략 버전이 생기며, 되돌릴 때 코드를 안 고쳐도 된다.
 RULE_DIRECTION_FILTER = os.getenv("RULE_DIRECTION_FILTER", "rsi")
+
+# 상위 타임프레임 방향 일치 필터(2026-09-29) — 신호 봉(1h)을 이 시간 단위로 묶은 **마감된** 상위봉의
+# +DI/-DI가 신호와 반대 방향이면 진입하지 않는다(롱은 상위봉 +DI>-DI, 숏은 -DI>+DI일 때만).
+# 0이면 끈다. 규칙의 정의는 `futures_strategy.htf_direction_series`/`apply_htf_filter` 한 곳.
+# 기본값이 0인 이유: 게이트를 통과한 적이 없다 — 켜려면 docs/BACKTEST_PROTOCOL.md의 사전 등록
+# 실험(E0039~)과 홀드아웃 확인을 거쳐야 한다.
+RULE_HTF_HOURS = int(os.getenv("RULE_HTF_HOURS", "0"))
 # 신호를 만든 마감 봉의 종가에서 현재가가 손절폭의 몇 배까지 벌어져도 진입을 허용할지.
 # 이걸 넘으면 진입을 건너뛴다 — 손절/익절가가 전부 그 봉 종가 기준으로 계산되므로, 현재가가
 # 이미 손절선 근처/너머면 진입하자마자 손절되거나 브라켓 주문이 -2021로 거부된다

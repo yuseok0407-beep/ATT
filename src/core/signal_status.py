@@ -17,16 +17,20 @@ from src.core.config import (
     MIN_ATR_TO_STOP_RATIO,
     RULE_DIRECTION_FILTER,
     RULE_ADX_THRESHOLD,
+    RULE_HTF_HOURS,
     RULE_REGIME_SMA_PERIOD,
     RULE_SMA_PERIOD,
     RULE_TIMEFRAME,
     STOP_LOSS_PCT,
 )
 from src.core.futures_strategy import (
+    apply_htf_filter,
     apply_regime_filter,
     atr_to_stop_ratio,
+    closed_bars_needed,
     detect_signal,
     is_above_long_sma,
+    latest_htf_direction,
     passes_volatility_floor,
 )
 from src.core.indicators import adx, rsi, sma
@@ -91,6 +95,7 @@ def evaluate_conditions(
     direction_filter: str = RULE_DIRECTION_FILTER,
     min_atr_ratio: float = MIN_ATR_TO_STOP_RATIO,
     stop_loss_pct: float = STOP_LOSS_PCT,
+    htf_hours: int = RULE_HTF_HOURS,
 ) -> dict:
     """마감된 봉만 담긴 df로 "지금 진입 조건에 얼마나 가까운지"를 계산한다.
 
@@ -103,7 +108,8 @@ def evaluate_conditions(
       - cross_score: 종가가 SMA에서 얼마나 가까운지(CROSS_NEAR_PCT 이내면 선형으로 1에 접근)
       - rsi_score: RSI가 후보 방향 기준선에 얼마나 다다랐는지(넘으면 1)
     상승 레짐이라 숏이 아예 막히는 경우엔 0으로 둔다 — 가격이 조금 움직인다고 풀리는 조건이
-    아니라서 "가깝다"고 표시하면 오해를 준다.
+    아니라서 "가깝다"고 표시하면 오해를 준다. 상위봉 방향이 반대인 경우도 같다(상위봉은 몇
+    시간에 한 번 바뀐다).
     """
     result = {
         "symbol": symbol, "bars": len(df), "close": None, "sma": None, "sma_period": sma_period,
@@ -118,6 +124,8 @@ def evaluate_conditions(
         "plus_di": None, "minus_di": None,
         "regime_sma": None, "regime_sma_period": regime_sma_period,
         "above_regime": None, "regime_blocks_short": False,
+        # 상위봉 방향: +1(+DI>-DI) / -1(-DI>+DI) / None(꺼짐·워밍업)
+        "htf_hours": htf_hours, "htf_direction": None, "htf_blocks": False,
         "atr_ratio": None, "min_atr_ratio": min_atr_ratio, "atr_ok": False,
         "signal": None, "ready": False, "proximity": 0.0, "blockers": [],
     }
@@ -141,6 +149,8 @@ def evaluate_conditions(
                                rsi_period=rsi_period, rsi_threshold=rsi_threshold,
                                direction_filter=direction_filter)
     signal = apply_regime_filter(raw_signal, above_regime)
+    htf_direction = latest_htf_direction(df, htf_hours)
+    signal = apply_htf_filter(signal, htf_direction)
     atr_ratio = atr_to_stop_ratio(df, stop_loss_pct)
     atr_ok = passes_volatility_floor(atr_ratio, min_atr_ratio)
     if not atr_ok:
@@ -149,7 +159,7 @@ def evaluate_conditions(
     result.update({
         "close": latest_close, "sma": sma_value, "adx": adx_value, "rsi": rsi_value,
         "regime_sma": regime_sma_value, "above_regime": above_regime,
-        "plus_di": plus_di, "minus_di": minus_di,
+        "plus_di": plus_di, "minus_di": minus_di, "htf_direction": htf_direction,
         "atr_ratio": atr_ratio, "atr_ok": atr_ok,
         "signal": signal, "ready": signal is not None,
     })
@@ -168,7 +178,9 @@ def evaluate_conditions(
     direction_ok, direction_score, direction_label = _direction_check(
         candidate_side, direction_filter, rsi_value, rsi_threshold, rsi_ok, plus_di, minus_di)
     regime_blocks_short = bool(candidate_side == "SHORT" and above_regime)
+    htf_blocks = apply_htf_filter(candidate_side, htf_direction) is None
     result.update({"adx_ok": adx_ok, "rsi_ok": rsi_ok, "regime_blocks_short": regime_blocks_short,
+                    "htf_blocks": htf_blocks,
                     "direction_ok": direction_ok, "direction_label": direction_label,
                     "direction_score": round(direction_score, 4)})
 
@@ -180,6 +192,10 @@ def evaluate_conditions(
         blockers.append(f"{direction_label} ({side_label} 방향 아님)")
     if regime_blocks_short:
         blockers.append(f"상승 레짐 (SMA{regime_sma_period} 위) — 숏 차단")
+    if htf_blocks:
+        trend = "상승" if htf_direction > 0 else "하락"
+        side_label = "롱" if candidate_side == "LONG" else "숏"
+        blockers.append(f"{htf_hours}시간봉 {trend} 흐름 — {side_label} 차단")
     if not atr_ok:
         blockers.append(f"저변동 (ATR이 손절폭의 {atr_ratio:.2f}배 < {min_atr_ratio})")
     if not signal:
@@ -191,7 +207,7 @@ def evaluate_conditions(
     # 저변동도 레짐 차단과 같이 0으로 둔다 — 가격이 조금 움직인다고 풀리는 조건이 아니라서
     # "가깝다"고 표시하면 오해를 준다(ATR은 봉이 여러 개 쌓여야 바뀐다).
     atr_score = min(1.0, atr_ratio / min_atr_ratio) if (min_atr_ratio > 0 and atr_ratio) else 1.0
-    blocked = regime_blocks_short or not atr_ok
+    blocked = regime_blocks_short or htf_blocks or not atr_ok
     result["proximity"] = (0.0 if blocked
                           else round(adx_score * cross_score * direction_score * atr_score, 4))
     return result
@@ -234,7 +250,7 @@ def collect_conditions(symbols, *, ttl: float = CACHE_TTL_SECONDS, fetch=None) -
         return _cache["payload"]
 
     fetch = fetch or _fetch_closed_candles
-    limit = max(101, RULE_REGIME_SMA_PERIOD + 2) if RULE_REGIME_SMA_PERIOD > 0 else 101
+    limit = closed_bars_needed(RULE_REGIME_SMA_PERIOD, RULE_HTF_HOURS) + 1  # +1 = 버릴 진행 중 봉
 
     rows, errors = [], []
     for symbol in symbols:
@@ -247,6 +263,7 @@ def collect_conditions(symbols, *, ttl: float = CACHE_TTL_SECONDS, fetch=None) -
     payload = {
         "timeframe": RULE_TIMEFRAME, "adx_threshold": RULE_ADX_THRESHOLD,
         "sma_period": RULE_SMA_PERIOD, "regime_sma_period": RULE_REGIME_SMA_PERIOD,
+        "htf_hours": RULE_HTF_HOURS,
         "cross_near_pct": CROSS_NEAR_PCT, "symbols": rows, "errors": errors,
         "generated_at": now,
     }
