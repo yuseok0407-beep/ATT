@@ -51,6 +51,11 @@ USDT-M 선물(레버리지 롱/숏)을 **순수 규칙 기반**으로 상시 감
   홀드아웃 봉인**(탐색 구간 PASS + `--confirm-holdout` 없이는 안 열림), 20회 초과 시 다중비교
   경고. 기준값은 문서와 `gate.py` 두 곳에 있고 `test_backtest_gate.py`가 일치를 고정한다 —
   **기준을 바꾸려면 `GATE_VERSION`을 올리고 버전이 다른 원장 행끼리 비교하지 말 것.**
+- **상위봉 방향 일치 게이트**(2026-09-29, `RULE_HTF_HOURS`, 기본 0=끔) — 1시간봉 신호를 묶은
+  **마감된** 상위봉의 +DI/-DI가 반대면 진입 안 함. 정의는 `futures_strategy.htf_direction_series`/
+  `apply_htf_filter` 한 곳(백테스트 `gated_signals`·봇·조건 화면 공유). **진행 중인 상위봉을 쓰면
+  미래를 보는 백테스트가 된다** — 상위봉 로직을 고치면 `tests/test_htf_filter.py`의 접두사 일치
+  테스트가 반드시 통과해야 한다. 결과는 NEXT_STEPS(E0039~43).
 - `src/execution/export_log.py` / `scripts/export_trade_log.py` — 저널을 분석용 CSV로 내보낸다
   (`exports/`). 결합은 `performance.resolve_closed_trades`를 그대로 불러서 하므로 CSV와 대시보드가
   같은 수를 말한다.
