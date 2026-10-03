@@ -14,8 +14,9 @@ from src.core.config import (
     TAKE_PROFIT_ORDER_TYPE,
     TAKE_PROFIT_RR,
 )
-from src.core.futures_strategy import (
+from src.core.futures_strategy import (  # noqa: F401 — SIGNAL_LOOKBACK_BARS는 스크립트들이 여기서 가져간다
     DEFAULT_DIRECTION_FILTER,
+    SIGNAL_LOOKBACK_BARS,
     apply_htf_filter,
     apply_regime_filter,
     compute_bracket_prices,
@@ -27,9 +28,6 @@ from src.core.indicators import atr
 
 # detect_signal 자체가 요구하는 최소 워밍업(35봉)
 MIN_WARMUP_BARS = 35
-# 실거래 봇이 매 사이클 신호 계산에 쓰는 캔들 개수(_evaluate_symbol의 fetch_ohlcv_df limit=100)와
-# 동일하게 맞춰서, 백테스트가 실제 운영 로직을 최대한 그대로 재현하게 한다.
-SIGNAL_LOOKBACK_BARS = 100
 
 
 def _pnl_r(entry_price: float, original_stop_price: float, side: str, exit_price: float) -> float:

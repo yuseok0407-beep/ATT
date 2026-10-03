@@ -26,6 +26,7 @@ from src.core.config import (
 )
 from src.core.futures_risk import check_stop_before_liquidation, estimate_liquidation_price, leveraged_position_size
 from src.core.futures_strategy import (
+    SIGNAL_LOOKBACK_BARS,
     STRATEGY_LOGIC_REVISION,
     apply_htf_filter,
     apply_regime_filter,
@@ -730,7 +731,7 @@ def _evaluate_symbol(client, symbol: str, position: dict | None, margin_equity: 
     # (티커를 따로 조회하지 않아도 되므로 API 호출이 안 늘어난다).
     live_price = float(raw_df["close"].iloc[-1])
     df = raw_df.iloc[:-1]
-    raw_signal = detect_signal(df)
+    raw_signal = detect_signal(df.iloc[-SIGNAL_LOOKBACK_BARS:])  # 백테스트와 같은 입력 길이
     signal = apply_regime_filter(raw_signal, is_above_long_sma(df, RULE_REGIME_SMA_PERIOD))
 
     result = {"symbol": symbol, "has_position": False, "entered": False}

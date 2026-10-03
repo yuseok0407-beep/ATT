@@ -24,6 +24,7 @@ from src.core.config import (
     STOP_LOSS_PCT,
 )
 from src.core.futures_strategy import (
+    SIGNAL_LOOKBACK_BARS,
     apply_htf_filter,
     apply_regime_filter,
     atr_to_stop_ratio,
@@ -136,16 +137,18 @@ def evaluate_conditions(
     close = df["close"]
     latest_close = float(close.iloc[-1])
     sma_value = _safe(sma(close, sma_period).iloc[-1])
-    adx_frame = adx(df, 14)
+    # ADX/DI와 신호 판정은 실거래·백테스트와 같은 최근 SIGNAL_LOOKBACK_BARS봉으로(외부 검토 3.8)
+    signal_df = df.iloc[-SIGNAL_LOOKBACK_BARS:]
+    adx_frame = adx(signal_df, 14)
     adx_value = _safe(adx_frame["adx"].iloc[-1])
     plus_di = _safe(adx_frame["plus_di"].iloc[-1])
     minus_di = _safe(adx_frame["minus_di"].iloc[-1])
-    rsi_value = _safe(rsi(close, rsi_period).iloc[-1])
+    rsi_value = _safe(rsi(signal_df["close"], rsi_period).iloc[-1])
     above_regime = is_above_long_sma(df, regime_sma_period)
     regime_sma_value = _safe(close.rolling(regime_sma_period).mean().iloc[-1]) if regime_sma_period > 0 else None
 
     # 실제 진입 판정은 실거래와 완전히 같은 함수로 얻는다(여기서 조건을 다시 구현하지 않는다).
-    raw_signal = detect_signal(df, adx_threshold=adx_threshold, sma_period=sma_period,
+    raw_signal = detect_signal(signal_df, adx_threshold=adx_threshold, sma_period=sma_period,
                                rsi_period=rsi_period, rsi_threshold=rsi_threshold,
                                direction_filter=direction_filter)
     signal = apply_regime_filter(raw_signal, above_regime)

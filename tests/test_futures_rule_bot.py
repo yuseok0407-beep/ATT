@@ -261,6 +261,26 @@ def test_evaluate_symbol_drops_the_still_forming_last_candle_before_signal_detec
         _stop(patches)
 
 
+def test_evaluate_symbol_passes_the_backtests_lookback_to_signal_detection():
+    """외부 검토 3.8(2026-10-03): 레짐·상위봉 때문에 수백 봉을 받아도 detect_signal에는 백테스트와
+    같은 최근 SIGNAL_LOOKBACK_BARS봉(마감봉)만 넘겨야 한다 — ADX 평활 시작점이 달라 신호가 갈렸다."""
+    from src.core.futures_strategy import SIGNAL_LOOKBACK_BARS
+
+    raw_df = _flat_df(n=500)
+    raw_df.loc[raw_df.index[-1], "close"] = 99999.0  # 진행 중 봉
+    patches = _base_patches()
+    _start(patches)
+    try:
+        with patch("src.futures_rule_bot.fetch_ohlcv_df", return_value=raw_df), \
+             patch("src.futures_rule_bot.detect_signal", return_value=None) as mock_detect:
+            bot.run_once(MagicMock(), consecutive_losses=0, daily_pnl_pct=0.0)
+        passed_df = mock_detect.call_args.args[0]
+        assert len(passed_df) == SIGNAL_LOOKBACK_BARS
+        assert passed_df.index[-1] == raw_df.index[-2]  # 마지막 마감봉에서 끝난다
+    finally:
+        _stop(patches)
+
+
 def test_run_once_isolates_one_symbols_exchange_error_from_the_rest():
     """실전 버그 재현(2026-08-14): TSLA/CRCL 같은 토큰화 주식형 심볼이 계정에서 TradFi-Perps
     약관 미동의로 주문이 거부되면 예외가 사이클 전체를 죽여서, 그 뒤 순서의 다른 심볼(예: 목록
