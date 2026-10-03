@@ -124,6 +124,13 @@ class TestConsecutiveLossCooldown:
         # 40시간 전 것은 창 밖이라 거기서 멈추고, 최근 2건만 센다.
         assert compute_consecutive_losses(entries, cooldown_hours=24, now=self.NOW) == 2
 
+    def test_a_streak_with_short_gaps_keeps_counting_past_the_24h_mark(self):
+        """외부 검토 3.2(2026-10-03): 손실이 25·4·3·2·1시간 전이면 손실 사이 간격이 전부 24시간
+        미만이라 연속 5다. 예전 이동 창 구현은 25시간 전 것을 빼고 4로 세서 정지가 안 걸렸다."""
+        entries = [self._loss(h) for h in (25, 4, 3, 2, 1)]
+
+        assert compute_consecutive_losses(entries, cooldown_hours=24, now=self.NOW) == 5
+
     def test_cooldown_zero_keeps_the_old_latch_behaviour(self):
         """0이면 자동 해제 없음 — 옛 동작을 그대로 쓸 수 있어야 한다(되돌릴 수 있는 변경)."""
         entries = [self._loss(h) for h in (50, 48, 46, 44, 42)]

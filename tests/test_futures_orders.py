@@ -150,6 +150,42 @@ def test_open_position_with_bracket_closes_naked_position_when_take_profit_order
     assert mock_client.cancel_all_orders.call_count == 2
 
 
+def test_naked_close_still_goes_out_when_order_cleanup_fails():
+    """외부 검토 3.1(2026-10-03): 손절 거부 + 주문 취소 API 실패가 겹치면 예전엔 청산 요청이
+    아예 안 나갔다. 정리 실패와 무관하게 청산은 나가야 하고, 원래 예외(-2021)가 올라가야 한다."""
+    mock_client = MagicMock()
+    mock_client.create_order.side_effect = [
+        {"id": "entry"},
+        Exception('binance {"code":-2021,"msg":"Order would immediately trigger."}'),
+        {"id": "close"},
+    ]
+    mock_client.cancel_all_orders.side_effect = RuntimeError("cancel failed")
+
+    with pytest.raises(Exception, match="-2021"):
+        open_position_with_bracket(mock_client, "BTC/USDT:USDT", "long", 0.02, 64000, 65500)
+
+    assert mock_client.create_order.call_args_list[2] == call(
+        "BTC/USDT:USDT", type="market", side="sell", amount=0.02, params={"reduceOnly": True}
+    )
+
+
+def test_naked_close_keeps_existing_stop_until_the_close_succeeds():
+    """익절만 실패한 경우, 이미 걸린 손절을 청산 **전에** 지우면 청산마저 실패했을 때 보호가
+    0이 된다. 청산이 실패하면 주문 정리를 하지 않아야(손절이 남아야) 한다."""
+    mock_client = MagicMock()
+    mock_client.create_order.side_effect = [
+        {"id": "entry"},
+        {"id": "stop"},
+        Exception('binance {"code":-2021,"msg":"Order would immediately trigger."}'),
+        RuntimeError("close failed"),
+    ]
+
+    with pytest.raises(RuntimeError, match="close failed"):
+        open_position_with_bracket(mock_client, "BTC/USDT:USDT", "long", 0.02, 64000, 65500)
+
+    mock_client.cancel_all_orders.assert_not_called()
+
+
 def test_cleanup_stale_orders_cancels_both_regular_and_conditional():
     mock_client = MagicMock()
     cleanup_stale_orders(mock_client, "BTC/USDT:USDT")

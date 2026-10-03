@@ -170,6 +170,25 @@ def test_run_once_computes_consecutive_losses_from_journal_when_not_passed():
         _stop(patches)
 
 
+def test_run_once_counts_a_loss_closed_during_this_cycles_reconcile():
+    """외부 검토 3.2(2026-10-03): 재조정이 이번 사이클에 5번째 손실을 저널에 쓰면, 같은 사이클의
+    진입 평가는 막혀야 한다. 예전엔 재조정 **전에** 센 값(4)으로 진입 평가가 열렸다."""
+    patches = _base_patches()
+    _start(patches)
+    try:
+        history = [{"event": "closed", "realized_pnl": -1.0}
+                   for _ in range(MAX_CONSECUTIVE_LOSSES - 1)]
+        with patch("src.futures_rule_bot.read_entries", side_effect=lambda **kw: list(history)), \
+             patch("src.futures_rule_bot._reconcile_symbol",
+                   side_effect=lambda *a, **kw: history.append({"event": "closed", "realized_pnl": -1.0})), \
+             patch("src.futures_rule_bot._evaluate_symbol") as evaluate:
+            cycle = bot.run_once(MagicMock(), symbols=["BTC/USDT:USDT"], daily_pnl_pct=0.0)
+        assert cycle["event"] == "circuit_breaker_blocked"
+        evaluate.assert_not_called()
+    finally:
+        _stop(patches)
+
+
 def test_run_once_does_not_block_when_journal_losing_streak_is_below_threshold():
     patches = _base_patches()
     _start(patches)

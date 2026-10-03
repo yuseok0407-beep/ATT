@@ -55,15 +55,18 @@ def compute_consecutive_losses(entries: list[dict], cooldown_hours: float = None
     누를 때까지 영구 정지한다(2026-09-22에 데모 봇이 실제로 2일간 그 상태였다). 시간 창을 두면
     "마지막 손실로부터 N시간이 지나면 다시 센다"가 되어, 정지가 최대 N시간으로 묶인다.
 
-    창의 기준은 **가장 최근 청산 손실의 시각**이다 — 손실들이 전부 그보다 오래됐으므로, 최근
-    것이 창을 벗어나면 카운트는 0이 된다. 즉 "마지막 손실 이후 N시간 동안 아무 손실도 없었다"가
-    해제 조건이고, 그 사이에 새 손실이 닫히면 창이 다시 밀린다."""
+    해제 규칙: **손실 뒤 N시간 동안 새 손실이 없으면 그 앞의 연속은 끊긴다.** 그래서 지금부터
+    거꾸로 훑으며 "직전에 센 손실(처음엔 지금)과의 간격"이 N시간 이상이면 멈춘다 — 마지막 손실이
+    N시간을 넘겼으면 0이고, 연속 중간에 N시간 넘는 공백이 있으면 그 앞은 세지 않는다.
+
+    2026-10-03 정정(외부 검토 3.2): 예전 구현은 "지금으로부터 N시간 안의 손실만" 세는 이동
+    창이었다. 손실이 25·4·3·2·1시간 전이면 마지막 손실이 1시간 전인데도 4로 세서 5연패 정지가
+    안 걸렸다 — 위 설명(그리고 CLAUDE.md)과 다른 동작이다. 손실 사이 간격은 21시간뿐이라 규칙대로면
+    연속 5다."""
     if cooldown_hours is None:
         cooldown_hours = CONSECUTIVE_LOSS_COOLDOWN_HOURS
-    cutoff = None
-    if cooldown_hours and cooldown_hours > 0:
-        now = now or datetime.now(timezone.utc)
-        cutoff = now - timedelta(hours=cooldown_hours)
+    gap = timedelta(hours=cooldown_hours) if cooldown_hours and cooldown_hours > 0 else None
+    anchor = (now or datetime.now(timezone.utc)) if gap is not None else None
 
     count = 0
     for entry in reversed(entries):
@@ -76,26 +79,29 @@ def compute_consecutive_losses(entries: list[dict], cooldown_hours: float = None
         realized_pnl = entry.get("realized_pnl")
         if realized_pnl is None:
             continue
-        if cutoff is not None and _closed_before(entry, cutoff):
-            # 이 청산(과 그 이전 전부)은 창 밖이다 — 쿨다운이 지났으므로 더 세지 않는다.
+        closed_at = _closed_at(entry) if gap is not None else None
+        if closed_at is not None and anchor - closed_at >= gap:
+            # 이 청산 뒤로 N시간 넘게 손실이 없었다 — 여기서(와 그 이전은) 연속이 끊겼다.
             break
         if realized_pnl < 0:
             count += 1
+            if closed_at is not None:
+                anchor = closed_at
         else:
             break
     return count
 
 
-def _closed_before(entry: dict, cutoff: datetime) -> bool:
-    """이 청산 기록이 cutoff보다 이전인지. 타임스탬프가 없거나 못 읽으면 False —
-    시각을 모르는 기록을 "오래됐다"고 단정해서 보호를 조용히 푸는 쪽으로 틀리지 않게 한다."""
+def _closed_at(entry: dict) -> datetime | None:
+    """청산 기록의 시각(UTC). 타임스탬프가 없거나 못 읽으면 None — 시각을 모르는 기록을
+    "오래됐다"고 단정해서 보호를 조용히 푸는 쪽으로 틀리지 않게, 호출자는 None을 "창 안"으로 본다."""
     timestamp = entry.get("timestamp")
     if not timestamp:
-        return False
+        return None
     try:
         when = datetime.fromisoformat(timestamp)
     except (TypeError, ValueError):
-        return False
+        return None
     if when.tzinfo is None:
         when = when.replace(tzinfo=timezone.utc)
-    return when < cutoff
+    return when

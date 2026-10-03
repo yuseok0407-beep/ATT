@@ -1,3 +1,7 @@
+import logging
+
+logger = logging.getLogger(__name__)
+
 VALID_SIDES = ("long", "short")
 
 
@@ -66,12 +70,20 @@ def cleanup_stale_orders(client, symbol: str) -> None:
 
 def _close_naked_position(client, symbol: str, exit_side: str, quantity: float) -> None:
     """손절/익절 주문 중 하나라도 거부되어 보호장치 없는 포지션이 남았을 때 즉시 시장가로
-    청산한다. 먼저 걸렸을 수 있는 나머지 하나(예: 손절은 성공, 익절만 실패)를 cleanup_stale_orders
-    로 정리한 뒤 청산 — 안 그러면 포지션이 사라진 뒤에도 그 주문이 고아로 남는다. 이 함수 자체가
-    실패해도(거래소 hiccup 등) 예외를 삼키지 않는다 — 포지션이 안 닫혔다는 걸 호출자가 알아야
-    한다."""
-    cleanup_stale_orders(client, symbol)
+    청산한다. 청산이 실패하면(거래소 hiccup 등) 예외를 삼키지 않는다 — 포지션이 안 닫혔다는 걸
+    호출자가 알아야 한다.
+
+    **청산이 먼저, 주문 정리가 나중이다**(2026-10-03, 외부 검토 3.1). 예전엔 정리부터 했는데
+    두 가지가 틀렸다: (1) 정리(cancel)가 실패하면 예외가 나서 청산 요청 자체가 안 나갔고,
+    (2) 익절만 실패한 경우 이미 걸려 있던 **손절을 먼저 지운 뒤** 청산을 시도하므로, 청산마저
+    실패하면 보호가 하나도 없는 포지션이 남았다. 이제는 손절이 살아 있는 채로 청산하고, 정리는
+    그다음에 시도한다. 정리가 실패해도 남는 건 포지션 없는 reduce-only 고아 주문뿐이고, 감시
+    루프가 포지션이 없을 때마다 `cleanup_stale_orders`를 다시 부르므로 다음 사이클에 지워진다."""
     client.create_order(symbol, type="market", side=exit_side, amount=quantity, params={"reduceOnly": True})
+    try:
+        cleanup_stale_orders(client, symbol)
+    except Exception:
+        logger.exception("%s: 비상 청산은 됐지만 남은 주문 정리에 실패 — 다음 사이클에 다시 정리한다", symbol)
 
 
 def open_position(client, symbol: str, side: str, quantity: float, stop_loss_price: float,

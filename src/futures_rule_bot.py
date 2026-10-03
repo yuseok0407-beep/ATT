@@ -327,7 +327,7 @@ def _aggregate_closing_trades(client, symbol: str, entry_info: dict,
     since_ms = int(datetime.fromisoformat(entry_info["timestamp"]).timestamp() * 1000) - 60_000
     trades = client.fetch_my_trades(symbol, since=since_ms, limit=50)
     if not trades:
-        return [], None, None
+        return [], None, None, {}
 
     entry_order_id = ((entry_info.get("execution") or {}).get("entry_order") or {}).get("id")
     if entry_order_id is not None:
@@ -500,6 +500,9 @@ def check_and_log_closed_trade(client, symbol: str, journal_path: str = None,
         closing_trades, exit_price, realized_pnl, fees = _aggregate_closing_trades(
             client, symbol, entry_info, last_trade_path=last_trade_path)
     except Exception:
+        # 예전엔 조용히 삼켜서 "체결 없음"과 내부 오류가 구분되지 않았다(외부 검토 3.13 —
+        # 빈 응답 분기가 값 3개를 돌려줘 언패킹 예외가 나던 것도 여기 묻혔다).
+        logger.exception("%s: 청산 체결 집계 실패", symbol)
         return None
     if not closing_trades:
         return None
@@ -553,6 +556,7 @@ def record_manual_close(client, symbol: str, journal_path: str = None,
             closing_trades, exit_price, realized_pnl, fees = _aggregate_closing_trades(
                 client, symbol, entry_info, last_trade_path=last_trade_path)
         except Exception:
+            logger.exception("%s: 청산 체결 집계 실패", symbol)
             closing_trades = []
         if closing_trades:
             closed_entry = _build_closed_entry(symbol, "manual", entry_info, exit_price, realized_pnl,
@@ -878,8 +882,6 @@ def run_once(client, env: str = "demo", consecutive_losses: int = None, daily_pn
 
     if daily_pnl_pct is None:
         daily_pnl_pct = get_daily_pnl_pct(margin_equity, path=state_path)
-    if consecutive_losses is None:
-        consecutive_losses = compute_consecutive_losses(read_entries(path=journal_path))
 
     cycle = {"margin_equity": margin_equity, "daily_pnl_pct": daily_pnl_pct, "symbols": {}}
 
@@ -899,6 +901,12 @@ def run_once(client, env: str = "demo", consecutive_losses: int = None, daily_pn
                                last_trade_path=last_trade_path, excursion_path=excursion_path)
         except Exception:
             logger.exception("symbol %s failed to reconcile against exchange state — continuing", symbol)
+
+    # 연속손실은 **재조정 뒤에** 센다(2026-10-03, 외부 검토 3.2). 위 루프가 이번 사이클에 닫힌
+    # 청산을 저널에 쓰는데, 그 전에 세면 5번째 손실이 방금 기록돼도 옛 값(4)으로 아래 진입 평가가
+    # 열린다 — 정지가 한 사이클 늦게 걸리고, 그 사이 새 포지션이 여럿 열릴 수 있다.
+    if consecutive_losses is None:
+        consecutive_losses = compute_consecutive_losses(read_entries(path=journal_path))
 
     circuit_breaker = check_circuit_breaker(daily_pnl_pct, consecutive_losses)
     if not circuit_breaker.allowed:

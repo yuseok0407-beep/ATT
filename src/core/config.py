@@ -15,8 +15,12 @@ BINANCE_FUTURES_LIVE_API_KEY = os.getenv("BINANCE_FUTURES_LIVE_API_KEY", "")
 BINANCE_FUTURES_LIVE_API_SECRET = os.getenv("BINANCE_FUTURES_LIVE_API_SECRET", "")
 LEVERAGE = int(os.getenv("LEVERAGE", "10"))
 MARGIN_MODE = os.getenv("MARGIN_MODE", "isolated")
-STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.0125"))  # 진입가 대비 손절 거리 (기본 1.25%)
-FUTURES_RISK_PER_TRADE = float(os.getenv("FUTURES_RISK_PER_TRADE", "0.02"))  # 마진 자산 대비 거래당 리스크
+# 아래 대체 기본값(getenv의 두 번째 인자)은 **지금 실거래 값과 같아야 한다**(2026-10-03, 외부 검토
+# 3.10). 예전엔 손절 1.25%·리스크 2%·RSI·상위봉 끔·동시보유 2였다 — .env가 빠지거나 다른 작업
+# 폴더에서 실행되면 4배 큰 리스크로 조용히 다른 전략이 돌았다. 공개 저장소만으로 현재 전략을
+# 재현할 수 있게 하는 목적도 있다. .env를 바꿔 실거래 값을 바꾸면 여기도 같이 고칠 것.
+STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.0175"))  # 진입가 대비 손절 거리
+FUTURES_RISK_PER_TRADE = float(os.getenv("FUTURES_RISK_PER_TRADE", "0.005"))  # 마진 자산 대비 거래당 리스크
 
 # 규칙 기반 상시 감시 봇(Claude 미사용) 전용 설정
 TAKE_PROFIT_RR = float(os.getenv("TAKE_PROFIT_RR", "2.0"))  # 손익비 — 손절폭의 몇 배를 익절폭으로 잡을지
@@ -39,14 +43,13 @@ RULE_REGIME_SMA_PERIOD = int(os.getenv("RULE_REGIME_SMA_PERIOD", "400"))
 #   "none" — 방향 확인 없음. 실험용이고 실거래에 쓰지 말 것(탐색 구간 총R -84R).
 # 코드 상수가 아니라 설정으로 둔 이유: 저널의 config_changed가 자동으로 경계를 남기고
 # 전략 버전이 생기며, 되돌릴 때 코드를 안 고쳐도 된다.
-RULE_DIRECTION_FILTER = os.getenv("RULE_DIRECTION_FILTER", "rsi")
+RULE_DIRECTION_FILTER = os.getenv("RULE_DIRECTION_FILTER", "di")
 
 # 상위 타임프레임 방향 일치 필터(2026-09-29) — 신호 봉(1h)을 이 시간 단위로 묶은 **마감된** 상위봉의
 # +DI/-DI가 신호와 반대 방향이면 진입하지 않는다(롱은 상위봉 +DI>-DI, 숏은 -DI>+DI일 때만).
 # 0이면 끈다. 규칙의 정의는 `futures_strategy.htf_direction_series`/`apply_htf_filter` 한 곳.
-# 기본값이 0인 이유: 게이트를 통과한 적이 없다 — 켜려면 docs/BACKTEST_PROTOCOL.md의 사전 등록
-# 실험(E0039~)과 홀드아웃 확인을 거쳐야 한다.
-RULE_HTF_HOURS = int(os.getenv("RULE_HTF_HOURS", "0"))
+# 게이트를 통과한 적은 없다(E0039~43) — 2026-09-29 사용자 결정으로 실거래 12h. 대체 기본값도 그 값.
+RULE_HTF_HOURS = int(os.getenv("RULE_HTF_HOURS", "12"))
 # 신호를 만든 마감 봉의 종가에서 현재가가 손절폭의 몇 배까지 벌어져도 진입을 허용할지.
 # 이걸 넘으면 진입을 건너뛴다 — 손절/익절가가 전부 그 봉 종가 기준으로 계산되므로, 현재가가
 # 이미 손절선 근처/너머면 진입하자마자 손절되거나 브라켓 주문이 -2021로 거부된다
@@ -144,7 +147,7 @@ FUTURES_SYMBOLS = [s.strip() for s in os.getenv(
 # 정정된 포트폴리오 시뮬레이션에서 8이 정점(+185.0R/MDD -25.6%)이고 그 이상은 오히려 나빠진다
 # (12는 +157.9R/-30.1%) — 동시보유가 많을수록 손실이 큰 뭉치로 도착해 서킷브레이커가 훨씬 자주
 # 걸리기 때문. 실운영 값은 .env가 관리한다.
-MAX_CONCURRENT_POSITIONS = int(os.getenv("MAX_CONCURRENT_POSITIONS", "2"))
+MAX_CONCURRENT_POSITIONS = int(os.getenv("MAX_CONCURRENT_POSITIONS", "8"))
 
 # 텔레그램 알림/원격 시작·중지 (2026-08-22) — src/telegram_bot.py, scripts/run_telegram_bot.py 참고.
 # 토큰/채팅ID가 비어 있으면 run_telegram_bot.py가 시작 시 바로 종료한다(조용히 무동작하지 않음).
