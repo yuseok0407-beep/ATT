@@ -439,6 +439,23 @@ def test_net_r_prefers_net_realized_r_recorded_by_the_bot():
     assert result["total_net_r"] == pytest.approx(1.95)
 
 
+def test_net_r_prefers_the_cash_based_value_when_recorded():
+    """외부 검토 3.3: 진입 슬리피지까지 들어간 현금 기준 순R이 있으면 그것을 쓴다."""
+    result = summarize_r_performance([_closed_with_r(2.0, fee_r=0.03, net_realized_r=1.97,
+                                                     cash_net_r=1.70)])
+
+    assert result["total_net_r"] == pytest.approx(1.70)
+
+
+def test_cash_net_r_is_recovered_for_older_records_from_fee_and_fee_r():
+    """10-03 이전 기록엔 cash_net_r이 없지만 total_fee / fee_r = 계획 위험금액이라 복원된다.
+    위험금액 10, 수수료 0.3(=0.03R), 수수료 뺀 실현손익 17 → 1.7R."""
+    result = summarize_r_performance([_closed_with_r(2.0, fee_r=0.03, total_fee=0.3,
+                                                     net_realized_r=1.97, net_realized_pnl=17.0)])
+
+    assert result["total_net_r"] == pytest.approx(1.7)
+
+
 def test_fee_can_flip_a_positive_total_r_negative():
     """이 프로젝트에서 실제로 벌어진 일 — 데모 저널의 총R +2.50이 수수료를 넣으면 음수가 된다.
     수수료가 오차항이 아니라 기대값과 같은 크기라는 것을 고정한다."""

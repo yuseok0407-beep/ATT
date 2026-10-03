@@ -1575,6 +1575,27 @@ class TestClosedTradeRecordsRealCosts:
         assert result["fee_r"] == pytest.approx(0.0808)
         assert result["realized_r"] == pytest.approx(2.0)
         assert result["net_realized_r"] == pytest.approx(2.0 - 0.0808)
+        # 현금 기준: (20 - 0.808) / 10 — 이 예에서는 진입이 신호가에 체결돼 위와 같다.
+        assert result["cash_net_r"] == pytest.approx((20.0 - 0.808) / 10.0)
+
+    def test_cash_net_r_includes_entry_slippage_which_net_realized_r_misses(self, tmp_path, monkeypatch):
+        """외부 검토 3.3(2026-10-03): 신호가 100, 실제 진입 100.5, 손절 99, 청산 102면 가격 R은
+        +2.0이지만 실제로 번 돈은 1.5 x 수량이다. 현금 기준 순R은 그 차이를 담아야 한다."""
+        journal_path = self._paths(tmp_path, monkeypatch)
+        self._entered(journal_path, quantity=10.0)
+
+        client = MagicMock()
+        client.fetch_my_trades.return_value = [
+            {"id": "1", "price": 100.5, "amount": 10.0,
+             "info": {"orderId": "entry-order", "realizedPnl": "0", "commission": "0.40"}},
+            {"id": "2", "price": 102.0, "amount": 10.0,
+             "info": {"orderId": "tp-order", "realizedPnl": "15.0", "commission": "0.408"}},
+        ]
+
+        result = bot.check_and_log_closed_trade(client, self.SYMBOL)
+
+        assert result["net_realized_r"] == pytest.approx(2.0 - 0.0808)  # 슬리피지가 빠진 옛 값
+        assert result["cash_net_r"] == pytest.approx((15.0 - 0.808) / 10.0)
 
     def test_records_the_actual_entry_fill_price_which_the_order_response_lacks(self, tmp_path, monkeypatch):
         """주문 생성 응답에는 체결가가 안 담겨 온다(avgPrice가 "0.00") — 진입 체결에서 뽑는다.

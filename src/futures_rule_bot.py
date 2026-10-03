@@ -470,6 +470,12 @@ def _build_closed_entry(symbol: str, reason: str, entry_info: dict, exit_price, 
         closed_entry["fee_r"] = fees["total_fee"] / (risk_per_unit * quantity)
         if closed_entry.get("realized_r") is not None:
             closed_entry["net_realized_r"] = closed_entry["realized_r"] - closed_entry["fee_r"]
+        # **현금 기준 순R**(2026-10-03, 외부 검토 3.3) = 수수료 뺀 실현손익 / 계획 위험금액.
+        # net_realized_r은 신호 봉 종가를 진입가로 잰 값이라 **진입 슬리피지가 빠져 있다** —
+        # actual_entry_price를 남기면서도 R에는 안 썼다. 거래소 realizedPnl은 실제 체결가로 계산되므로
+        # 이 값이 계좌에 실제로 일어난 일이다. 분모는 사이징에 쓴 계획 위험(신호가-손절가 × 수량).
+        if closed_entry.get("net_realized_pnl") is not None:
+            closed_entry["cash_net_r"] = closed_entry["net_realized_pnl"] / (risk_per_unit * quantity)
 
     record = excursion.pop(symbol, path=excursion_path or EXCURSION_PATH)
     if record is not None:

@@ -248,14 +248,16 @@ def test_trade_rows_use_the_recorded_fee_when_present():
         _entered("BTC/USDT:USDT", "2026-09-20T01:00:00+00:00", entry=100.0, stop=98.75),
         _closed("BTC/USDT:USDT", "2026-09-20T02:00:00+00:00", 102.5, 20.0,
                 side="long", entry_price=100.0, stop_loss_price=98.75, realized_r=2.0,
-                total_fee=0.8, entry_fee=0.4, exit_fee=0.4, fee_r=0.05,
-                net_realized_r=1.95, net_realized_pnl=19.2),
+                total_fee=0.8, entry_fee=0.4, exit_fee=0.4, fee_r=0.08,
+                net_realized_r=1.92, net_realized_pnl=19.2),
     ]
     row, = build_trade_rows(entries, "live")
 
+    # 위험금액 = 실현손익 20 / R 2.0 = 10 USDT → 수수료 0.8은 0.08R(2026-10-03에 서로 맞게 고침 —
+    # 순R이 현금 기준(19.2 / 10)으로 바뀌면서 앞뒤가 안 맞던 픽스처가 드러났다).
     assert row["total_fee"] == 0.8
-    assert row["fee_r"] == 0.05
-    assert row["net_realized_r"] == 1.95
+    assert row["fee_r"] == 0.08
+    assert row["net_realized_r"] == 1.92
     assert row["net_realized_pnl"] == 19.2
     assert row["fee_estimated"] == "no"
 

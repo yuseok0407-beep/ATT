@@ -224,11 +224,32 @@ def _fee_r(trade: dict) -> tuple[float | None, bool]:
     return 2 * FEE_PCT_PER_SIDE / stop_pct, True
 
 
+def _cash_net_r(trade: dict) -> float | None:
+    """현금 기준 순R = 수수료 뺀 실현손익 / 계획 위험금액(외부 검토 3.3, 2026-10-03).
+
+    청산 기록이 `cash_net_r`을 들고 있으면 그것. 없으면(10-03 이전) 같은 기록의 `total_fee`와
+    `fee_r`로 계획 위험금액을 되살린다 — fee_r = 수수료 / 계획 위험금액이므로 위험금액 =
+    수수료 / fee_r. 실측 수수료가 있는 09-22 이후 기록은 전부 이렇게 복원된다."""
+    cash = trade.get("cash_net_r")
+    if isinstance(cash, (int, float)):
+        return float(cash)
+    net_pnl, fee, fee_r = trade.get("net_realized_pnl"), trade.get("total_fee"), trade.get("fee_r")
+    if all(isinstance(v, (int, float)) for v in (net_pnl, fee, fee_r)) and fee > 0 and fee_r > 0:
+        return float(net_pnl) * float(fee_r) / float(fee)
+    return None
+
+
 def _net_r(trade: dict) -> tuple[float | None, bool]:
-    """수수료를 뺀 R. realized_r이 없으면(못 믿어서 버린 거래 등) None."""
+    """수수료를 뺀 R. realized_r이 없으면(못 믿어서 버린 거래 등) None.
+
+    현금 기준 값(`_cash_net_r`)이 있으면 그것을 쓴다 — 진입 슬리피지까지 들어간 실제 결과다.
+    없으면 신호가 기준 R에서 수수료만 뺀 값(실측 수수료 → 추정 수수료 순)."""
     realized_r = trade.get("realized_r")
     if realized_r is None:
         return None, False
+    cash = _cash_net_r(trade)
+    if cash is not None:
+        return cash, False
     net = trade.get("net_realized_r")
     if isinstance(net, (int, float)):
         return float(net), False
