@@ -815,4 +815,4 @@ def test_daily_summary_compares_recent_equity_to_the_monthly_goal(monkeypatch, t
 
     assert "— 목표 진행 —" in text
     assert "1000.00 → 1080.00 (+8.00%)" in text
-    assert "목표 월 +1%" in text
+    assert "목표 월 +5~10%" in text   # 2026-10-03 목표 개정

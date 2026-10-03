@@ -558,5 +558,5 @@ def test_api_equity_reads_the_env_specific_log(client):
 
     assert [d["day"] for d in demo["days"]] == ["2026-09-01", "2026-09-02"]
     assert demo["month"]["return_pct"] == pytest.approx(0.01)
-    assert demo["target_monthly_return"] == 0.01
+    assert demo["target_monthly_return"] == 0.05   # 2026-10-03 목표 개정(월 +5~10%의 하한)
     assert live["month"] is None  # 하루치뿐이라 수익률을 못 낸다

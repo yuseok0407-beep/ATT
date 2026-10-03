@@ -38,7 +38,7 @@ if __name__ == "__main__":
     from src.data.futures_exchange import get_futures_client
     from src.execution.heartbeat import LIVE_DEFAULT_PATH as HEARTBEAT_LIVE_PATH, write_heartbeat
     from src.execution.heartbeat import DEFAULT_PATH as HEARTBEAT_DEMO_PATH
-    from src.execution import bot_process, equity_log
+    from src.execution import bot_process, equity_log, income_ledger
     from src.futures_rule_bot import (
         LIVE_JOURNAL_PATH,
         LIVE_LAST_TRADE_STATE_PATH,
@@ -86,6 +86,18 @@ if __name__ == "__main__":
     HEARTBEAT_EVERY_N_CYCLES = max(1, int(600 / POLL_INTERVAL_SECONDS))  # 대략 10분마다
     cycle_count = 0
 
+    # 입출금을 자산 기록에 붙인다(2026-10-03) — 안 그러면 입금이 수익률로 잡힌다. 수입 내역 조회는
+    # 가중치 30이라 6시간에 한 번만. 시작할 때는 90일을 훑는다(같은 내역은 tranId로 걸러진다).
+    TRANSFER_SYNC_SECONDS = 6 * 3600
+    last_transfer_sync = 0.0
+
+    def sync_transfers() -> None:
+        lookback = 90 * 86400 if last_transfer_sync == 0.0 else TRANSFER_SYNC_SECONDS + 3600
+        rows = income_ledger.fetch_income(client, int((time.time() - lookback) * 1000), income_type="TRANSFER")
+        added = equity_log.record_transfers(rows, path=equity_log_path)
+        if added:
+            logger.info("recorded %d deposit/withdrawal(s) to the equity log", added)
+
     def wait_or_stop(seconds: float) -> bool:
         """seconds 동안 기다리되, 대시보드/텔레그램이 남긴 종료 요청을 1초마다 확인한다.
         봇은 띄운 창과 분리돼 있어 콘솔 신호(Ctrl+C)가 안 닿으므로 이게 정상 종료 경로다 —
@@ -110,6 +122,12 @@ if __name__ == "__main__":
             # 하트비트는 **마지막 한 순간**만 덮어쓰므로 "어제 자산이 얼마였나"를 답할 수 없다.
             # 일일 요약이 계좌 총자산과 맞춰볼 수 있으려면 날짜별 시작/종료가 남아야 한다.
             equity_log.record(cycle["margin_equity"], path=equity_log_path)
+            if time.time() - last_transfer_sync >= TRANSFER_SYNC_SECONDS:
+                try:
+                    sync_transfers()
+                except Exception:
+                    logger.exception("deposit/withdrawal sync failed — retrying next window")
+                last_transfer_sync = time.time()
 
             if cycle.get("event") == "circuit_breaker_blocked":
                 logger.info("circuit_breaker_blocked margin_equity=%.2f", cycle["margin_equity"])

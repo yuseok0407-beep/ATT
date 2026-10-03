@@ -63,8 +63,8 @@ from src.futures_rule_bot import (
 app = Flask(__name__)
 _clients: dict[str, object] = {}  # env("demo"/"live") -> ccxt client, 지연 생성 후 캐시
 
-# 월 +1% 자산 수익률(복리) — docs/OBJECTIVE.md의 목표. 화면의 30일 수익률 옆에 기준선으로 쓴다.
-MONTHLY_TARGET_RETURN = 0.01
+# 월 자산 수익률 목표의 하한 — docs/OBJECTIVE.md(2026-10-03 개정: 월 +5~10%). 30일 수익률 옆 기준선.
+MONTHLY_TARGET_RETURN = 0.05
 
 # 차트에서 고를 수 있는 봉 주기. 아무 문자열이나 거래소로 넘기지 않도록 목록으로 막는다.
 CHART_TIMEFRAMES = ("15m", "1h", "4h", "1d")
@@ -457,7 +457,7 @@ def api_tickers():
 
 @app.route("/api/equity")
 def api_equity():
-    """날짜별 마진 자산과 최근 30일 수익률 — 목표(월 +1%)와 직접 비교할 수 있는 유일한 값
+    """날짜별 마진 자산과 최근 30일 수익률 — 목표(월 +5~10%)와 직접 비교할 수 있는 유일한 값
     (R이나 실현손익 합계로는 못 낸다: equity_log 모듈 설명 참고)."""
     env = _resolve_env()
     if env is None:

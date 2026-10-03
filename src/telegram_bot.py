@@ -438,6 +438,10 @@ def _format_equity_line(env: str, day: str) -> str:
     pct = f", {change['change_pct'] * 100:+.2f}%" if change["change_pct"] is not None else ""
     line = (f"  자산 {change['start']:.2f} → {change['end']:.2f} "
             f"({change['change']:+.2f}{pct})")
+    transfers = change.get("transfers") or 0.0
+    if abs(transfers) >= 0.01:
+        # 입출금은 수익이 아니다(2026-10-03) — 그것을 뺀 거래 손익을 같이 적는다.
+        line += f"\n  입출금 {transfers:+.2f} 포함 — 거래로 인한 변화 {change['trading_change']:+.2f}"
 
     # 봇이 꺼져 있던 동안의 변화는 그날 거래로 설명되지 않는다 — 숨기면 또 안 맞는다.
     overnight = change.get("overnight_change")
@@ -493,7 +497,7 @@ def _format_day_line(env: str, day: str) -> str:
 
 
 def _format_goal_line(env: str) -> str:
-    """최근 30일 **자산** 수익률과 목표(월 +1%, 2026-09-26 개정)의 거리. 기록이 모자라면 빈 문자열.
+    """최근 30일 **자산** 수익률(입출금 제외)과 목표(월 +5~10%, 2026-10-03 개정)의 거리. 기록이 모자라면 빈 문자열.
 
     R 합계로는 이 줄을 만들 수 없다 — 사이징이 바뀌면 같은 R이 다른 금액이 되고, 미실현
     변동과 펀딩비가 빠진다. 목표가 금액 기준이므로 비교도 금액 기준이어야 한다
@@ -505,7 +509,9 @@ def _format_goal_line(env: str) -> str:
     label = "LIVE" if env == "live" else "DEMO"
     pct = period["return_pct"] * 100
     return (f"[{label}] 최근 {period['days']}일 자산 {period['start']:.2f} → "
-            f"{period['end']:.2f} ({pct:+.2f}%) · 목표 월 +1%")
+            f"{period['end']:.2f}"
+            + (f", 입출금 {period['transfers']:+.2f} 제외" if abs(period.get("transfers") or 0) >= 0.01 else "")
+            + f" ({pct:+.2f}%) · 목표 월 +5~10%")
 
 
 def build_daily_summary(day: str) -> str:

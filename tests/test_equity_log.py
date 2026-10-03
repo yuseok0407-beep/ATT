@@ -5,11 +5,12 @@
 """
 
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from src.execution import equity_log
+from src.execution.equity_log import day_change, period_return, read_days, record, record_transfers
 
 
 def _at(day: str, hour: int = 9) -> datetime:
@@ -102,3 +103,54 @@ def test_period_return_needs_at_least_two_days(tmp_path):
     path = str(tmp_path / "equity.json")
     equity_log.record(1000.0, path=path, now=_at("2026-09-20"))
     assert equity_log.period_return(path=path, days=30) is None
+
+
+# ---------------------------------------------- 입출금 (2026-10-03, 외부 검토 3.3)
+
+def _transfer(tran_id, when, amount):
+    return {"incomeType": "TRANSFER", "tranId": tran_id, "asset": "USDT", "income": str(amount),
+            "time": int(when.timestamp() * 1000)}
+
+
+def test_a_deposit_is_not_counted_as_return(tmp_path):
+    """입금이 수익률에 들어가면 안 된다 — 1000에서 시작해 500을 입금하고 끝이 1510이면 +1%다."""
+    path = str(tmp_path / "eq.json")
+    kst = timezone(timedelta(hours=9))
+    record(1000.0, path=path, now=datetime(2026, 9, 1, 9, 0, tzinfo=kst))
+    record(1510.0, path=path, now=datetime(2026, 9, 2, 22, 0, tzinfo=kst))
+    record_transfers([_transfer(1, datetime(2026, 9, 2, 12, 0, tzinfo=kst), 500.0)], path=path)
+
+    period = period_return(path=path, days=30)
+
+    assert period["transfers"] == pytest.approx(500.0)
+    assert period["return_pct"] == pytest.approx(0.01)
+
+
+def test_the_same_transfer_is_recorded_once(tmp_path):
+    path = str(tmp_path / "eq.json")
+    row = _transfer(7, datetime(2026, 9, 2, 3, 0, tzinfo=timezone.utc), 100.0)
+
+    assert record_transfers([row], path=path) == 1
+    assert record_transfers([row], path=path) == 0
+
+
+def test_day_change_separates_transfers_from_trading(tmp_path):
+    path = str(tmp_path / "eq.json")
+    kst = timezone(timedelta(hours=9))
+    record(1000.0, path=path, now=datetime(2026, 9, 2, 0, 5, tzinfo=kst))
+    record(1090.0, path=path, now=datetime(2026, 9, 2, 23, 0, tzinfo=kst))
+    record_transfers([_transfer(9, datetime(2026, 9, 2, 12, 0, tzinfo=kst), 100.0)], path=path)
+
+    change = day_change("2026-09-02", path=path)
+
+    assert change["transfers"] == pytest.approx(100.0)
+    assert change["trading_change"] == pytest.approx(-10.0)
+
+
+def test_a_transfer_only_day_stays_out_of_the_equity_path(tmp_path):
+    """봇이 꺼져 있던 날 입금이 들어와도 자산 경로(차트)에 빈 날이 생기면 안 된다."""
+    path = str(tmp_path / "eq.json")
+    record(1000.0, path=path, now=datetime(2026, 9, 1, 9, 0, tzinfo=timezone.utc))
+    record_transfers([_transfer(3, datetime(2026, 9, 5, 9, 0, tzinfo=timezone.utc), 50.0)], path=path)
+
+    assert list(read_days(path=path)) == ["2026-09-01"]
