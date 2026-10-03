@@ -37,17 +37,20 @@
 
 import random
 from dataclasses import dataclass
+from datetime import timedelta
 
 import pandas as pd
 
 from src.backtest.engine import (
     _check_exit,
     _check_exit_partial,
+    end_of_data_exit,
     entry_start_bar,
     exit_pnl_r,
     gated_signals,
 )
 from src.core.config import (
+    CONSECUTIVE_LOSS_COOLDOWN_HOURS,
     FEE_PCT_PER_SIDE,
     FUTURES_RISK_PER_TRADE,
     MAKER_FEE_PCT_PER_SIDE,
@@ -87,6 +90,7 @@ class _Position:
     target_price: float
     original_stop_price: float
     entry_index: int
+    entry_step: int = 0     # 공통 타임라인 위치 — 사이징이 "진입 시점의 자산"을 알아야 한다(3.7)
     # 진입 순간 열려 있던 포지션 개수(자기 자신 포함) — 동시보유가 성과와 어떻게 얽히는지
     # 보려면 거래마다 남아 있어야 한다(상한을 정하는 근거가 정확히 이 질문이다).
     concurrent_at_entry: int = 1
@@ -136,7 +140,8 @@ def simulate_portfolio(
     *,
     max_concurrent_positions: int = MAX_CONCURRENT_POSITIONS,
     max_consecutive_losses: int | None = MAX_CONSECUTIVE_LOSSES,
-    breaker_reset: str = "daily",
+    breaker_reset: str = "cooldown",
+    cooldown_hours: float = CONSECUTIVE_LOSS_COOLDOWN_HOURS,
     max_daily_loss_r: float | None = None,
     stop_loss_pct: float = STOP_LOSS_PCT,
     take_profit_rr: float = TAKE_PROFIT_RR,
@@ -159,9 +164,12 @@ def simulate_portfolio(
 ) -> dict:
     """전 종목을 한 계좌에서 굴리는 시뮬레이션. 거래 목록과 차단 통계를 돌려준다.
 
-    breaker_reset: 연속손실 카운터가 **언제 풀리는지**에 대한 가정. 실거래에서는 사람이 수동으로
-    리셋해야 풀리므로(위 모듈 설명 참고) 시뮬레이션은 그 개입 주기를 가정해야 한다.
-      - "daily"(기본): 로컬 날짜가 바뀌면 리셋. 사람이 하루에 한 번은 확인한다는 가정이고,
+    breaker_reset: 연속손실 카운터가 **언제 풀리는지**.
+      - "cooldown"(기본, 2026-10-03): **실거래와 같은 규칙** — 손실 뒤 `cooldown_hours` 동안 새
+        손실이 없으면 연속이 끊긴다(`state.compute_consecutive_losses`). 손실 사이 간격이 그보다
+        짧으면 계속 센다. 정지 중엔 새 청산이 없으므로 마지막 손실 뒤 그 시간이 지나야 풀린다.
+        외부 검토 3.2: 그 전 기본값 "daily"는 실거래에 없는 규칙(자정마다 0)이었다.
+      - "daily": 로컬 날짜가 바뀌면 리셋(옛 기본값 — 사람이 매일 리셋한다는 가정). 사람이 하루에 한 번은 확인한다는 가정이고,
         일일 손실 한도가 리셋되는 경계와 같은 기준이라 하루의 정의가 어긋나지 않는다.
       - "never": 실거래 코드 그대로 — 이익 청산이나 수동 리셋 없이는 안 풀린다. 365일에서는
         사실상 영구 정지가 되므로 **상한 비교에는 쓸 수 없다**(그 사실을 보여주는 용도).
@@ -198,12 +206,26 @@ def simulate_portfolio(
 
     # 서킷브레이커 상태 — **청산 시점에만** 갱신된다(진입 시점에 알 수 없는 정보를 쓰지 않기 위함).
     consecutive_losses = 0
+    last_loss_at = None     # "cooldown" 판정용 — 마지막으로 센 손실의 청산 시각
+    cooldown = timedelta(hours=cooldown_hours) if cooldown_hours and cooldown_hours > 0 else None
     day_r: dict[object, float] = {}
     breaker_day = None      # "daily" 리셋 판정용 — 날짜가 바뀌면 카운터를 0으로
     breaker_resets = 0
 
     for step, stamp in enumerate(_timeline(df_by_symbol)):
+        # 하루 경계는 UTC다. 실거래의 일일 손실 한도는 PC 로컬 자정(KST면 UTC 15시)에 리셋돼
+        # 9시간 어긋난다(외부 검토 3.2) — 알고 둔 차이다. 로컬 시간대로 맞추면 백테스트 결과가
+        # 실행한 PC의 시간대에 따라 달라지고, 한도(자산 5% = 10R)는 거의 안 걸려 영향이 작다.
         day = stamp.date() if hasattr(stamp, "date") else None
+        # 청산은 봉 **안에서** 일어나지만 1시간봉으로는 언제인지 모른다 — 봉 시작 시각을 쓴다.
+        timed = cooldown is not None and hasattr(stamp, "date")
+
+        # cooldown: 마지막 손실 뒤 그 시간이 지났으면 연속이 끊긴다(실거래가 다음 판정 때 0으로 센다).
+        if (breaker_reset == "cooldown" and timed and last_loss_at is not None
+                and consecutive_losses > 0 and stamp - last_loss_at >= cooldown):
+            if consecutive_losses >= (max_consecutive_losses or 0) > 0:
+                breaker_resets += 1
+            consecutive_losses = 0
 
         # 날짜가 바뀌면 연속손실 카운터를 리셋한다(breaker_reset="daily") — 실거래에서 사람이
         # 수동 리셋을 누르는 개입을 "하루에 한 번"으로 모델링한 것. 안 그러면 첫 5연패에서
@@ -266,12 +288,21 @@ def simulate_portfolio(
                 "entry_index": position.entry_index, "exit_index": i,
                 "entry_price": position.entry_price, "exit_price": exit_price,
                 "pnl_r": pnl_r, "hold_bars": i - position.entry_index,
-                "exit_step": step, "concurrent_at_entry": position.concurrent_at_entry,
+                "entry_step": position.entry_step, "exit_step": step,
+                "concurrent_at_entry": position.concurrent_at_entry,
             })
             del open_positions[symbol]
 
             # 서킷브레이커 상태는 여기서만 움직인다.
-            consecutive_losses = consecutive_losses + 1 if pnl_r < 0 else 0
+            if pnl_r < 0:
+                if (breaker_reset == "cooldown" and timed and last_loss_at is not None
+                        and stamp - last_loss_at >= cooldown):
+                    consecutive_losses = 0   # 앞 손실과 간격이 쿨다운 이상 — 새 연속의 시작
+                consecutive_losses += 1
+                if timed:
+                    last_loss_at = stamp
+            else:
+                consecutive_losses = 0
             if day is not None:
                 day_r[day] = day_r.get(day, 0.0) + pnl_r
 
@@ -321,16 +352,39 @@ def simulate_portfolio(
             position = _Position(
                 symbol=symbol, side=side, entry_price=entry_price, signal_price=signal_price,
                 stop_price=stop_price, target_price=target_price,
-                original_stop_price=stop_price, entry_index=i,
+                original_stop_price=stop_price, entry_index=i, entry_step=step,
                 concurrent_at_entry=len(open_positions) + 1,
                 partial_target_price=partial_target_price)
             open_positions[symbol] = position
 
+    # 구간 끝에 열려 있는 포지션은 마지막 종가로 닫아 성과에 넣는다(외부 검토 3.7) — 예전엔
+    # 이름만 남기고 뺐다. 부분 익절 경로(실거래에 없는 모드)는 옛 동작 그대로 뺀다.
+    still_open = sorted(open_positions)
+    if not use_partial_tp:
+        last_step = step if open_positions else 0
+        for symbol in still_open:
+            position = open_positions.pop(symbol)
+            i, exit_price = end_of_data_exit(df_by_symbol[symbol])
+            risk = abs(position.signal_price - position.original_stop_price)
+            trades.append({
+                "symbol": symbol, "side": position.side, "reason": "end_of_data",
+                "entry_index": position.entry_index, "exit_index": i,
+                "entry_price": position.entry_price, "exit_price": exit_price,
+                "pnl_r": exit_pnl_r(
+                    position.side, position.entry_price, exit_price, risk, "end_of_data",
+                    fee_pct_per_side=fee_pct_per_side, slippage_r_per_side=slippage_r_per_side,
+                    take_profit_order_type=take_profit_order_type,
+                    maker_fee_pct_per_side=maker_fee_pct_per_side),
+                "hold_bars": i - position.entry_index,
+                "entry_step": position.entry_step, "exit_step": last_step,
+                "concurrent_at_entry": position.concurrent_at_entry,
+            })
+
     return {
         "trades": trades,
         "blocked": blocked,
-        # 시뮬레이션이 끝났는데도 열려 있는 포지션 — 성과에 안 들어간다(청산되지 않았으므로).
-        "still_open": sorted(open_positions),
+        # 구간 끝에 열려 있던 포지션(위에서 마지막 종가로 닫아 성과에 넣었다).
+        "still_open": still_open,
         "max_concurrent_positions": max_concurrent_positions,
         "max_daily_loss_r": max_daily_loss_r,
         # 가정한 수동 리셋이 실제로 몇 번 필요했는지 — 저널의 실측(6주에 6~7회)과 비교해서

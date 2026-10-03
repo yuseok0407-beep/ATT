@@ -14,15 +14,16 @@
     # 원장 보기
     python scripts/run_experiment.py --ledger
 
-홀드아웃(최근 90일)은 `--window holdout`으로만 열리고, 탐색 구간에서 PASS한 설정이 원장에
-있어야 하며, `--confirm-holdout`을 같이 줘야 한다. 이유는 프로토콜 문서에 적혀 있다.
+홀드아웃(`HOLDOUT_START` 이후)은 `--window holdout`으로만 열리고, 탐색 구간에서 **같은 설정으로**
+PASS한 행이 원장에 있어야 하며, `--confirm-holdout`을 같이 줘야 한다. 이유는 프로토콜 문서에 있다.
 """
 
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 for _stream in (sys.stdout, sys.stderr):
@@ -39,8 +40,8 @@ import pandas as pd  # noqa: E402
 from src.backtest import gate  # noqa: E402
 from src.backtest.data import load_cached_ohlcv, slice_window  # noqa: E402
 from src.backtest.engine import (  # noqa: E402
+    MIN_WARMUP_BARS,
     SIGNAL_LOOKBACK_BARS,
-    entry_start_bar,
     gated_signals,
 )
 from src.backtest.portfolio import simulate_many  # noqa: E402
@@ -58,6 +59,7 @@ from src.core.config import (  # noqa: E402
 )
 from src.core.futures_strategy import (  # noqa: E402
     DEFAULT_DIRECTION_FILTER,
+    STRATEGY_LOGIC_REVISION,
     VALID_DIRECTION_FILTERS,
     detect_signal,
 )
@@ -66,10 +68,16 @@ from src.data.futures_exchange import get_futures_market_data_client  # noqa: E4
 TIMEFRAME = "1h"
 MIN_BARS = 900
 LEDGER_PATH = PROJECT_ROOT / "docs" / "experiments.tsv"
+# --dry-run도 남긴다(외부 검토 3.4) — 원장에 안 남는 실행은 "결과를 보고 안 적은 시도"가 된다.
+# 원장과 파일을 나눈 이유: 원장의 행 번호(E0001…)가 판정한 실험의 개수라는 의미를 지키려고.
+DRYRUN_LOG_PATH = PROJECT_ROOT / "docs" / "experiments_dryrun.tsv"
 
-# 홀드아웃: 최근 90일은 탐색에 쓰지 않는다. 한 번 보면 되돌릴 수 없으므로 기간을 코드에 박아
-# 두고, 여는 조건도 코드가 강제한다(사람 기억에 맡기면 반드시 새어 나간다).
-HOLDOUT_DAYS = 90
+# 홀드아웃 = 이 시각(UTC) **이후**의 데이터. 탐색·비교·파라미터 선택에 쓰지 않는다.
+# 2026-10-03 재정의(게이트 v3, 외부 검토 4.2): 예전 홀드아웃(캐시의 마지막 90일, 2026-06-24~)은
+# 08-29 종목 스크리닝과 09-07/09 필터 선택이 이미 본 기간이라 **탐색 데이터로 재분류**했다.
+# 새 홀드아웃은 아직 오지 않은 미래다 — 이 날짜 이후 데이터가 쌓여야 열 수 있다. 날짜를 코드에
+# 박아 두는 이유: "최근 N일"은 캐시를 새로 받을 때마다 경계가 움직여 이미 본 기간이 섞인다.
+HOLDOUT_START = pd.Timestamp("2026-10-04 00:00")
 
 # 사전 등록된 탐색 공간. **여기 없는 값은 바꿀 수 없다.**
 # Karpathy의 autoresearch에서 에이전트가 train.py만 건드릴 수 있는 것과 같은 제약이다 —
@@ -135,6 +143,25 @@ def _defaults() -> dict:
     }
 
 
+# 선언된 탐색 범위(BACKTEST_PROTOCOL.md 표와 같다). (최소, 최대, 범위 밖에서 따로 허용하는 값).
+# 예전엔 이름·자료형만 검사해서 adx_threshold=999도 통과했다(외부 검토 3.4).
+RANGES = {
+    "stop_loss_pct": (0.010, 0.030, ()),
+    "take_profit_rr": (1.5, 3.0, ()),
+    "adx_threshold": (20, 40, ()),
+    "sma_period": (5, 30, ()),
+    "regime_sma_period": (200, 700, (0,)),
+    "min_atr_to_stop_ratio": (0.0, 1.2, ()),
+    "max_concurrent_positions": (2, 12, ()),
+    "breakeven_at_r": (0.0, 2.0, ()),
+    "max_hold_bars": (0, 168, ()),
+    "partial_at_r": (0.0, 1.5, ()),
+    "partial_fraction": (0.25, 0.75, ()),
+    "breakeven_after_partial": (0, 1, ()),
+    "htf_hours": (2, 12, (0,)),
+}
+
+
 def _parse_overrides(pairs: list[str]) -> dict:
     out = {}
     for pair in pairs:
@@ -147,7 +174,15 @@ def _parse_overrides(pairs: list[str]) -> dict:
                 f"탐색 공간에 없는 파라미터: {key!r}\n"
                 f"허용: {', '.join(sorted(SEARCHABLE))}\n"
                 "새 손잡이를 열려면 docs/BACKTEST_PROTOCOL.md를 먼저 고치고 그 커밋을 남길 것.")
-        out[key] = SEARCHABLE[key](raw)
+        value = SEARCHABLE[key](raw)
+        if key in RANGES:
+            lo, hi, extra = RANGES[key]
+            if not (lo <= value <= hi or value in extra):
+                raise SystemExit(
+                    f"선언된 탐색 범위 밖: {key}={value} (허용 {lo}~{hi}"
+                    + (f" 또는 {', '.join(map(str, extra))}" if extra else "") + ")\n"
+                    "범위를 넓히려면 docs/BACKTEST_PROTOCOL.md를 먼저 고치고 그 커밋을 남길 것.")
+        out[key] = value
     return out
 
 
@@ -179,22 +214,38 @@ def adoptable_passes(rows: list[dict]) -> list[dict]:
             and row.get("run_id") not in dropped]
 
 
-def read_ledger() -> list[dict]:
-    if not LEDGER_PATH.exists():
+def params_key(params: dict) -> str:
+    """원장의 `params` 칸과 같은 직렬화 — 두 설정이 같은지 문자열로 비교한다."""
+    return json.dumps(params, sort_keys=True, separators=(",", ":"))
+
+
+def holdout_unlocked_for(rows: list[dict], params: dict) -> bool:
+    """이 설정으로 홀드아웃을 열 수 있는가 — **바로 이 설정**이 채택 가능한 PASS여야 한다.
+
+    외부 검토 3.4(2026-10-03): 예전엔 어떤 설정이든 PASS가 한 행만 있으면 잠금이 풀렸고, 그 상태로
+    아무 설정이나 홀드아웃에 돌릴 수 있었다 — 홀드아웃이 후보를 **고르는** 곳이 될 수 있었다."""
+    key = params_key(params)
+    return any(row.get("params", "").strip() == key for row in adoptable_passes(rows))
+
+
+def read_ledger(path: Path | None = None) -> list[dict]:
+    path = path or LEDGER_PATH
+    if not path.exists():
         return []
-    lines = LEDGER_PATH.read_text(encoding="utf-8").splitlines()
+    lines = path.read_text(encoding="utf-8").splitlines()
     if len(lines) < 2:
         return []
     header = lines[0].split("\t")
     return [dict(zip(header, line.split("\t"))) for line in lines[1:] if line.strip()]
 
 
-def append_ledger(row: dict) -> None:
+def append_ledger(row: dict, path: Path | None = None) -> None:
     """원장은 append-only다. 기존 행을 고치거나 지우지 않는다 — 실패한 시도의 개수가
     남아야 '몇 번 만에 나온 결론인지'를 나중에 알 수 있다."""
-    LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
-    new_file = not LEDGER_PATH.exists()
-    with LEDGER_PATH.open("a", encoding="utf-8", newline="") as fh:
+    path = path or LEDGER_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    new_file = not path.exists()
+    with path.open("a", encoding="utf-8", newline="") as fh:
         if new_file:
             fh.write("\t".join(LEDGER_COLUMNS) + "\n")
         fh.write("\t".join(str(row.get(c, "")) for c in LEDGER_COLUMNS) + "\n")
@@ -208,23 +259,35 @@ def _fmt(value, digits: int = 3) -> str:
     return str(value)
 
 
+def _data_hash(df: pd.DataFrame) -> str:
+    """캔들 내용의 짧은 해시 — 같은 길이·같은 기간이라도 값이 정정되면 캐시가 바뀌어야 한다."""
+    cols = [c for c in ("timestamp", "open", "high", "low", "close") if c in df.columns]
+    return hashlib.sha1(pd.util.hash_pandas_object(df[cols], index=False).values.tobytes()).hexdigest()[:12]
+
+
 def _signal_lookup(symbol: str, df: pd.DataFrame, params: dict, cache_dir: Path | None) -> dict:
     """봉 위치 -> 원신호. 저변동/레짐 게이트 **전**의 detect_signal 결과만 캐시한다.
 
     게이트 판정 자체는 항상 `gated_signals`(= 실거래와 같은 함수)가 하므로 조건이 두 군데로
     갈라지지 않는다. 캐시하는 건 무거운 지표 계산뿐이고, 그래서 손절폭이나 저변동 하한을
     바꿔가며 돌려도 재계산이 필요 없다(그 둘은 detect_signal에 안 들어간다).
+
+    2026-10-03(외부 검토 3.9): 원신호는 **레짐 설정과 무관하게** 최소 워밍업부터 만든다 — 예전엔
+    시작 위치가 레짐 SMA 길이에 따라 달랐는데 키에는 그게 없어서, SMA400으로 만든 캐시를 SMA200
+    실험이 재사용하면 200~399봉 신호가 빠졌다. 키에는 데이터 해시·전략 코드 버전·입력 길이도 넣는다.
     """
     key = (f"{symbol.replace('/', '_').replace(':', '-')}"
            f"__adx{params['adx_threshold']}__sma{params['sma_period']}"
            f"__dir{params['direction_filter']}"
-           f"__n{len(df)}__{df['timestamp'].iloc[0]:%Y%m%d%H}-{df['timestamp'].iloc[-1]:%Y%m%d%H}")
+           f"__rev{STRATEGY_LOGIC_REVISION}__lb{SIGNAL_LOOKBACK_BARS}"
+           f"__n{len(df)}__{df['timestamp'].iloc[0]:%Y%m%d%H}-{df['timestamp'].iloc[-1]:%Y%m%d%H}"
+           f"__{_data_hash(df)}")
     path = (cache_dir / "signals" / f"{key}.json") if cache_dir else None
     if path is not None and path.exists():
         return {int(k): v for k, v in json.loads(path.read_text()).items()}
 
     lookup = {}
-    for i in range(entry_start_bar(len(df), params["regime_sma_period"]), len(df)):
+    for i in range(min(MIN_WARMUP_BARS, len(df)), len(df)):
         window = df.iloc[max(0, i - SIGNAL_LOOKBACK_BARS + 1):i + 1]
         signal = detect_signal(window, adx_threshold=params["adx_threshold"],
                                sma_period=params["sma_period"], require_rsi_confirm=True,
@@ -337,12 +400,13 @@ def main() -> int:
     parser.add_argument("--set", dest="overrides", nargs="*", default=[],
                         help="파라미터 덮어쓰기 (예: stop_loss_pct=0.025)")
     parser.add_argument("--window", choices=["search", "holdout", "full"], default="search",
-                        help="search=홀드아웃 제외 구간(기본), holdout=봉인된 최근 구간")
+                        help="search=HOLDOUT_START 이전(기본), holdout=그 이후(봉인), full=전부(봉인과 같은 잠금)")
     parser.add_argument("--confirm-holdout", action="store_true",
                         help="홀드아웃을 여는 명시적 확인. 되돌릴 수 없다")
     parser.add_argument("--days", type=int, default=365)
     parser.add_argument("--seeds", type=int, default=20)
-    parser.add_argument("--breaker-reset", choices=["daily", "never", "off"], default="daily")
+    parser.add_argument("--breaker-reset", choices=["cooldown", "daily", "never", "off"], default="cooldown",
+                        help="cooldown=실거래와 같은 규칙(기본, 게이트 v3)")
     parser.add_argument("--cache-dir", type=Path, default=PROJECT_ROOT / ".ohlcv_cache")
     parser.add_argument("--note", default="")
     parser.add_argument("--ledger", action="store_true", help="원장만 출력하고 끝낸다")
@@ -366,17 +430,18 @@ def main() -> int:
         print("거부: 부분 익절과 손익분기 이동은 엔진이 동시에 지원하지 않는다. 하나만 켤 것.")
         return 2
 
-    if args.window == "holdout":
+    # full도 홀드아웃을 포함하므로 같은 잠금을 건다(외부 검토 3.4 — 예전엔 확인 없이 열렸다).
+    if args.window in ("holdout", "full"):
         if not args.confirm_holdout:
-            print("거부: 홀드아웃은 --confirm-holdout 없이 열 수 없다.")
+            print(f"거부: '{args.window}' 창은 홀드아웃을 포함한다 — --confirm-holdout 없이 열 수 없다.")
             print("한 번 보면 그 구간은 더 이상 '안 본 데이터'가 아니다 — 프로토콜 참고.")
             return 2
         rows = read_ledger()
-        if not adoptable_passes(rows):
-            passed = [r["run_id"] for r in rows if r.get("verdict") == "PASS"]
-            print("거부: 탐색 구간에서 PASS했고 기각되지 않은 설정이 원장에 없다.")
+        if not holdout_unlocked_for(rows, params):
+            passed = [r["run_id"] for r in adoptable_passes(rows)]
+            print("거부: **이 설정 그대로** 탐색 구간에서 PASS했고 기각되지 않은 행이 원장에 없다.")
             if passed:
-                print(f"       PASS는 있으나 전부 기각됐다: {', '.join(passed)}")
+                print(f"       채택 가능한 PASS는 있으나 설정이 다르다: {', '.join(passed)}")
             print("홀드아웃은 후보를 고르는 곳이 아니라 이미 고른 후보를 **확인**하는 곳이다.")
             return 2
 
@@ -393,8 +458,7 @@ def main() -> int:
         else:
             print(f"제외 {symbol}: {len(df)}봉 < {MIN_BARS}")
 
-    last = max(df["timestamp"].iloc[-1] for df in raw.values())
-    cutoff = last - timedelta(days=HOLDOUT_DAYS)
+    cutoff = HOLDOUT_START
     if args.window == "search":
         df_by_symbol = {s: slice_window(df, end=cutoff) for s, df in raw.items()}
     elif args.window == "holdout":
@@ -402,6 +466,10 @@ def main() -> int:
     else:
         df_by_symbol = raw
     df_by_symbol = {s: df for s, df in df_by_symbol.items() if len(df) >= MIN_BARS}
+    if not df_by_symbol:
+        print(f"'{args.window}' 창에 {MIN_BARS}봉 이상인 종목이 없다 — 홀드아웃은 {cutoff:%Y-%m-%d} 이후"
+              " 데이터가 쌓여야 열 수 있다(캐시를 새로 받을 것).")
+        return 2
 
     print(f"\n창: {args.window} (홀드아웃 경계 {cutoff:%Y-%m-%d})")
     print(f"종목 {len(df_by_symbol)}개 · {TIMEFRAME} · seed {args.seeds}개 · "
@@ -455,7 +523,7 @@ def main() -> int:
         "days": args.days,
         "seeds": args.seeds,
         "breaker_reset": args.breaker_reset,
-        "params": json.dumps(params, sort_keys=True, separators=(",", ":")),
+        "params": params_key(params),
         "trades": base["trades_median"],
         "total_r_median": round(base["total_r_median"], 1),
         "total_r_p5": round(base["total_r_p5"], 1),
@@ -480,7 +548,8 @@ def main() -> int:
           + " / ".join(f"{v:+.1f}" for v in info["splits"]))
 
     if args.dry_run:
-        print("\n--dry-run: 원장에 남기지 않았다.")
+        append_ledger({**row, "run_id": f"D{len(read_ledger(DRYRUN_LOG_PATH)) + 1:04d}"}, DRYRUN_LOG_PATH)
+        print(f"\n--dry-run: 원장에는 안 남기고 {DRYRUN_LOG_PATH.relative_to(PROJECT_ROOT)}에 남겼다.")
         return 0
 
     append_ledger(row)

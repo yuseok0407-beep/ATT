@@ -69,10 +69,34 @@ def _check_exit(bar: pd.Series, position: dict, use_breakeven: bool, breakeven_a
     target_hit = (high >= target_price) if side == "long" else (low <= target_price)
 
     if stop_hit:
-        return ("breakeven_stop" if position["breakeven_moved"] else "stop_loss"), stop_price
+        return ("breakeven_stop" if position["breakeven_moved"] else "stop_loss"),             stop_fill_price(bar, side, stop_price)
     if target_hit:
         return "take_profit", target_price
     return None, None
+
+
+def stop_fill_price(bar: pd.Series, side: str, stop_price: float) -> float:
+    """손절이 실제로 체결될 수 있는 첫 가격(2026-10-03, 외부 검토 3.6).
+
+    시가가 이미 손절가를 넘어서 열렸으면(갭) 손절 주문은 손절가가 아니라 **시가 근처**에서
+    체결된다 — 예전엔 롱 손절 98인데 다음 봉 시가 95·저가 94여도 98에 체결시켰다. 시가가 없는
+    데이터(테스트용)는 손절가 그대로."""
+    open_price = bar.get("open") if hasattr(bar, "get") else None
+    if open_price is None or pd.isna(open_price):
+        return stop_price
+    open_price = float(open_price)
+    if side == "long":
+        return min(stop_price, open_price)
+    return max(stop_price, open_price)
+
+
+def end_of_data_exit(df: pd.DataFrame) -> tuple[int, float]:
+    """구간이 끝났는데 열려 있는 포지션을 닫을 (봉 위치, 가격) — 마지막 봉 종가(외부 검토 3.7).
+
+    예전엔 이름만 남기고 성과에서 뺐다. 그 포지션이 이익이든 손실이든 빼면 결과가 그쪽으로
+    치우친다. 시장가 청산으로 계산한다(테이커 수수료·스트레스 슬리피지 포함)."""
+    last = len(df) - 1
+    return last, float(df["close"].iloc[last])
 
 
 def exit_pnl_r(side: str, entry_price: float, exit_price: float, risk: float, reason: str, *,
@@ -421,14 +445,17 @@ def run_backtest(
                         take_profit_order_type=take_profit_order_type,
                         maker_fee_pct_per_side=maker_fee_pct_per_side)
 
-            if reason is not None:
-                trades.append({
-                    "side": position["side"], "entry_index": position["entry_index"], "exit_index": i,
-                    "entry_price": position["entry_price"], "exit_price": exit_price, "reason": reason,
-                    "pnl_r": pnl_r, "hold_bars": i - position["entry_index"],
-                })
-                position = None
-            continue
+            if reason is None:
+                continue
+            trades.append({
+                "side": position["side"], "entry_index": position["entry_index"], "exit_index": i,
+                "entry_price": position["entry_price"], "exit_price": exit_price, "reason": reason,
+                "pnl_r": pnl_r, "hold_bars": i - position["entry_index"],
+            })
+            position = None
+            # 청산한 봉의 종가 신호로 **바로 재진입할 수 있다**(2026-10-03, 외부 검토 3.8) — 실거래는
+            # 봉 중간에 청산되고 그 봉이 마감되면 신호를 판정하며, 포트폴리오 시뮬레이션도 그렇게
+            # 한다. 예전엔 여기서 continue해서 단일 종목 결과만 그 진입을 버렸다.
 
         signal = signals.get(i)
         if signal is None:
@@ -478,4 +505,17 @@ def run_backtest(
                 "partial_taken": False, "partial_target_price": partial_target_price, "banked_r": 0.0,
             })
 
+    if position is not None and not use_partial_tp and len(df):
+        i, exit_price = end_of_data_exit(df)
+        risk = abs(position["signal_price"] - position["original_stop_price"])
+        trades.append({
+            "side": position["side"], "entry_index": position["entry_index"], "exit_index": i,
+            "entry_price": position["entry_price"], "exit_price": exit_price, "reason": "end_of_data",
+            "pnl_r": exit_pnl_r(
+                position["side"], position["entry_price"], exit_price, risk, "end_of_data",
+                fee_pct_per_side=fee_pct_per_side, slippage_r_per_side=slippage_r_per_side,
+                take_profit_order_type=take_profit_order_type,
+                maker_fee_pct_per_side=maker_fee_pct_per_side),
+            "hold_bars": i - position["entry_index"],
+        })
     return trades

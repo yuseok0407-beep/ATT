@@ -18,7 +18,6 @@
 import argparse
 import statistics as st
 import sys
-from datetime import timedelta
 from pathlib import Path
 
 for _stream in (sys.stdout, sys.stderr):
@@ -51,7 +50,7 @@ def _load_search_window(cache_dir: Path, days: int) -> dict:
         df = load_cached_ohlcv(client, symbol, timeframe=rx.TIMEFRAME, days=days, cache_dir=cache_dir)
         if len(df) >= rx.MIN_BARS:
             raw[symbol] = df
-    cutoff = max(df["timestamp"].iloc[-1] for df in raw.values()) - timedelta(days=rx.HOLDOUT_DAYS)
+    cutoff = rx.HOLDOUT_START   # 탐색 구간 = 홀드아웃 시작 전 전부(게이트 v3)
     window = {s: slice_window(df, end=cutoff) for s, df in raw.items()}
     return {s: df for s, df in window.items() if len(df) >= rx.MIN_BARS}
 
@@ -67,7 +66,8 @@ def _signals(df_by_symbol: dict, params: dict, cache_dir: Path) -> dict:
 
         out[symbol] = gated_signals(
             df, stop_loss_pct=params["stop_loss_pct"], regime_sma_period=params["regime_sma_period"],
-            min_atr_to_stop_ratio=params["min_atr_to_stop_ratio"], signal_fn=signal_fn)
+            min_atr_to_stop_ratio=params["min_atr_to_stop_ratio"], htf_hours=params["htf_hours"],
+            signal_fn=signal_fn)
     return out
 
 
@@ -102,7 +102,7 @@ def main() -> int:
     parser.add_argument("--set", dest="overrides", nargs="*", default=[])
     parser.add_argument("--seeds", type=int, default=20)
     parser.add_argument("--days", type=int, default=365)
-    parser.add_argument("--breaker-reset", choices=["daily", "never", "off"], default="daily")
+    parser.add_argument("--breaker-reset", choices=["cooldown", "daily", "never", "off"], default="cooldown")
     parser.add_argument("--cache-dir", type=Path, default=PROJECT_ROOT / ".ohlcv_cache")
     args = parser.parse_args()
 

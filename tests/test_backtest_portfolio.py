@@ -15,6 +15,12 @@ NO_GATES = dict(regime_sma_period=0, min_atr_to_stop_ratio=0.0, fee_pct_per_side
                 adx_threshold=1, sma_period=10, stop_loss_pct=0.01, take_profit_rr=2.0)
 
 
+def _closed(result):
+    """구간 안에서 청산된 거래만. 2026-10-03부터 구간 끝에 열려 있던 포지션도 마지막 종가로 닫혀
+    `end_of_data` 거래로 들어간다(외부 검토 3.7) — 청산 규칙을 보는 테스트는 그것을 뺀다."""
+    return [t for t in result["trades"] if t["reason"] != "end_of_data"]
+
+
 def _flat(n, price=100.0):
     return pd.DataFrame({"high": np.full(n, price + 0.1), "low": np.full(n, price - 0.1),
                           "close": np.full(n, price)})
@@ -71,7 +77,7 @@ def test_freed_slot_is_reusable_in_the_same_bar():
         {"A": a, "B": b}, **NO_GATES, max_concurrent_positions=1,
         signals_by_symbol={"A": {40: "LONG"}, "B": {45: "LONG"}})
 
-    assert [t["symbol"] for t in result["trades"]] == ["A"]
+    assert [t["symbol"] for t in _closed(result)] == ["A"]
     # A가 45봉에서 비운 자리를 B가 같은 봉에 받았다.
     assert result["still_open"] == ["B"]
     assert result["blocked"]["max_positions"] == 0
@@ -127,7 +133,7 @@ def test_a_win_resets_the_consecutive_loss_counter():
     result = simulate_portfolio(dfs, **NO_GATES, max_concurrent_positions=5,
                                 max_consecutive_losses=1, signals_by_symbol=signals)
 
-    assert sorted(t["reason"] for t in result["trades"]) == ["stop_loss", "take_profit"]
+    assert sorted(t["reason"] for t in _closed(result)) == ["stop_loss", "take_profit"]
     assert result["still_open"] == ["C"]
     assert result["blocked"]["consecutive_losses"] == 0
 
@@ -214,7 +220,7 @@ def test_timeline_aligns_symbols_by_timestamp_not_bar_index():
 
     # 시각으로 맞추면 A는 50봉에 이미 청산됐으므로 B가 100번째 시각에 자리를 받는다.
     # 봉 인덱스로 맞췄다면 둘의 40봉이 같은 시점이 되어 A가 자리를 먼저 가져가고 B는 막힌다.
-    assert [t["symbol"] for t in result["trades"]] == ["A"]
+    assert [t["symbol"] for t in _closed(result)] == ["A"]
     assert result["still_open"] == ["B"]
     assert result["blocked"]["max_positions"] == 0
 
@@ -235,7 +241,7 @@ def test_blocked_entry_changes_the_symbols_later_trades():
                                  signals_by_symbol={"B": {40: "LONG"}, "A": signals})
 
     assert len(solo["trades"]) == 2
-    assert shared["trades"] == []            # A의 두 진입이 전부 막혔다
+    assert _closed(shared) == []            # A의 두 진입이 전부 막혔다
     assert shared["blocked"]["max_positions"] == 2
 
 
@@ -457,3 +463,40 @@ def test_partial_tp_full_stop_before_partial_is_a_normal_loss():
                                  **NO_GATES, **_PARTIAL)
     assert result["trades"][0]["reason"] == "stop_loss"
     assert result["trades"][0]["pnl_r"] == pytest.approx(-1.0)
+
+
+def test_positions_open_at_the_end_are_closed_at_the_last_close():
+    """외부 검토 3.7(2026-10-03): 구간 끝에 열려 있는 포지션을 빼면 결과가 그 포지션의 손익
+    방향으로 치우친다. 마지막 종가로 시장가 청산해 성과에 넣는다."""
+    df, signals = _with_signal_at(60, bars=[40])
+    df.loc[59, "close"] = 101.0   # 손절·익절에는 안 닿았고 마지막 종가는 진입가보다 높다
+
+    result = simulate_portfolio({"A": df}, **NO_GATES, signals_by_symbol={"A": signals})
+
+    trade, = result["trades"]
+    assert trade["reason"] == "end_of_data"
+    assert trade["exit_index"] == 59
+    assert trade["pnl_r"] > 0
+    assert result["still_open"] == ["A"]
+
+
+def test_cooldown_breaker_follows_the_live_rule_not_midnight():
+    """외부 검토 3.2: 기본 브레이커는 실거래와 같은 규칙이다 — 날짜가 바뀌어도 풀리지 않고,
+    마지막 손실 뒤 쿨다운 시간이 지나야 풀린다."""
+    dfs, signals = _loss_streak_setup()
+
+    long_cooldown = simulate_portfolio(dfs, **NO_GATES, max_concurrent_positions=5,
+                                       max_consecutive_losses=2, cooldown_hours=1000,
+                                       max_daily_loss_r=0, signals_by_symbol=signals)
+    daily = simulate_portfolio(dfs, **NO_GATES, max_concurrent_positions=5,
+                               max_consecutive_losses=2, breaker_reset="daily",
+                               max_daily_loss_r=0, signals_by_symbol=signals)
+
+    # 마지막 손실(46봉) 뒤 14시간에 NEXT_DAY 신호(60봉)가 온다.
+    short_cooldown = simulate_portfolio(dfs, **NO_GATES, max_concurrent_positions=5,
+                                        max_consecutive_losses=2, cooldown_hours=10,
+                                        max_daily_loss_r=0, signals_by_symbol=signals)
+
+    assert long_cooldown["still_open"] == []          # 다음 날 후보도 막혔다
+    assert short_cooldown["still_open"] == ["NEXT_DAY"]   # 10시간이 지나 풀렸다
+    assert daily["still_open"] == ["NEXT_DAY"]

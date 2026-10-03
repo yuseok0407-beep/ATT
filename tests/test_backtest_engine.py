@@ -562,3 +562,36 @@ def test_gated_signals_defaults_match_run_backtest_defaults():
                 "min_atr_to_stop_ratio", "sma_period", "rsi_period", "rsi_threshold",
                 "require_rsi_confirm", "direction_filter", "htf_hours"):
         assert a[key] == b[key], key
+
+
+# ---------------------------------------------- 체결 모델 교정 (2026-10-03, 외부 검토 3.6~3.8)
+
+from unittest.mock import patch  # noqa: E402
+
+from src.backtest import engine as engine_module  # noqa: E402
+
+
+def _bars(rows):
+    """open/high/low/close 행 목록 -> df. 진입 신호는 테스트가 gated_signals를 덮어써서 준다."""
+    return pd.DataFrame(rows, columns=["open", "high", "low", "close"])
+
+
+def test_a_gap_through_the_stop_fills_at_the_open_not_the_stop():
+    """롱 손절 99인데 다음 봉이 97에 열리면 99가 아니라 97 근처에서 체결된다."""
+    rows = [(100, 100.2, 99.8, 100)] * 40 + [(97, 97.5, 96.5, 97)] + [(97, 97.2, 96.8, 97)] * 5
+    with patch.object(engine_module, "gated_signals", return_value={39: "LONG"}):
+        trades = run_exit_only(_bars(rows), stop_loss_pct=0.01, take_profit_rr=2.0)
+
+    assert trades[0]["reason"] == "stop_loss"
+    assert trades[0]["exit_price"] == pytest.approx(97.0)
+    assert trades[0]["pnl_r"] == pytest.approx(-3.0)   # 손절폭 1 대비 3 손실
+
+
+def test_single_symbol_backtest_can_reenter_on_the_bar_it_exited():
+    """실거래와 포트폴리오 시뮬레이션은 청산한 봉의 종가 신호로 다시 들어간다 — 단일 종목도 같아야 한다."""
+    rows = [(100, 100.2, 99.8, 100)] * 40 + [(100, 100.2, 98.5, 99.0)] + [(99, 99.1, 98.9, 99)] * 5
+    with patch.object(engine_module, "gated_signals", return_value={39: "LONG", 40: "LONG"}):
+        trades = run_exit_only(_bars(rows), stop_loss_pct=0.01, take_profit_rr=2.0)
+
+    assert [t["entry_index"] for t in trades] == [39, 40]
+    assert trades[1]["reason"] == "end_of_data"

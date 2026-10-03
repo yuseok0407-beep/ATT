@@ -30,7 +30,9 @@ from .report import portfolio_stats
 #   v2 (2026-09-28): 판정 기준값은 그대로, **비용 모델**이 실측으로 바뀜 — 테이커 0.05%(실계좌
 #       실측), 익절은 지정가(메이커 0.02%, 청산 슬리피지 없음). 기준값이 아니어도 같은 설정의
 #       총R이 달라지므로 버전을 올린다(BACKTEST_PROTOCOL.md "게이트 버전 이력").
-GATE_VERSION = 2
+#   v3 (2026-10-03): 판정 기준값은 그대로, **엔진·심판 교정**(외부 검토) — 4분할 공통 날짜, 브레이커
+#       실거래 규칙(cooldown), 갭 손절 시가 체결, 구간 끝 미청산 포함, 홀드아웃 재정의(고정 날짜).
+GATE_VERSION = 3
 
 N_SPLITS = 4
 
@@ -52,9 +54,30 @@ MIN_STRESS_TOTAL_R = 0.0            # 슬리피지 0.05R에서도 총R 양수
 
 def split_bounds(df_by_symbol: dict[str, pd.DataFrame], i: int,
                  n_splits: int = N_SPLITS) -> dict[str, tuple[int, int]]:
-    """종목별로 봉 수를 n등분한 i번째 구간의 (시작, 끝) 봉 위치."""
-    return {symbol: (round(len(df) * i / n_splits), round(len(df) * (i + 1) / n_splits))
-            for symbol, df in df_by_symbol.items()}
+    """i번째 시간 구간의 종목별 (시작, 끝) 봉 위치.
+
+    **모든 종목이 같은 달력 경계를 쓴다**(2026-10-03, 외부 검토 3.5, 게이트 v3). 전체 기간
+    (가장 이른 첫 봉 ~ 가장 늦은 마지막 봉)을 n등분한 시각으로 자르고, 그 시각을 종목마다 봉 위치로
+    바꾼다. v2까지는 종목마다 **자기 봉 수**를 n등분해서, 상장이 늦은 종목(CRCL·TSLA·SOXL)의
+    "구간 1"이 다른 종목의 구간 1과 다른 달이었다 — "구간 3이 음수"가 어느 시기 얘기인지 말할 수
+    없었다. 상장 전 구간에는 그 종목의 봉이 없으므로 (0, 0) 같은 빈 범위가 나온다.
+
+    `timestamp` 열이 없는 df(테스트용)는 옛 방식(봉 수 n등분)으로 나눈다."""
+    if not all("timestamp" in df.columns and len(df) for df in df_by_symbol.values()):
+        return {symbol: (round(len(df) * i / n_splits), round(len(df) * (i + 1) / n_splits))
+                for symbol, df in df_by_symbol.items()}
+    start = min(df["timestamp"].iloc[0] for df in df_by_symbol.values())
+    end = max(df["timestamp"].iloc[-1] for df in df_by_symbol.values())
+    lo_edge = start + (end - start) * i / n_splits
+    hi_edge = start + (end - start) * (i + 1) / n_splits
+    out = {}
+    for symbol, df in df_by_symbol.items():
+        stamps = df["timestamp"]
+        lo = int(stamps.searchsorted(lo_edge, side="left"))
+        # 마지막 구간은 마지막 봉까지 포함한다(경계 시각 = 마지막 봉 시각).
+        hi = len(df) if i == n_splits - 1 else int(stamps.searchsorted(hi_edge, side="left"))
+        out[symbol] = (lo, hi)
+    return out
 
 
 def run_metrics(result: dict, df_by_symbol: dict[str, pd.DataFrame],

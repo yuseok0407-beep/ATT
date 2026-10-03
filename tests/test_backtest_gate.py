@@ -168,9 +168,44 @@ def test_gate_thresholds_match_the_protocol_document():
     assert f"{gate.STRESS_SLIPPAGE_R_PER_SIDE}" in text
 
 
-def test_protocol_declares_the_same_holdout_length_as_the_runner():
+def test_protocol_declares_the_same_holdout_start_as_the_runner():
+    """게이트 v3(2026-10-03): 홀드아웃은 "최근 N일"이 아니라 고정 시작 시각 이후다."""
     runner = _load_runner()
-    assert f"최근 {runner.HOLDOUT_DAYS}일" in PROTOCOL_PATH.read_text(encoding="utf-8")
+    assert f"{runner.HOLDOUT_START:%Y-%m-%d}" in PROTOCOL_PATH.read_text(encoding="utf-8")
+
+
+def test_declared_ranges_cover_every_numeric_parameter():
+    runner = _load_runner()
+    numeric = {k for k, t in runner.SEARCHABLE.items() if t in (int, float)}
+    assert numeric == set(runner.RANGES)
+
+
+@pytest.mark.parametrize("pair", ["adx_threshold=999", "partial_fraction=1.5", "htf_hours=1",
+                                  "regime_sma_period=100"])
+def test_runner_rejects_values_outside_the_declared_range(pair):
+    """외부 검토 3.4: 예전엔 이름·자료형만 봐서 adx_threshold=999도 통과했다."""
+    runner = _load_runner()
+    with pytest.raises(SystemExit) as excinfo:
+        runner._parse_overrides([pair])
+    assert "탐색 범위 밖" in str(excinfo.value)
+
+
+def test_runner_accepts_the_declared_off_values():
+    runner = _load_runner()
+    assert runner._parse_overrides(["htf_hours=0", "regime_sma_period=0"]) == {
+        "htf_hours": 0, "regime_sma_period": 0}
+
+
+def test_holdout_unlocks_only_for_the_exact_passing_params(tmp_path):
+    """외부 검토 3.4: PASS가 하나 있다고 아무 설정이나 홀드아웃에 돌릴 수 있으면 안 된다."""
+    runner = _ledger(_load_runner(), tmp_path, [])
+    passing = runner._defaults()
+    runner.append_ledger({"run_id": "E0001", "verdict": "PASS", "window": "search",
+                          "params": runner.params_key(passing), "gate_version": gate.GATE_VERSION})
+    rows = runner.read_ledger()
+
+    assert runner.holdout_unlocked_for(rows, passing)
+    assert not runner.holdout_unlocked_for(rows, {**passing, "adx_threshold": 33.0})
 
 
 def test_searchable_parameters_are_all_listed_in_the_protocol():
@@ -322,3 +357,20 @@ def test_protocol_documents_the_neighbour_requirement():
     text = PROTOCOL_PATH.read_text(encoding="utf-8")
     assert "이웃값" in text
     assert "--reject" in text
+
+
+def test_split_bounds_use_one_calendar_for_every_symbol():
+    """외부 검토 3.5(2026-10-03, 게이트 v3): 상장이 늦은 종목도 같은 날짜 경계로 나뉜다.
+    OLD는 1월 1~16일, NEW는 1월 9~16일 — 첫 구간(1/1~1/4)에 NEW는 봉이 하나도 없어야 한다."""
+    old = pd.DataFrame({"timestamp": pd.date_range("2026-01-01", periods=16, freq="D")})
+    new = pd.DataFrame({"timestamp": pd.date_range("2026-01-09", periods=8, freq="D")})
+
+    first = gate.split_bounds({"OLD": old, "NEW": new}, 0)
+    last = gate.split_bounds({"OLD": old, "NEW": new}, 3)
+
+    assert first["NEW"] == (0, 0)
+    assert old["timestamp"].iloc[first["OLD"][1] - 1] < pd.Timestamp("2026-01-05")
+    assert last["OLD"][1] == 16 and last["NEW"][1] == 8
+    # 네 구간이 겹치지도 빠지지도 않는다
+    spans = [gate.split_bounds({"OLD": old, "NEW": new}, i)["OLD"] for i in range(4)]
+    assert [s[0] for s in spans[1:]] == [s[1] for s in spans[:-1]] and spans[0][0] == 0

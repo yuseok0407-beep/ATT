@@ -17,14 +17,38 @@ import math
 
 
 def equity_path(trades: list[dict], risk_per_trade: float) -> list[float]:
-    """자산 배수의 경로(시작 1.0). trades는 `pnl_r`과 `exit_step`(청산 순서)을 가진 dict."""
-    ordered = sorted(trades, key=lambda t: t.get("exit_step", 0))
+    """자산 배수의 경로(시작 1.0, 청산마다 한 점). trades는 `pnl_r`, `exit_step`, `entry_step`을 가진 dict.
+
+    **걸린 금액은 진입 시점의 자산으로 정한다**(2026-10-03, 외부 검토 3.7). 봇은 진입할 때 그때의
+    자산 x 리스크 비율로 수량을 정한다 — 예전 계산(`자산 x (1 + 리스크 x R)`을 청산 순서로 곱하기)은
+    동시에 열린 포지션의 크기를 **먼저 닫힌 포지션의 결과가 반영된 자산**으로 다시 정한 셈이었다
+    (위험 10%로 동시에 연 두 포지션이 둘 다 -1R이면 0.80이어야 하는데 0.81이 나왔다).
+    같은 시점에는 청산을 먼저, 진입을 나중에 처리한다(포트폴리오 시뮬레이션의 순서와 같다).
+    `entry_step`이 없는 거래 목록(옛 결과)은 옛 방식으로 계산한다.
+
+    한계: 실현 손익만 따라간다 — 보유 중 평가손익(시가평가)은 이 경로에 없다."""
+    if any("entry_step" not in t for t in trades):
+        ordered = sorted(trades, key=lambda t: t.get("exit_step", 0))
+        equity = 1.0
+        path = [equity]
+        for trade in ordered:
+            equity *= 1.0 + risk_per_trade * trade["pnl_r"]
+            equity = max(equity, 0.0)
+            path.append(equity)
+        return path
+
+    events = ([(t["exit_step"], 0, i) for i, t in enumerate(trades)]
+              + [(t["entry_step"], 1, i) for i, t in enumerate(trades)])
     equity = 1.0
     path = [equity]
-    for trade in ordered:
-        equity *= 1.0 + risk_per_trade * trade["pnl_r"]
-        # 한 거래로 자산이 0 이하가 될 수는 없다(손절이 있으므로) — 넘어가면 모델이 틀린 것.
-        equity = max(equity, 0.0)
+    stake: dict[int, float] = {}
+    for _, kind, i in sorted(events):
+        if kind == 1:
+            stake.setdefault(i, risk_per_trade * equity)
+            continue
+        # 진입한 시점과 같은 시점에 청산되는 거래(구간 끝 정리)는 지금 자산으로 건다.
+        amount = stake.pop(i, risk_per_trade * equity)
+        equity = max(equity + amount * trades[i]["pnl_r"], 0.0)
         path.append(equity)
     return path
 

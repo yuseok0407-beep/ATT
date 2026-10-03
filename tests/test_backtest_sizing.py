@@ -44,3 +44,20 @@ def test_monthly_return_is_the_compound_rate():
     trades = [_trade(1.0, i) for i in range(12)]
     stats = sizing_stats(trades, 0.01, months=12)
     assert stats["monthly_return"] == pytest.approx(0.01)
+
+
+def test_concurrent_positions_are_sized_from_equity_at_entry():
+    """외부 검토 3.7(2026-10-03): 위험 10%로 **동시에** 연 두 포지션이 둘 다 -1R이면 자산은
+    1 - 0.1 - 0.1 = 0.80이다. 청산 순서로 복리를 곱하면 0.9 x 0.9 = 0.81이 나온다(틀림)."""
+    trades = [{"pnl_r": -1.0, "entry_step": 0, "exit_step": 1},
+              {"pnl_r": -1.0, "entry_step": 0, "exit_step": 2}]
+
+    assert equity_path(trades, 0.10)[-1] == pytest.approx(0.80)
+
+
+def test_sequential_positions_still_compound():
+    """앞 거래가 닫힌 뒤 진입한 거래는 줄어든 자산으로 건다 — 복리는 그대로다."""
+    trades = [{"pnl_r": -1.0, "entry_step": 0, "exit_step": 1},
+              {"pnl_r": -1.0, "entry_step": 2, "exit_step": 3}]
+
+    assert equity_path(trades, 0.10)[-1] == pytest.approx(0.81)
